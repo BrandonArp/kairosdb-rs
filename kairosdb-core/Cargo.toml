@@ -1,0 +1,57 @@
+[package]
+name = "kairosdb-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core library for KairosDB-rs - shared data types, Cassandra integration, and utilities"
+repository.workspace = true
+documentation.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# Cassandra driver
+cdrs-tokio = { workspace = true }
+uuid = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Performance
+ahash = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+ordered-float = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Validation
+validator = { workspace = true }
+
+# Base64 encoding for binary data
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"

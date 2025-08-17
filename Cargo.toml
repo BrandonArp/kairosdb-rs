@@ -1,0 +1,84 @@
+[workspace]
+members = [
+    "kairosdb-core",
+    "kairosdb-ingest", 
+    "kairosdb-query"
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Brandon Arp <brandon.arp@inscopemetrics.io>", "Ville Koskela <ville.koskela@inscopemetrics.io>"]
+description = "KairosDB - Rust implementation of fast distributed time series database"
+repository = "https://github.com/BrandonArp/kairosdb-rs"
+documentation = "https://github.com/BrandonArp/kairosdb-rs"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["timeseries", "database", "cassandra", "monitoring"]
+categories = ["database", "network-programming", "command-line-utilities"]
+
+[workspace.metadata]
+java_version = "https://github.com/kairosdb/kairosdb"
+migration_guide = "RUST_MIGRATION_PLAN.md"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+
+# HTTP server framework
+axum = "0.7"
+tower = { version = "0.4", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression"] }
+hyper = { version = "1.0", features = ["full"] }
+
+# Cassandra driver
+cdrs-tokio = "8.1"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Serialization and configuration
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+config = "0.14"
+toml = "0.8"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+
+# Performance optimized data structures
+ahash = "0.8"
+dashmap = "5.5"
+parking_lot = "0.12"
+ordered-float = { version = "4.2", features = ["serde"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
+# Base64 encoding for binary data
+base64 = "0.22"
+
+# HTTP client for health checks and inter-service communication
+reqwest = { version = "0.11", features = ["json"] }
+url = "2.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+[profile.bench]
+debug = true
