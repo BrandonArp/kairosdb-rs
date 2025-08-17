@@ -7,6 +7,7 @@ use crate::tags::TagSet;
 use crate::time::Timestamp;
 
 /// Cassandra table names used by KairosDB
+#[derive(Debug, Clone)]
 pub struct TableNames {
     pub data_points: &'static str,
     pub row_key_index: &'static str,

@@ -312,6 +312,43 @@ impl AsRef<str> for TagValue {
     }
 }
 
+// Implement PartialEq with str types for convenient testing
+impl PartialEq<&str> for TagValue {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<str> for TagValue {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<String> for TagValue {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<&str> for TagKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<str> for TagKey {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<String> for TagKey {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

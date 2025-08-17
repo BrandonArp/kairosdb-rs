@@ -48,6 +48,12 @@ pub struct CassandraConfig {
     
     /// Password for authentication
     pub password: Option<String>,
+    
+    /// Replication factor for keyspace
+    pub replication_factor: usize,
+    
+    /// Health check query
+    pub cassandra_health_query: String,
 }
 
 /// Ingestion-specific configuration
@@ -158,6 +164,8 @@ impl Default for CassandraConfig {
             max_connections: 10,
             username: None,
             password: None,
+            replication_factor: 1,
+            cassandra_health_query: "SELECT now() FROM system.local".to_string(),
         }
     }
 }

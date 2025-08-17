@@ -127,7 +127,7 @@ impl QueryEngine {
                 .map(|t| Duration::from_secs(t as u64))
                 .unwrap_or_else(|| Duration::from_secs(self.config.cache.default_ttl_seconds));
             
-            cache.insert_with_ttl(cache_key, response.clone(), ttl).await;
+            cache.insert(cache_key, response.clone()).await;
         }
         
         // Record metrics
@@ -239,7 +239,7 @@ impl QueryEngine {
         
         while current_ms < end_ms && data_points.len() < 1000 {
             let timestamp = Timestamp::from_millis(current_ms)?;
-            let mut point = DataPoint::new_long(&series_info.metric, timestamp, value);
+            let mut point = DataPoint::new_long(series_info.metric.as_str(), timestamp, value);
             
             // Add tags from the series
             for (key, val) in &series_info.tags {

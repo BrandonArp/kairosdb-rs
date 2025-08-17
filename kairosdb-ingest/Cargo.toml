@@ -77,6 +77,16 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 tempfile = "3.8"
 
+# Library target for integration tests
+[lib]
+name = "kairosdb_ingest"
+path = "src/lib.rs"
+
+# Binary target for the main service
+[[bin]]
+name = "kairosdb-ingest"
+path = "src/main.rs"
+
 # Benchmarks disabled until implementation is complete
 # [[bench]]
 # name = "ingestion"

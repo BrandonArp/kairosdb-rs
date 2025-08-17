@@ -11,6 +11,9 @@ pub enum KairosError {
     #[error("Cassandra error: {0}")]
     Cassandra(String),
     
+    #[error("Cassandra error: {0}")]
+    CassandraError(String),
+    
     #[error("Serialization error: {0}")]
     Serialization(String),
     
@@ -86,6 +89,21 @@ impl KairosError {
         Self::Schema(message.into())
     }
     
+    /// Create a new timeout error
+    pub fn timeout<S: Into<String>>(message: S) -> Self {
+        Self::Timeout { timeout_ms: 5000 } // Default timeout
+    }
+    
+    /// Create a new rate limit error
+    pub fn rate_limit<S: Into<String>>(message: S) -> Self {
+        Self::RateLimit { message: message.into() }
+    }
+    
+    /// Create a new internal error  
+    pub fn internal<S: Into<String>>(message: S) -> Self {
+        Self::Internal(message.into())
+    }
+    
     /// Check if this is a retriable error
     pub fn is_retriable(&self) -> bool {
         matches!(
@@ -93,6 +111,7 @@ impl KairosError {
             KairosError::Connection(_) 
             | KairosError::Timeout { .. }
             | KairosError::Cassandra(_)
+            | KairosError::CassandraError(_)
             | KairosError::Io(_)
         )
     }
@@ -101,6 +120,7 @@ impl KairosError {
     pub fn category(&self) -> &'static str {
         match self {
             KairosError::Cassandra(_) => "cassandra",
+            KairosError::CassandraError(_) => "cassandra",
             KairosError::Serialization(_) => "serialization", 
             KairosError::Validation(_) => "validation",
             KairosError::Query(_) => "query",
