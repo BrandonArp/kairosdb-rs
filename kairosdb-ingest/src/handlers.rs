@@ -1,269 +1,365 @@
+//! HTTP handlers for KairosDB ingestion API
+//!
+//! This module provides HTTP handlers that are fully compatible with the Java KairosDB REST API.
+//! It implements the `/api/v1/datapoints` endpoint and health check endpoints.
+
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
+    body::Body,
+    extract::{Request, State},
+    http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
+    routing::{get, post},
+    Router,
 };
+use flate2::read::GzDecoder;
 use kairosdb_core::{
-    datapoint::{DataPoint, DataPointBatch},
-    error::KairosError,
+    datapoint::DataPointBatch,
+    error::{KairosError, KairosResult},
 };
+use prometheus::{Encoder, TextEncoder};
 use serde_json::{json, Value};
-use tracing::{info, warn, error, debug};
+use std::{
+    io::Read,
+    sync::Arc,
+    time::Instant,
+};
+use tower::ServiceBuilder;
+use tower_http::{
+    compression::CompressionLayer,
+    cors::CorsLayer,
+    limit::RequestBodyLimitLayer,
+    trace::TraceLayer,
+};
+use tracing::{debug, error, info, warn};
 
-use crate::AppState;
+use crate::{
+    ingestion::{HealthStatus, IngestionService},
+    json_parser::{ErrorResponse, IngestResponse, JsonParser},
+    AppState,
+};
 
-/// Health check endpoint
-pub async fn health_handler() -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "status": "healthy",
-        "service": "kairosdb-ingest",
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    })))
+/// Health check endpoint compatible with KairosDB format
+pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.ingestion_service.health_check().await {
+        Ok(status) => {
+            let response = match status {
+                HealthStatus::Healthy => json!({
+                    "status": "healthy",
+                    "service": "kairosdb-ingest",
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "checks": {
+                        "cassandra": "healthy",
+                        "memory": "healthy",
+                        "queue": "healthy"
+                    }
+                }),
+                HealthStatus::Degraded => json!({
+                    "status": "degraded", 
+                    "service": "kairosdb-ingest",
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "checks": {
+                        "cassandra": "healthy",
+                        "memory": "degraded",
+                        "queue": "degraded"
+                    }
+                }),
+                HealthStatus::Unhealthy => json!({
+                    "status": "unhealthy",
+                    "service": "kairosdb-ingest", 
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "checks": {
+                        "cassandra": "unhealthy",
+                        "memory": "unknown",
+                        "queue": "unknown"
+                    }
+                }),
+            };
+            
+            let status_code = match status {
+                HealthStatus::Healthy => StatusCode::OK,
+                HealthStatus::Degraded => StatusCode::OK, // Still serving traffic
+                HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            
+            (status_code, Json(response))
+        }
+        Err(e) => {
+            error!("Health check failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "service": "kairosdb-ingest",
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                    "error": e.to_string()
+                }))
+            )
+        }
+    }
 }
 
-/// Metrics endpoint (Prometheus format)
-pub async fn metrics_handler(State(state): State<AppState>) -> Result<String, StatusCode> {
-    // In a real implementation, this would return Prometheus metrics
-    // For now, return basic metrics
-    let metrics = state.ingestion_service.get_metrics().await;
+/// Metrics endpoint (Prometheus format) 
+pub async fn metrics_handler() -> impl IntoResponse {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
     
-    Ok(format!(
-        "# HELP kairosdb_ingested_datapoints_total Total number of ingested data points\n\
-         # TYPE kairosdb_ingested_datapoints_total counter\n\
-         kairosdb_ingested_datapoints_total {}\n\
-         # HELP kairosdb_ingestion_errors_total Total number of ingestion errors\n\
-         # TYPE kairosdb_ingestion_errors_total counter\n\
-         kairosdb_ingestion_errors_total {}\n\
-         # HELP kairosdb_batches_processed_total Total number of batches processed\n\
-         # TYPE kairosdb_batches_processed_total counter\n\
-         kairosdb_batches_processed_total {}\n",
-        metrics.datapoints_ingested,
-        metrics.ingestion_errors,
-        metrics.batches_processed
-    ))
+    match encoder.encode_to_string(&metric_families) {
+        Ok(metrics_string) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8")
+            );
+            (StatusCode::OK, headers, metrics_string)
+        }
+        Err(e) => {
+            error!("Failed to encode metrics: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                format!("Failed to encode metrics: {}", e)
+            )
+        }
+    }
 }
 
-/// Main data ingestion endpoint
+/// Detailed metrics endpoint (JSON format)
+pub async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let metrics = state.ingestion_service.get_metrics_snapshot();
+    (StatusCode::OK, Json(metrics))
+}
+
+/// Main data ingestion endpoint - compatible with Java KairosDB
 pub async fn ingest_handler(
     State(state): State<AppState>,
-    Json(payload): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    debug!("Received ingestion request: {:?}", payload);
+    headers: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let start_time = Instant::now();
+    debug!("Received ingestion request, size: {} bytes", body.len());
     
-    // Parse the payload into data points
-    let batch = match parse_ingestion_payload(payload) {
-        Ok(batch) => batch,
-        Err(err) => {
-            warn!("Failed to parse ingestion payload: {}", err);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Invalid payload format",
-                    "message": err.to_string()
-                }))
-            ));
+    // Handle gzipped content if present
+    let json_str = if headers.get("content-encoding")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.contains("gzip"))
+        .unwrap_or(false)
+    {
+        match decompress_gzip(&body) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                warn!("Failed to decompress gzip content: {}", e);
+                let error_response = ErrorResponse::from_error("Failed to decompress gzip content");
+                return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
+            }
+        }
+    } else {
+        body
+    };
+    
+    // Create JSON parser with configuration
+    let parser = JsonParser::new(
+        state.config.ingestion.max_batch_size,
+        state.config.ingestion.enable_validation
+    );
+    
+    // Parse JSON into data points
+    let (batch, warnings) = match parser.parse_json(&json_str) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("Failed to parse JSON payload: {}", e);
+            let error_response = ErrorResponse::from_kairos_error(&e);
+            return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
     };
     
-    // Validate the batch if validation is enabled
-    if state.config.ingestion.enable_validation {
-        if let Err(err) = batch.validate_self() {
-            warn!("Batch validation failed: {}", err);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Validation failed",
-                    "message": err.to_string()
-                }))
-            ));
-        }
-    }
+    let batch_size = batch.len();
+    debug!("Parsed {} data points", batch_size);
     
     // Submit batch for ingestion
     match state.ingestion_service.ingest_batch(batch).await {
         Ok(_) => {
-            info!("Successfully ingested batch");
-            Ok(Json(json!({
-                "status": "success",
-                "message": "Data points ingested successfully"
-            })))
+            let processing_time = start_time.elapsed().as_millis() as u64;
+            info!("Successfully ingested {} data points in {}ms", batch_size, processing_time);
+            
+            let response = IngestResponse {
+                datapoints_ingested: batch_size,
+                ingest_time: processing_time,
+                warnings,
+            };
+            
+            (StatusCode::OK, Json(response)).into_response()
         }
-        Err(err) => {
-            error!("Failed to ingest batch: {}", err);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Ingestion failed",
-                    "message": err.to_string()
-                }))
-            ))
+        Err(e) => {
+            error!("Failed to ingest batch: {}", e);
+            
+            let status_code = match &e {
+                KairosError::RateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
+                KairosError::Validation(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            
+            let error_response = ErrorResponse::from_kairos_error(&e);
+            (status_code, Json(error_response)).into_response()
         }
     }
 }
 
-/// Parse various ingestion payload formats
-fn parse_ingestion_payload(payload: Value) -> Result<DataPointBatch, KairosError> {
-    // Handle array of data points
-    if let Some(array) = payload.as_array() {
-        let mut points = Vec::new();
-        
-        for item in array {
-            let point = parse_data_point(item)?;
-            points.push(point);
+/// Handle gzipped ingestion requests
+pub async fn ingest_gzip_handler(
+    State(state): State<AppState>,
+    body: Body,
+) -> impl IntoResponse {
+    let start_time = Instant::now();
+    
+    // Read the gzipped body
+    let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            warn!("Failed to read request body: {}", e);
+            let error_response = ErrorResponse::from_error("Failed to read request body");
+            return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
-        
-        return DataPointBatch::from_points(points);
-    }
-    
-    // Handle single data point
-    if let Ok(point) = parse_data_point(&payload) {
-        return DataPointBatch::from_points(vec![point]);
-    }
-    
-    // Handle KairosDB format with metrics array
-    if let Some(metrics) = payload.get("metrics").and_then(|m| m.as_array()) {
-        let mut points = Vec::new();
-        
-        for metric in metrics {
-            let metric_points = parse_kairos_metric(metric)?;
-            points.extend(metric_points);
-        }
-        
-        return DataPointBatch::from_points(points);
-    }
-    
-    Err(KairosError::parse("Unsupported payload format"))
-}
-
-/// Parse a single data point from JSON
-fn parse_data_point(value: &Value) -> Result<DataPoint, KairosError> {
-    // Extract required fields
-    let name = value.get("name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| KairosError::parse("Missing or invalid 'name' field"))?;
-    
-    let timestamp = value.get("timestamp")
-        .and_then(|t| t.as_i64())
-        .ok_or_else(|| KairosError::parse("Missing or invalid 'timestamp' field"))?;
-    
-    let data_value = value.get("value")
-        .ok_or_else(|| KairosError::parse("Missing 'value' field"))?;
-    
-    // Parse the metric name
-    let metric = kairosdb_core::metrics::MetricName::new(name)?;
-    
-    // Parse the timestamp
-    let ts = kairosdb_core::time::Timestamp::from_millis(timestamp)?;
-    
-    // Parse the value
-    let point_value = parse_data_point_value(data_value)?;
-    
-    // Create the base data point
-    let mut point = DataPoint {
-        metric,
-        timestamp: ts,
-        value: point_value,
-        tags: kairosdb_core::tags::TagSet::new(),
-        ttl: 0,
     };
     
-    // Parse tags if present
-    if let Some(tags) = value.get("tags").and_then(|t| t.as_object()) {
-        let mut tag_map = std::collections::HashMap::new();
-        for (key, value) in tags {
-            if let Some(tag_value) = value.as_str() {
-                tag_map.insert(key.clone(), tag_value.to_string());
-            }
+    // Decompress the body
+    let json_str = match decompress_gzip_bytes(&body_bytes) {
+        Ok(decompressed) => decompressed,
+        Err(e) => {
+            warn!("Failed to decompress gzip content: {}", e);
+            let error_response = ErrorResponse::from_error("Failed to decompress gzip content");
+            return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
-        point.tags = kairosdb_core::tags::TagSet::from_map(tag_map)?;
-    }
+    };
     
-    // Parse TTL if present
-    if let Some(ttl) = value.get("ttl").and_then(|t| t.as_u64()) {
-        point.ttl = ttl as u32;
-    }
+    debug!("Decompressed {} bytes to {} bytes", body_bytes.len(), json_str.len());
     
-    Ok(point)
+    // Create JSON parser
+    let parser = JsonParser::new(
+        state.config.ingestion.max_batch_size,
+        state.config.ingestion.enable_validation
+    );
+    
+    // Parse and process the same way as regular ingest handler
+    let (batch, warnings) = match parser.parse_json(&json_str) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("Failed to parse JSON payload: {}", e);
+            let error_response = ErrorResponse::from_kairos_error(&e);
+            return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
+        }
+    };
+    
+    let batch_size = batch.len();
+    
+    match state.ingestion_service.ingest_batch(batch).await {
+        Ok(_) => {
+            let processing_time = start_time.elapsed().as_millis() as u64;
+            info!("Successfully ingested {} data points from gzipped request in {}ms", 
+                  batch_size, processing_time);
+            
+            let response = IngestResponse {
+                datapoints_ingested: batch_size,
+                ingest_time: processing_time,
+                warnings,
+            };
+            
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            error!("Failed to ingest gzipped batch: {}", e);
+            
+            let status_code = match &e {
+                KairosError::RateLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
+                KairosError::Validation(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            
+            let error_response = ErrorResponse::from_kairos_error(&e);
+            (status_code, Json(error_response)).into_response()
+        }
+    }
 }
 
-/// Parse a KairosDB metric format (with datapoints array)
-fn parse_kairos_metric(metric: &Value) -> Result<Vec<DataPoint>, KairosError> {
-    let name = metric.get("name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| KairosError::parse("Missing metric name"))?;
+/// Decompress gzip string content
+fn decompress_gzip(content: &str) -> Result<String, std::io::Error> {
+    let bytes = content.as_bytes();
+    decompress_gzip_bytes(bytes)
+}
+
+/// Decompress gzip byte content
+fn decompress_gzip_bytes(bytes: &[u8]) -> Result<String, std::io::Error> {
+    let mut decoder = GzDecoder::new(bytes);
+    let mut decompressed = String::new();
+    decoder.read_to_string(&mut decompressed)?;
+    Ok(decompressed)
+}
+
+/// CORS preflight handler for datapoints endpoint
+pub async fn cors_preflight_datapoints() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "POST, GET, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "Content-Type, Content-Encoding".parse().unwrap());
+    headers.insert("Access-Control-Max-Age", "86400".parse().unwrap());
     
-    let datapoints = metric.get("datapoints")
-        .and_then(|dp| dp.as_array())
-        .ok_or_else(|| KairosError::parse("Missing or invalid datapoints array"))?;
+    (StatusCode::OK, headers)
+}
+
+/// Request timing middleware
+pub async fn timing_middleware(
+    request: Request,
+    next: Next,
+) -> Response {
+    let start = Instant::now();
+    let method = request.method().clone();
+    let uri = request.uri().clone();
     
-    let mut points = Vec::new();
+    let response = next.run(request).await;
     
-    for dp in datapoints {
-        if let Some(dp_array) = dp.as_array() {
-            if dp_array.len() >= 2 {
-                let timestamp = dp_array[0].as_i64()
-                    .ok_or_else(|| KairosError::parse("Invalid timestamp in datapoint"))?;
-                
-                let value = parse_data_point_value(&dp_array[1])?;
-                
-                let metric_name = kairosdb_core::metrics::MetricName::new(name)?;
-                let ts = kairosdb_core::time::Timestamp::from_millis(timestamp)?;
-                
-                let mut point = DataPoint {
-                    metric: metric_name,
-                    timestamp: ts,
-                    value,
-                    tags: kairosdb_core::tags::TagSet::new(),
-                    ttl: 0,
-                };
-                
-                // Parse tags from the metric level
-                if let Some(tags) = metric.get("tags").and_then(|t| t.as_object()) {
-                    let mut tag_map = std::collections::HashMap::new();
-                    for (key, value) in tags {
-                        if let Some(tag_value) = value.as_str() {
-                            tag_map.insert(key.clone(), tag_value.to_string());
-                        }
-                    }
-                    point.tags = kairosdb_core::tags::TagSet::from_map(tag_map)?;
+    let duration = start.elapsed();
+    debug!("{} {} - {}ms", method, uri, duration.as_millis());
+    
+    response
+}
+
+/// Request size limiting middleware  
+pub async fn request_size_middleware(
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    const MAX_REQUEST_SIZE: usize = 100 * 1024 * 1024; // 100MB
+    
+    if let Some(content_length) = headers.get("content-length") {
+        if let Ok(length_str) = content_length.to_str() {
+            if let Ok(length) = length_str.parse::<usize>() {
+                if length > MAX_REQUEST_SIZE {
+                    let error_response = ErrorResponse::from_error("Request too large");
+                    return (StatusCode::PAYLOAD_TOO_LARGE, Json(error_response)).into_response();
                 }
-                
-                points.push(point);
             }
         }
     }
     
-    Ok(points)
+    next.run(request).await
 }
 
-/// Parse a data point value from JSON
-fn parse_data_point_value(value: &Value) -> Result<kairosdb_core::datapoint::DataPointValue, KairosError> {
-    use kairosdb_core::datapoint::DataPointValue;
+#[cfg(test)]
+mod tests {
+    use super::*;
     
-    match value {
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(DataPointValue::Long(i))
-            } else if let Some(f) = n.as_f64() {
-                Ok(DataPointValue::Double(f.into()))
-            } else {
-                Err(KairosError::parse("Invalid numeric value"))
-            }
-        }
-        Value::String(s) => {
-            Ok(DataPointValue::Text(s.clone()))
-        }
-        Value::Object(obj) => {
-            // Check for complex number format
-            if let (Some(real), Some(imag)) = (
-                obj.get("real").and_then(|v| v.as_f64()),
-                obj.get("imaginary").and_then(|v| v.as_f64())
-            ) {
-                Ok(DataPointValue::Complex { real, imaginary: imag })
-            } else {
-                Err(KairosError::parse("Unsupported object value format"))
-            }
-        }
-        _ => Err(KairosError::parse("Unsupported value type"))
+    #[test]
+    fn test_gzip_decompression() {
+        // This would test gzip decompression with real data
+        // For now, just verify the function exists
+        let result = decompress_gzip("invalid");
+        assert!(result.is_err()); // Should fail on invalid gzip data
+    }
+    
+    #[tokio::test]
+    async fn test_cors_preflight() {
+        let response = cors_preflight_datapoints().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

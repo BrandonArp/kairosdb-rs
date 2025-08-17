@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::time::Duration;
 
 /// Configuration for the ingest service
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,6 +17,12 @@ pub struct IngestConfig {
     
     /// Metrics and monitoring configuration
     pub metrics: MetricsConfig,
+    
+    /// Performance and resource limits
+    pub performance: PerformanceConfig,
+    
+    /// Health check configuration
+    pub health: HealthConfig,
 }
 
 /// Cassandra connection configuration
@@ -76,6 +83,56 @@ pub struct MetricsConfig {
     
     /// Enable detailed timing metrics
     pub enable_detailed_metrics: bool,
+    
+    /// Metrics collection interval in seconds
+    pub collection_interval_seconds: u64,
+    
+    /// Enable memory usage metrics
+    pub enable_memory_metrics: bool,
+    
+    /// Enable per-metric ingestion rates
+    pub enable_per_metric_rates: bool,
+}
+
+/// Performance and resource limits configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceConfig {
+    /// Maximum concurrent requests
+    pub max_concurrent_requests: usize,
+    
+    /// Request timeout in milliseconds
+    pub request_timeout_ms: u64,
+    
+    /// Maximum memory usage in MB before backpressure
+    pub max_memory_mb: usize,
+    
+    /// Enable request compression
+    pub enable_compression: bool,
+    
+    /// Maximum decompressed payload size in bytes
+    pub max_decompressed_size: usize,
+    
+    /// Connection keep-alive timeout
+    pub keep_alive_timeout_seconds: u64,
+}
+
+/// Health check configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthConfig {
+    /// Health check endpoint path
+    pub health_path: String,
+    
+    /// Readiness check endpoint path
+    pub readiness_path: String,
+    
+    /// Liveness check endpoint path
+    pub liveness_path: String,
+    
+    /// Health check timeout in milliseconds
+    pub check_timeout_ms: u64,
+    
+    /// Cassandra health check query
+    pub cassandra_health_query: String,
 }
 
 impl Default for IngestConfig {
@@ -85,6 +142,8 @@ impl Default for IngestConfig {
             cassandra: CassandraConfig::default(),
             ingestion: IngestionConfig::default(),
             metrics: MetricsConfig::default(),
+            performance: PerformanceConfig::default(),
+            health: HealthConfig::default(),
         }
     }
 }
@@ -122,6 +181,34 @@ impl Default for MetricsConfig {
             enable_prometheus: true,
             metrics_path: "/metrics".to_string(),
             enable_detailed_metrics: false,
+            collection_interval_seconds: 60,
+            enable_memory_metrics: true,
+            enable_per_metric_rates: false,
+        }
+    }
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: 1000,
+            request_timeout_ms: 30000,
+            max_memory_mb: 1024,
+            enable_compression: true,
+            max_decompressed_size: 100 * 1024 * 1024, // 100MB
+            keep_alive_timeout_seconds: 75,
+        }
+    }
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        Self {
+            health_path: "/health".to_string(),
+            readiness_path: "/health/ready".to_string(),
+            liveness_path: "/health/live".to_string(),
+            check_timeout_ms: 5000,
+            cassandra_health_query: "SELECT now() FROM system.local".to_string(),
         }
     }
 }
@@ -167,6 +254,44 @@ impl IngestConfig {
             config.ingestion.enable_validation = enable_validation.parse()?;
         }
         
+        // Performance configuration
+        if let Ok(max_concurrent) = env::var("KAIROSDB_MAX_CONCURRENT_REQUESTS") {
+            config.performance.max_concurrent_requests = max_concurrent.parse()?;
+        }
+        
+        if let Ok(request_timeout) = env::var("KAIROSDB_REQUEST_TIMEOUT_MS") {
+            config.performance.request_timeout_ms = request_timeout.parse()?;
+        }
+        
+        if let Ok(max_memory) = env::var("KAIROSDB_MAX_MEMORY_MB") {
+            config.performance.max_memory_mb = max_memory.parse()?;
+        }
+        
+        if let Ok(enable_compression) = env::var("KAIROSDB_ENABLE_COMPRESSION") {
+            config.performance.enable_compression = enable_compression.parse()?;
+        }
+        
+        // Metrics configuration
+        if let Ok(enable_prometheus) = env::var("KAIROSDB_ENABLE_PROMETHEUS") {
+            config.metrics.enable_prometheus = enable_prometheus.parse()?;
+        }
+        
+        if let Ok(metrics_path) = env::var("KAIROSDB_METRICS_PATH") {
+            config.metrics.metrics_path = metrics_path;
+        }
+        
+        if let Ok(enable_detailed_metrics) = env::var("KAIROSDB_ENABLE_DETAILED_METRICS") {
+            config.metrics.enable_detailed_metrics = enable_detailed_metrics.parse()?;
+        }
+        
+        // Health configuration
+        if let Ok(health_path) = env::var("KAIROSDB_HEALTH_PATH") {
+            config.health.health_path = health_path;
+        }
+        
+        // Validate the loaded configuration
+        config.validate()?;
+        
         Ok(config)
     }
     
@@ -192,6 +317,54 @@ impl IngestConfig {
             return Err(anyhow::anyhow!("Max queue size must be greater than 0"));
         }
         
+        if self.performance.max_concurrent_requests == 0 {
+            return Err(anyhow::anyhow!("Max concurrent requests must be greater than 0"));
+        }
+        
+        if self.performance.request_timeout_ms == 0 {
+            return Err(anyhow::anyhow!("Request timeout must be greater than 0"));
+        }
+        
         Ok(())
+    }
+    
+    /// Get the batch timeout as a Duration
+    pub fn batch_timeout(&self) -> Duration {
+        Duration::from_millis(self.ingestion.batch_timeout_ms)
+    }
+    
+    /// Get the request timeout as a Duration
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.performance.request_timeout_ms)
+    }
+    
+    /// Get the connection timeout as a Duration
+    pub fn connection_timeout(&self) -> Duration {
+        Duration::from_millis(self.cassandra.connection_timeout_ms)
+    }
+    
+    /// Get the query timeout as a Duration
+    pub fn query_timeout(&self) -> Duration {
+        Duration::from_millis(self.cassandra.query_timeout_ms)
+    }
+    
+    /// Get the health check timeout as a Duration
+    pub fn health_check_timeout(&self) -> Duration {
+        Duration::from_millis(self.health.check_timeout_ms)
+    }
+    
+    /// Check if compression is enabled
+    pub fn is_compression_enabled(&self) -> bool {
+        self.performance.enable_compression
+    }
+    
+    /// Check if Prometheus metrics are enabled
+    pub fn is_prometheus_enabled(&self) -> bool {
+        self.metrics.enable_prometheus
+    }
+    
+    /// Get the maximum memory usage in bytes
+    pub fn max_memory_bytes(&self) -> usize {
+        self.performance.max_memory_mb * 1024 * 1024
     }
 }

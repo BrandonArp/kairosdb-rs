@@ -1,40 +1,83 @@
 [package]
 name = "kairosdb-ingest"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "KairosDB ingestion service - handles time series data ingestion"
-license = "Apache-2.0"
-repository = "https://github.com/example/kairosdb-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.0", features = ["full"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
 
-# Web framework
-axum = { version = "0.7", features = ["json"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+# Web framework and HTTP
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+hyper = { workspace = true }
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# Cassandra driver
+cdrs-tokio = { workspace = true }
+uuid = { workspace = true }
+
+# Serialization and configuration
+serde = { workspace = true }
+serde_json = { workspace = true }
+config = { workspace = true }
 
 # Logging and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Async utilities
+async-trait = { workspace = true }
+futures = { workspace = true }
+
+# Performance optimized data structures
+ahash = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
 
 # Time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { workspace = true }
+
+# Base64 encoding
+base64 = { workspace = true }
+
+# HTTP client for health checks
+reqwest = { workspace = true }
+url = { workspace = true }
 
 # Core library
 kairosdb-core = { path = "../kairosdb-core" }
 
+# Metrics collection (Prometheus)
+prometheus = "0.13"
+
+# Compression support
+flate2 = "1.0"
+
+# Memory monitoring
+sysinfo = "0.30"
+
 [dev-dependencies]
 tokio-test = "0.4"
+testcontainers = "0.15"
+testcontainers-modules = { version = "0.3" }
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+tempfile = "3.8"
+
+# Benchmarks disabled until implementation is complete
+# [[bench]]
+# name = "ingestion"
+# harness = false
