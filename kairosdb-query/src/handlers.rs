@@ -3,9 +3,7 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
-use kairosdb_core::{
-    query::{MetricNamesQuery, QueryRequest, TagNamesQuery, TagValuesQuery},
-};
+use kairosdb_core::query::{MetricNamesQuery, QueryRequest, TagNamesQuery, TagValuesQuery};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};

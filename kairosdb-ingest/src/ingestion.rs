@@ -429,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn test_batch_ingestion() {
         use kairosdb_core::{datapoint::DataPoint, time::Timestamp};
-        
+
         let mut config = IngestConfig::default();
         // Set high queue size limit for testing to avoid triggering backpressure
         config.ingestion.max_queue_size = 100000;

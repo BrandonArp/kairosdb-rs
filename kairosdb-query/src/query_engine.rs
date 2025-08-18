@@ -13,9 +13,7 @@ use kairosdb_core::{
 use moka::future::Cache;
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
