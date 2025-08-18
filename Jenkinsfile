@@ -79,7 +79,6 @@ pipeline {
       }
     }
     
-    
     stage('Deploy via ArgoCD') {
       when { expression { env.BRANCH_IS_PRIMARY == 'true' } }
       environment {
