@@ -40,7 +40,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Serialization and configuration
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-config = "0.14"
+config = "0.15"
 toml = "0.8"
 
 # Logging and tracing
@@ -53,7 +53,7 @@ futures = "0.3"
 
 # Performance optimized data structures
 ahash = "0.8"
-dashmap = "5.5"
+dashmap = "6.1"
 parking_lot = "0.12"
 ordered-float = { version = "4.2", features = ["serde"] }
 
@@ -63,20 +63,20 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 # Base64 encoding for binary data
 base64 = "0.22"
 
 # Protocol Buffers for histogram V2 format compatibility
-prost = "0.12"
-prost-types = "0.12"
+prost = "0.14"
+prost-types = "0.14"
 
 # HTTP client for health checks and inter-service communication
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 url = "2.4"
 
 [profile.release]

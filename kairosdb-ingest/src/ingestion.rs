@@ -9,9 +9,8 @@
 use anyhow::{Context, Result};
 use futures::stream::StreamExt;
 use kairosdb_core::{
-    datapoint::{DataPoint, DataPointBatch},
+    datapoint::DataPointBatch,
     error::{KairosError, KairosResult},
-    time::Timestamp,
 };
 use parking_lot::RwLock;
 use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};

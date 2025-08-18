@@ -3,11 +3,10 @@
 //! This client provides robust, high-performance data persistence using the ScyllaDB Rust driver
 //! with proper error handling, connection management, and KairosDB schema compatibility.
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
-    datapoint::{DataPointBatch, DataPointValue},
+    datapoint::DataPointBatch,
     error::{KairosError, KairosResult},
     schema::{RowKeyIndexEntry, StringIndexEntry},
 };
