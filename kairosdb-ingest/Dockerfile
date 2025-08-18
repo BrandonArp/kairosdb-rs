@@ -1,6 +1,6 @@
 # Multi-stage Dockerfile for KairosDB Ingestion Service
 
-FROM rust:1.75-slim as builder
+FROM rust:1.89-slim as builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
