@@ -10,6 +10,11 @@ pub mod ingestion;
 pub mod json_parser;
 pub mod metrics;
 pub mod mock_cassandra;
+// TODO: Fix API compatibility issues with CDRS-tokio
+// pub mod simple_cassandra;
+// pub mod cdrs_cassandra;
+// pub mod working_cassandra;
+pub mod real_cassandra_client;
 
 // Re-export commonly used types
 pub use config::IngestConfig;

@@ -1,0 +1,121 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kairosdb-config
+  labels:
+    app: kairosdb
+data:
+  kairosdb.properties: |
+    # KairosDB Configuration for Development Environment
+
+    # Cassandra Datastore Configuration
+    kairosdb.service.datastore=org.kairosdb.datastore.cassandra.CassandraModule
+    kairosdb.datastore.cassandra.cql_host_list=cassandra
+    kairosdb.datastore.cassandra.keyspace=kairosdb
+    kairosdb.datastore.cassandra.replication={'class': 'SimpleStrategy','replication_factor' : 1}
+    kairosdb.datastore.cassandra.write_delay=1000
+    kairosdb.datastore.cassandra.write_buffer_max_size=500000
+    kairosdb.datastore.cassandra.single_row_read_size=1024
+    kairosdb.datastore.cassandra.multi_row_size=1024
+    kairosdb.datastore.cassandra.multi_row_read_size=1024
+
+    # HTTP Configuration
+    kairosdb.service.http=org.kairosdb.core.http.WebServletModule
+    kairosdb.jetty.port=8080
+    kairosdb.jetty.address=0.0.0.0
+    kairosdb.jetty.static_web_root=webroot
+
+    # Health Check Configuration
+    kairosdb.service.health=org.kairosdb.core.health.HealthCheckModule
+
+    # Additional Cassandra settings
+    kairosdb.datastore.cassandra.read_consistency_level=ONE
+    kairosdb.datastore.cassandra.write_consistency_level=QUORUM
+    kairosdb.datastore.cassandra.create_schema=true
+    kairosdb.datastore.cassandra.connection_timeout=5000
+    kairosdb.datastore.cassandra.read_timeout=12000
+
+    # Queue processor settings
+    kairosdb.queue_processor.class=org.kairosdb.core.queue.FileQueueProcessor
+    kairosdb.queue_processor.batch_size=200
+    kairosdb.queue_processor.min_batch_size=100
+    kairosdb.queue_processor.min_batch_wait=500
+    kairosdb.queue_processor.memory_queue_size=100000
+
+    # Core services
+    kairosdb.service.reporter=org.kairosdb.core.reporting.MetricReportingModule
+    kairosdb.ingest_executor.thread_count=10
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kairosdb
+  labels:
+    app: kairosdb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kairosdb
+  template:
+    metadata:
+      labels:
+        app: kairosdb
+    spec:
+      containers:
+        - name: kairosdb
+          image: inscopemetrics/kairosdb-extensions:2.3.10
+          ports:
+            - containerPort: 8080
+          env:
+            - name: CASSANDRA_HOSTS
+              value: "cassandra:9042"
+            - name: kairosdb.datastore.cassandra.cql_host_list
+              value: "cassandra"
+            - name: kairosdb.datastore.cassandra.keyspace
+              value: "kairosdb"
+            - name: kairosdb.jetty.port
+              value: "8080"
+            - name: kairosdb.jetty.address
+              value: "0.0.0.0"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /opt/kairosdb/config/kairosdb.properties
+              subPath: kairosdb.properties
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/check
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health/check
+              port: 8080
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: config-volume
+          configMap:
+            name: kairosdb-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kairosdb
+  labels:
+    app: kairosdb
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: kairosdb
+  type: ClusterIP

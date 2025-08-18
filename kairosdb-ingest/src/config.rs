@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
@@ -222,9 +222,18 @@ impl Default for HealthConfig {
 }
 
 impl IngestConfig {
-    /// Load configuration from environment variables and defaults
+    /// Load configuration from file, environment variables, and defaults
     pub fn load() -> Result<Self> {
         let mut config = Self::default();
+        
+        // Try to load from config file first
+        if let Ok(config_path) = env::var("CONFIG_PATH") {
+            config = Self::load_from_file(&config_path)?;
+        } else if std::path::Path::new("config/development.yaml").exists() {
+            config = Self::load_from_file("config/development.yaml")?;
+        } else if std::path::Path::new("config/production.yaml").exists() {
+            config = Self::load_from_file("config/production.yaml")?;
+        }
         
         // Override with environment variables if present
         if let Ok(bind_addr) = env::var("KAIROSDB_BIND_ADDRESS") {
@@ -300,6 +309,17 @@ impl IngestConfig {
         // Validate the loaded configuration
         config.validate()?;
         
+        Ok(config)
+    }
+    
+    /// Load configuration from a YAML file
+    pub fn load_from_file(path: &str) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read config file: {}", path))?;
+        
+        let config: Self = serde_yaml::from_str(&contents)
+            .with_context(|| format!("Failed to parse config file: {}", path))?;
+            
         Ok(config)
     }
     

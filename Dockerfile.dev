@@ -1,0 +1,31 @@
+FROM ubuntu:24.04
+RUN <<EOF
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends ca-certificates libssl3 python3 python3-pip -y
+pip3 install cqlsh
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+EOF
+
+# Create non-root user
+RUN useradd -m kairosdb
+
+WORKDIR /app
+
+# Copy configuration
+ADD config/development.yaml /app/config/development.yaml
+
+# Environment variables
+ENV RUST_LOG=debug
+
+# Copy binary (will be built locally and synced by Tilt)
+ADD target/debug/kairosdb-ingest /app/
+
+# Change ownership to non-root user
+RUN chown -R kairosdb:kairosdb /app
+
+USER kairosdb
+
+ENTRYPOINT ["/app/kairosdb-ingest"]

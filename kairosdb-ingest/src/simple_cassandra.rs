@@ -6,17 +6,20 @@
 use anyhow::{Context, Result};
 use cdrs_tokio::{
     authenticators::NoneAuthenticator,
-    cluster::{session::Session, NodeTcpConfigBuilder},
-    load_balancing::RoundRobin,
-    query::*,
-    types::prelude::*,
+    cluster::{TcpConnectionManager, session::Session},
+    load_balancing::RoundRobinLoadBalancingStrategy,
+    transport::TransportTcp,
+    cluster::KeyspaceHolder,
+    compression::Compression,
+    frame::Version,
+    frame_encoding::{FrameEncodingFactory, PlainFrameEncodingFactory},
+    query_values,
 };
 use kairosdb_core::{
-    datapoint::{DataPoint, DataPointBatch},
+    datapoint::DataPointBatch,
     error::{KairosError, KairosResult},
 };
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -38,7 +41,7 @@ pub struct SimpleStats {
 
 /// Simplified Cassandra client that focuses on core functionality
 pub struct SimpleCassandraClient {
-    session: Session<RoundRobin>,
+    session: Session<TransportTcp, TcpConnectionManager, RoundRobinLoadBalancingStrategy<TransportTcp, TcpConnectionManager>>,
     config: Arc<CassandraConfig>,
     stats: Arc<AtomicU64>, // Simple query counter
 }
@@ -54,10 +57,37 @@ impl SimpleCassandraClient {
         
         info!("Connecting to Cassandra at: {}", contact_point);
         
-        // Create a simple TCP connection
-        let node_config = NodeTcpConfigBuilder::new(contact_point, NoneAuthenticator {}).build();
-        let session = Session::connect(node_config, RoundRobin::new()).await
-            .context("Failed to connect to Cassandra")?;
+        // Parse the address:port to extract host and port
+        let parts: Vec<&str> = contact_point.split(':').collect();
+        let host = parts[0];
+        let port = if parts.len() > 1 { 
+            parts[1].parse().unwrap_or(9042) 
+        } else { 
+            9042 
+        };
+        
+        // Create connection manager with updated API
+        let (keyspace_tx, keyspace_rx) = tokio::sync::watch::channel(None);
+        let keyspace_holder = Arc::new(KeyspaceHolder::new(keyspace_rx));
+        let frame_encoder = Box::new(PlainFrameEncodingFactory) as Box<dyn FrameEncodingFactory + Send + Sync>;
+        let compression = Compression::None;
+        let tcp_nodelay = true;
+        let protocol_version = Version::V4;
+        
+        let manager = TcpConnectionManager::new(
+            (host, port),
+            keyspace_holder,
+            frame_encoder,
+            compression,
+            4, // Connection pool size
+            tcp_nodelay,
+            protocol_version,
+        );
+        
+        let load_balancer = RoundRobinLoadBalancingStrategy::new();
+        
+        // Create session with updated API
+        let session = Session::new(manager, load_balancer);
         
         info!("Successfully connected to Cassandra");
         
@@ -141,8 +171,8 @@ impl SimpleCassandraClient {
                 Ok(())
             }
             Ok(Err(e)) => {
-                error!("Query failed: {} - Error: {}", query, e);
-                Err(anyhow::anyhow!("Query failed: {}", e))
+                error!("Query failed: {} - Error: {:?}", query, e);
+                Err(anyhow::anyhow!("Query failed: {:?}", e))
             }
             Err(_) => {
                 error!("Query timed out after {:?}: {}", elapsed, query);
@@ -171,7 +201,7 @@ impl SimpleCassandraClient {
             
             if let Err(e) = self.execute_query(&insert_query).await {
                 error!("Failed to insert data point: {}", e);
-                return Err(KairosError::CassandraError(format!("Insert failed: {}", e)));
+                return Err(KairosError::cassandra(format!("Insert failed: {}", e)));
             }
         }
         

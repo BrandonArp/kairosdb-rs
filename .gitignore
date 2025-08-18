@@ -93,3 +93,9 @@ Desktop.ini
 
 # Cassandra test data
 cassandra_data/
+
+# Tilt
+.tiltbuild/
+
+# Local development config
+config/local.yaml

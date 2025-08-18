@@ -1,0 +1,50 @@
+# KairosDB Rust Ingestion Service Development Configuration
+
+# HTTP server configuration
+bind_address: "0.0.0.0:8081"
+
+# Cassandra configuration
+cassandra:
+  contact_points:
+    - "cassandra:9042"
+  keyspace: "kairosdb"
+  connection_timeout_ms: 5000
+  query_timeout_ms: 10000
+  max_connections: 10
+  replication_factor: 1
+  cassandra_health_query: "SELECT now() FROM system.local"
+
+# Ingestion configuration
+ingestion:
+  max_batch_size: 10000
+  batch_timeout_ms: 1000
+  worker_threads: 4
+  max_queue_size: 100000
+  enable_validation: true
+  max_request_size: 16777216  # 16MB
+
+# Performance configuration
+performance:
+  max_memory_mb: 32768  # 32GB for demo purposes
+  max_concurrent_requests: 1000
+  request_timeout_ms: 30000
+  enable_compression: true
+  max_decompressed_size: 104857600  # 100MB
+  keep_alive_timeout_seconds: 75
+
+# Health check configuration
+health:
+  health_path: "/health"
+  readiness_path: "/ready"
+  liveness_path: "/live"
+  check_timeout_ms: 5000
+  cassandra_health_query: "SELECT now() FROM system.local"
+
+# Metrics configuration
+metrics:
+  enable_prometheus: true
+  metrics_path: "/metrics"
+  enable_detailed_metrics: false
+  collection_interval_seconds: 60
+  enable_memory_metrics: true
+  enable_per_metric_rates: false
