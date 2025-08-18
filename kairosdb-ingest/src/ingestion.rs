@@ -285,11 +285,23 @@ impl IngestionService {
         Ok(status)
     }
     
-    /// Get current memory usage (simplified implementation)
+    /// Get current memory usage for this process
     fn get_current_memory_usage(&self) -> u64 {
-        // Simple implementation - in production you'd want proper memory monitoring
-        let system = System::new_all();
-        system.used_memory()
+        use sysinfo::{Pid, System};
+        
+        // Get current process memory usage, not system-wide
+        let mut system = System::new();
+        system.refresh_processes();
+        
+        let current_pid = Pid::from(std::process::id() as usize);
+        
+        if let Some(process) = system.process(current_pid) {
+            // Return RSS (Resident Set Size) in bytes
+            process.memory() * 1024 // sysinfo returns KB, convert to bytes
+        } else {
+            // Fallback: assume minimal memory usage if we can't get process info
+            1024 * 1024 // 1MB
+        }
     }
 }
 
