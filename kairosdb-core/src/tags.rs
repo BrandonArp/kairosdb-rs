@@ -215,10 +215,14 @@ impl TagSet {
         let mut pairs: Vec<_> = self.tags.iter().collect();
         pairs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         
-        pairs.iter()
-            .map(|(k, v)| format!("{}={}", k.as_str(), v.as_str()))
-            .collect::<Vec<_>>()
-            .join(":")
+        // Java KairosDB format: key1=value1:key2=value2: (with trailing colon)
+        let mut result = String::new();
+        for (k, v) in pairs {
+            // TODO: Implement proper escaping for : and = characters
+            result.push_str(&format!("{}={}", k.as_str(), v.as_str()));
+            result.push(':');
+        }
+        result
     }
     
     /// Parse from Cassandra format

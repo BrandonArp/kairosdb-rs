@@ -48,27 +48,32 @@ impl RowKey {
         }
     }
     
-    /// Get the row key as bytes for Cassandra
+    /// Get the row key as bytes for Cassandra (Java KairosDB compatible)
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Create a consistent byte representation for the row key
+        // Format: [metric_name][0x0][timestamp_long][datatype_marker][datatype_length][datatype][tag_string]
         let mut bytes = Vec::new();
         
-        // Add metric name length and data
+        // Add metric name (UTF-8 encoded)
         let metric_bytes = self.metric.as_str().as_bytes();
-        bytes.extend_from_slice(&(metric_bytes.len() as u32).to_be_bytes());
         bytes.extend_from_slice(metric_bytes);
         
-        // Add data type length and data
-        let type_bytes = self.data_type.as_bytes();
-        bytes.extend_from_slice(&(type_bytes.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(type_bytes);
+        // Add null terminator
+        bytes.push(0x0);
         
-        // Add row time
+        // Add row time timestamp (8-byte big-endian long)
         bytes.extend_from_slice(&self.row_time.timestamp_millis().to_be_bytes());
         
-        // Add tags length and data
+        // Add data type section
+        if !self.data_type.is_empty() {
+            bytes.push(0x0); // Data type marker
+            
+            let type_bytes = self.data_type.as_bytes();
+            bytes.push(type_bytes.len() as u8); // Length byte
+            bytes.extend_from_slice(type_bytes); // Data type
+        }
+        
+        // Add tags string (already in KairosDB format)
         let tags_bytes = self.tags.as_bytes();
-        bytes.extend_from_slice(&(tags_bytes.len() as u32).to_be_bytes());
         bytes.extend_from_slice(tags_bytes);
         
         bytes
@@ -171,23 +176,11 @@ impl ColumnName {
         }
     }
     
-    /// Get the column name as bytes for Cassandra
+    /// Get the column name as bytes for Cassandra (Java KairosDB compatible)
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        
-        // Add offset
-        bytes.extend_from_slice(&self.offset.to_be_bytes());
-        
-        // Add qualifier if present
-        if let Some(ref qualifier) = self.qualifier {
-            let qualifier_bytes = qualifier.as_bytes();
-            bytes.extend_from_slice(&(qualifier_bytes.len() as u32).to_be_bytes());
-            bytes.extend_from_slice(qualifier_bytes);
-        } else {
-            bytes.extend_from_slice(&0u32.to_be_bytes());
-        }
-        
-        bytes
+        // Java KairosDB format: 4-byte integer with offset left-shifted by 1
+        let column_name = ((self.offset as i32) << 1) as u32;
+        column_name.to_be_bytes().to_vec()
     }
     
     /// Parse column name from bytes
@@ -229,62 +222,81 @@ pub struct CassandraValue {
 }
 
 impl CassandraValue {
-    /// Encode a data point value for Cassandra storage
+    /// Encode a data point value for Cassandra storage (Java KairosDB compatible)
     pub fn from_data_point_value(value: &DataPointValue, ttl: Option<u32>) -> Self {
         let bytes = match value {
-            DataPointValue::Long(v) => v.to_be_bytes().to_vec(),
-            DataPointValue::Double(v) => v.to_be_bytes().to_vec(),
+            DataPointValue::Long(v) => {
+                // Java KairosDB variable-length encoding: strip leading zero bytes
+                Self::encode_long(*v)
+            },
+            DataPointValue::Double(v) => {
+                // Java KairosDB: raw 8-byte double (big-endian), no type flag
+                // Type is determined from row key data_type field
+                v.to_be_bytes().to_vec()
+            },
             DataPointValue::Complex { real, imaginary } => {
+                // Complex numbers - store as consecutive doubles with type flag
                 let mut bytes = Vec::new();
+                bytes.push(0x3); // Complex type flag (custom)
                 bytes.extend_from_slice(&real.to_be_bytes());
                 bytes.extend_from_slice(&imaginary.to_be_bytes());
                 bytes
             }
-            DataPointValue::Text(s) => s.as_bytes().to_vec(),
-            DataPointValue::Binary(b) => b.clone(),
+            DataPointValue::Text(s) => {
+                // String values - direct UTF-8 encoding
+                s.as_bytes().to_vec()
+            },
+            DataPointValue::Binary(b) => {
+                // Binary data - direct storage
+                b.clone()
+            },
             DataPointValue::Histogram(h) => {
-                // Serialize histogram as binary data
-                // Format: [boundaries_len][boundaries...][counts...][total_count][sum][min][max]
-                let mut bytes = Vec::new();
-                
-                // Write boundaries length
-                bytes.extend_from_slice(&(h.boundaries.len() as u32).to_be_bytes());
-                
-                // Write boundaries
-                for boundary in &h.boundaries {
-                    bytes.extend_from_slice(&boundary.to_be_bytes());
-                }
-                
-                // Write counts
-                for count in &h.counts {
-                    bytes.extend_from_slice(&count.to_be_bytes());
-                }
-                
-                // Write metadata  
-                bytes.extend_from_slice(&h.total_count().to_le_bytes());
-                bytes.extend_from_slice(&h.sum.to_le_bytes());
-                bytes.extend_from_slice(&h.mean.to_le_bytes());
-                bytes.extend_from_slice(&h.min.to_le_bytes());
-                bytes.extend_from_slice(&h.max.to_le_bytes());
-                bytes.push(h.precision);
-                
-                bytes
+                // Use KairosDB V2 Protocol Buffers format
+                h.to_v2_bytes()
             }
         };
         
         Self { bytes, ttl }
     }
     
+    /// Java KairosDB variable-length long encoding
+    fn encode_long(value: i64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut write_rest = false;
+        
+        // Process 8 bytes from most significant to least significant
+        for i in 1..=8 {
+            let byte = ((value >> (64 - (8 * i))) & 0xFF) as u8;
+            if write_rest || byte != 0 {
+                bytes.push(byte);
+                write_rest = true;
+            }
+        }
+        
+        // Ensure at least one byte is written
+        if bytes.is_empty() {
+            bytes.push(0);
+        }
+        
+        bytes
+    }
+    
     /// Decode a Cassandra value back to a data point value
     pub fn to_data_point_value(&self, data_type: &str) -> KairosResult<DataPointValue> {
         match data_type {
             "kairos_long" => {
-                if self.bytes.len() != 8 {
+                // Java KairosDB uses variable-length encoding for longs
+                if self.bytes.is_empty() || self.bytes.len() > 8 {
                     return Err(KairosError::parse("Invalid long value length"));
                 }
+                
+                // Pad with leading zeros to make 8 bytes
+                let mut padded = vec![0u8; 8 - self.bytes.len()];
+                padded.extend_from_slice(&self.bytes);
+                
                 let value = i64::from_be_bytes([
-                    self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
-                    self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7]
+                    padded[0], padded[1], padded[2], padded[3],
+                    padded[4], padded[5], padded[6], padded[7]
                 ]);
                 Ok(DataPointValue::Long(value))
             }
@@ -318,6 +330,11 @@ impl CassandraValue {
             }
             "kairos_binary" => {
                 Ok(DataPointValue::Binary(self.bytes.clone()))
+            }
+            "kairos_histogram" | "kairos_histogram_v1" | "kairos_histogram_v2" => {
+                // Parse histogram from KairosDB V2 Protocol Buffers format
+                let histogram = crate::datapoint::HistogramData::from_v2_bytes(&self.bytes)?;
+                Ok(DataPointValue::Histogram(histogram))
             }
             _ => Err(KairosError::parse(format!("Unknown data type: {}", data_type)))
         }
