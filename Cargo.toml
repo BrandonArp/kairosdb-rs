@@ -34,7 +34,7 @@ tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip",
 hyper = { version = "1.0", features = ["full"] }
 
 # Cassandra driver
-cdrs-tokio = "8.1"
+scylla = "1.2"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Serialization and configuration

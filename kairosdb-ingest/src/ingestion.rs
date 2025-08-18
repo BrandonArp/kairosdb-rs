@@ -105,7 +105,7 @@ impl IngestionService {
         } else {
             info!("Using production Cassandra client");
             Arc::new(
-                CassandraClientImpl::new(Arc::new(config.cassandra.clone()))
+                CassandraClientImpl::new(config.cassandra.clone())
                     .await
                     .context("Failed to initialize production Cassandra client")?
             )

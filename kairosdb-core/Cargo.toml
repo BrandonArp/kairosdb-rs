@@ -15,8 +15,7 @@ categories.workspace = true
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 
-# Cassandra driver
-cdrs-tokio = { workspace = true }
+# UUID for tracking
 uuid = { workspace = true }
 
 # Serialization

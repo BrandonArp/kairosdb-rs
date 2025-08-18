@@ -19,7 +19,7 @@ tower-http = { workspace = true }
 hyper = { workspace = true }
 
 # Cassandra driver
-cdrs-tokio = { workspace = true }
+scylla = { workspace = true }
 uuid = { workspace = true }
 
 # Serialization and configuration

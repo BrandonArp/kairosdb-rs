@@ -111,6 +111,42 @@ impl KairosSchema {
     }
 }
 
+/// Wrapper for index key bytes
+#[derive(Debug, Clone)]
+pub struct IndexKey {
+    pub bytes: Vec<u8>,
+}
+
+impl IndexKey {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+}
+
+/// Wrapper for index column bytes  
+#[derive(Debug, Clone)]
+pub struct IndexColumn {
+    pub bytes: Vec<u8>,
+}
+
+impl IndexColumn {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+}
+
+/// Wrapper for index value bytes
+#[derive(Debug, Clone)]
+pub struct IndexValue {
+    pub bytes: Vec<u8>,
+}
+
+impl IndexValue {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.bytes.clone()
+    }
+}
+
 /// Index types for the string_index table
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IndexType {
@@ -152,10 +188,35 @@ pub struct RowKeyIndexEntry {
 }
 
 impl RowKeyIndexEntry {
+    /// Create from a RowKey
+    pub fn from_row_key(row_key: &crate::cassandra::RowKey) -> Self {
+        Self {
+            metric_name: row_key.metric.as_str().to_string(),
+            data_type: row_key.data_type.clone(),
+            row_time: row_key.row_time.timestamp_millis(),
+            tags: row_key.tags.clone(),
+        }
+    }
+    
     /// Create the index key for this entry
     pub fn index_key(&self) -> Vec<u8> {
         // Use metric name + data type as the partition key
         format!("{}:{}", self.metric_name, self.data_type).into_bytes()
+    }
+    
+    /// Get the key as bytes for Cassandra
+    pub fn key(&self) -> IndexKey {
+        IndexKey { bytes: self.index_key() }
+    }
+    
+    /// Get the column as bytes for Cassandra
+    pub fn column(&self) -> IndexColumn {
+        IndexColumn { bytes: self.index_column() }
+    }
+    
+    /// Get the value as bytes for Cassandra
+    pub fn value(&self) -> IndexValue {
+        IndexValue { bytes: self.index_value() }
     }
     
     /// Create the index column for this entry
@@ -203,9 +264,41 @@ pub struct StringIndexEntry {
 }
 
 impl StringIndexEntry {
+    /// Create a metric name index entry
+    pub fn metric_name(name: &str) -> Self {
+        Self {
+            index_type: IndexType::MetricNames,
+            value: name.to_string(),
+            metadata: None,
+        }
+    }
+    
+    /// Create a tag name index entry
+    pub fn tag_name(name: &str) -> Self {
+        Self {
+            index_type: IndexType::TagNames,
+            value: name.to_string(),
+            metadata: None,
+        }
+    }
+    
+    /// Create a tag value index entry
+    pub fn tag_value(value: &str) -> Self {
+        Self {
+            index_type: IndexType::TagValues,
+            value: value.to_string(),
+            metadata: None,
+        }
+    }
+    
     /// Create the index key for this entry
     pub fn index_key(&self) -> Vec<u8> {
         self.index_type.key_bytes()
+    }
+    
+    /// Get the key as bytes for Cassandra
+    pub fn key(&self) -> IndexKey {
+        IndexKey { bytes: self.index_key() }
     }
     
     /// Create the index column for this entry
