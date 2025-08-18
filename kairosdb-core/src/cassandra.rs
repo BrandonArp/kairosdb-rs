@@ -79,43 +79,18 @@ impl RowKey {
         bytes
     }
     
-    /// Parse row key from bytes
+    /// Parse row key from bytes (Java KairosDB compatible format)
     pub fn from_bytes(bytes: &[u8]) -> KairosResult<Self> {
         let mut offset = 0;
         
-        // Read metric name
-        if bytes.len() < offset + 4 {
-            return Err(KairosError::parse("Invalid row key: too short for metric length"));
-        }
-        let metric_len = u32::from_be_bytes([
-            bytes[offset], bytes[offset + 1], 
-            bytes[offset + 2], bytes[offset + 3]
-        ]) as usize;
-        offset += 4;
+        // Read metric name (null-terminated)
+        let null_pos = bytes[offset..].iter().position(|&b| b == 0x0)
+            .ok_or_else(|| KairosError::parse("Invalid row key: no null terminator for metric"))?;
         
-        if bytes.len() < offset + metric_len {
-            return Err(KairosError::parse("Invalid row key: too short for metric data"));
-        }
-        let metric = MetricName::new(String::from_utf8_lossy(&bytes[offset..offset + metric_len]))?;
-        offset += metric_len;
+        let metric = MetricName::new(String::from_utf8_lossy(&bytes[offset..offset + null_pos]))?;
+        offset += null_pos + 1; // Skip null terminator
         
-        // Read data type
-        if bytes.len() < offset + 4 {
-            return Err(KairosError::parse("Invalid row key: too short for type length"));
-        }
-        let type_len = u32::from_be_bytes([
-            bytes[offset], bytes[offset + 1],
-            bytes[offset + 2], bytes[offset + 3]
-        ]) as usize;
-        offset += 4;
-        
-        if bytes.len() < offset + type_len {
-            return Err(KairosError::parse("Invalid row key: too short for type data"));
-        }
-        let data_type = String::from_utf8_lossy(&bytes[offset..offset + type_len]).to_string();
-        offset += type_len;
-        
-        // Read row time
+        // Read row time timestamp (8-byte big-endian long)
         if bytes.len() < offset + 8 {
             return Err(KairosError::parse("Invalid row key: too short for row time"));
         }
@@ -126,20 +101,33 @@ impl RowKey {
         let row_time = Timestamp::from_millis(row_time_millis)?;
         offset += 8;
         
-        // Read tags
-        if bytes.len() < offset + 4 {
-            return Err(KairosError::parse("Invalid row key: too short for tags length"));
+        // Check for data type section (optional)
+        let mut data_type = String::new();
+        if offset < bytes.len() && bytes[offset] == 0x0 {
+            // Data type marker found
+            offset += 1;
+            
+            if offset >= bytes.len() {
+                return Err(KairosError::parse("Invalid row key: missing data type length"));
+            }
+            
+            let type_len = bytes[offset] as usize;
+            offset += 1;
+            
+            if bytes.len() < offset + type_len {
+                return Err(KairosError::parse("Invalid row key: too short for data type"));
+            }
+            
+            data_type = String::from_utf8_lossy(&bytes[offset..offset + type_len]).to_string();
+            offset += type_len;
         }
-        let tags_len = u32::from_be_bytes([
-            bytes[offset], bytes[offset + 1],
-            bytes[offset + 2], bytes[offset + 3]
-        ]) as usize;
-        offset += 4;
         
-        if bytes.len() < offset + tags_len {
-            return Err(KairosError::parse("Invalid row key: too short for tags data"));
-        }
-        let tags = String::from_utf8_lossy(&bytes[offset..offset + tags_len]).to_string();
+        // Read remaining bytes as tags string
+        let tags = if offset < bytes.len() {
+            String::from_utf8_lossy(&bytes[offset..]).to_string()
+        } else {
+            String::new()
+        };
         
         Ok(Self {
             metric,
@@ -183,32 +171,23 @@ impl ColumnName {
         column_name.to_be_bytes().to_vec()
     }
     
-    /// Parse column name from bytes
+    /// Parse column name from bytes (Java KairosDB compatible format)
     pub fn from_bytes(bytes: &[u8]) -> KairosResult<Self> {
-        if bytes.len() < 8 {
+        if bytes.len() < 4 {
             return Err(KairosError::parse("Invalid column name: too short for offset"));
         }
         
-        let offset = i64::from_be_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7]
+        // Java KairosDB format: 4-byte integer with offset left-shifted by 1
+        let column_name = u32::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3]
         ]);
         
-        let qualifier = if bytes.len() > 12 {
-            let qualifier_len = u32::from_be_bytes([
-                bytes[8], bytes[9], bytes[10], bytes[11]
-            ]) as usize;
-            
-            if qualifier_len > 0 && bytes.len() >= 12 + qualifier_len {
-                Some(String::from_utf8_lossy(&bytes[12..12 + qualifier_len]).to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Extract offset by right-shifting by 1
+        let offset = ((column_name as i32) >> 1) as i64;
         
-        Ok(Self { offset, qualifier })
+        // For now, we don't support qualifiers in round-trip serialization
+        // since to_bytes() doesn't encode them
+        Ok(Self { offset, qualifier: None })
     }
 }
 
@@ -346,7 +325,6 @@ mod tests {
     use super::*;
     
     #[test]
-    #[ignore] // TODO: Fix decode format to match encode format
     fn test_row_key_encoding() {
         let point = DataPoint::new_long("test.metric", Timestamp::now(), 42);
         let row_key = RowKey::from_data_point(&point);
@@ -358,7 +336,6 @@ mod tests {
     }
     
     #[test]
-    #[ignore] // TODO: Fix decode format to match encode format  
     fn test_column_name_encoding() {
         let col = ColumnName::from_timestamp(Timestamp::now());
         

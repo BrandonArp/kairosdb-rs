@@ -79,8 +79,7 @@ impl CassandraClientImpl {
             session_builder = session_builder.user(username, password);
         }
 
-        // Set default keyspace
-        session_builder = session_builder.use_keyspace(&config.keyspace, false);
+        // Don't set default keyspace here - we'll create it in ensure_schema()
 
         let session = session_builder
             .build()
@@ -89,23 +88,18 @@ impl CassandraClientImpl {
 
         info!("ScyllaDB session established successfully");
 
-        let mut client = Self {
+        Ok(Self {
             session,
             config: config.clone(),
             stats: CassandraClientStats::default(),
             insert_data_point: None,
             insert_row_key_index: None,
             insert_string_index: None,
-        };
-
-        // Prepare frequently used statements
-        client.prepare_statements().await?;
-
-        Ok(client)
+        })
     }
 
     /// Prepare frequently used statements for better performance
-    async fn prepare_statements(&mut self) -> KairosResult<()> {
+    pub async fn prepare_statements(&mut self) -> KairosResult<()> {
         debug!("Preparing frequently used CQL statements");
 
         // Prepare data point insertion statement
