@@ -97,7 +97,7 @@ pipeline {
   post {
     always {
       // Archive artifacts
-      archiveArtifacts artifacts: 'target/clippy-report.json, target/debug/**, target/doc/**', fingerprint: true, allowEmptyArchive: true
+      archiveArtifacts artifacts: 'target/clippy-report.json, target/doc/**', fingerprint: true, allowEmptyArchive: true
       
       recordIssues(
         enabledForFailure: false, aggregatingResults: true,
