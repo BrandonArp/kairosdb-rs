@@ -656,11 +656,7 @@ impl HistogramBuilder {
 
     /// Build the histogram
     pub fn build(self) -> KairosResult<HistogramData> {
-        let bins: Vec<(f64, u64)> = self
-            .boundaries
-            .into_iter()
-            .zip(self.counts)
-            .collect();
+        let bins: Vec<(f64, u64)> = self.boundaries.into_iter().zip(self.counts).collect();
 
         HistogramData::from_bins(bins, self.sum, self.min, self.max, Some(self.precision))
     }

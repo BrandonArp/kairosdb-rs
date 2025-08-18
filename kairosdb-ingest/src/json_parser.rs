@@ -482,10 +482,7 @@ impl JsonParser {
         }
 
         // Convert to bins format and create histogram
-        let bins: Vec<(f64, u64)> = boundaries
-            .into_iter()
-            .zip(individual_counts)
-            .collect();
+        let bins: Vec<(f64, u64)> = boundaries.into_iter().zip(individual_counts).collect();
 
         let histogram =
             HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;

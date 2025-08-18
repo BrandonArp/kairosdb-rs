@@ -51,7 +51,6 @@ pub struct Validator {
     limits: ValidationLimits,
 }
 
-
 impl Validator {
     /// Create a new validator with custom limits
     pub fn new(limits: ValidationLimits) -> Self {

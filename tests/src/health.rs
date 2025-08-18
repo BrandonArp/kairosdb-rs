@@ -3,8 +3,6 @@
 #[allow(unused_imports)]
 use crate::common::{E2ETestConfig, INGEST_BASE_URL, JAVA_KAIROSDB_BASE_URL};
 
-
-
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
 async fn test_ingest_service_health() {

@@ -81,7 +81,9 @@ impl MetricName {
 
     /// Get the parent metric name (everything before the last '.')
     pub fn parent(&self) -> Option<MetricName> {
-        self.0.rfind('.').map(|pos| Self::new_unchecked(&self.0[..pos]))
+        self.0
+            .rfind('.')
+            .map(|pos| Self::new_unchecked(&self.0[..pos]))
     }
 
     /// Get the leaf component (everything after the last '.')

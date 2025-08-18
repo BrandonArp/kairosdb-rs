@@ -11,8 +11,6 @@ use std::time::Duration;
 #[allow(unused_imports)]
 use tokio::time::sleep;
 
-
-
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
 async fn test_basic_data_flow() {
@@ -74,7 +72,10 @@ async fn test_basic_data_flow() {
 
     let query_response = config
         .client
-        .post(format!("{}/api/v1/datapoints/query", JAVA_KAIROSDB_BASE_URL))
+        .post(format!(
+            "{}/api/v1/datapoints/query",
+            JAVA_KAIROSDB_BASE_URL
+        ))
         .header("Content-Type", "application/json")
         .json(&query_payload)
         .send()
@@ -126,12 +127,15 @@ async fn test_basic_data_flow() {
     let found_value = values.iter().any(|value| {
         let timestamp = value[0].as_i64().unwrap_or(0);
         let val = value[1].as_f64().unwrap_or(0.0);
-        
+
         // Check if this is our data point (within 1 second tolerance)
         (timestamp - now).abs() < 1000 && (val - 42.5).abs() < 0.001
     });
 
-    assert!(found_value, "Should find our test data point in the response");
+    assert!(
+        found_value,
+        "Should find our test data point in the response"
+    );
 
     println!("✅ End-to-end test passed: Data successfully flowed from ingest to query");
 }
@@ -143,7 +147,10 @@ async fn test_histogram_data_flow() {
     let metric_name = config.test_metric_name("histogram_flow");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing histogram data flow with metric: {}", metric_name);
+    println!(
+        "🧪 Testing histogram data flow with metric: {}",
+        metric_name
+    );
 
     // Step 1: Send histogram data to Rust ingest service
     let histogram_payload = json!([{
@@ -204,7 +211,10 @@ async fn test_histogram_data_flow() {
 
     let query_response = config
         .client
-        .post(format!("{}/api/v1/datapoints/query", JAVA_KAIROSDB_BASE_URL))
+        .post(format!(
+            "{}/api/v1/datapoints/query",
+            JAVA_KAIROSDB_BASE_URL
+        ))
         .header("Content-Type", "application/json")
         .json(&query_payload)
         .send()
@@ -216,8 +226,7 @@ async fn test_histogram_data_flow() {
         let error_text = query_response.text().await.unwrap_or_default();
         panic!(
             "Failed to query histogram data from Java KairosDB: {} - {}",
-            status,
-            error_text
+            status, error_text
         );
     }
 
@@ -233,14 +242,20 @@ async fn test_histogram_data_flow() {
         .as_array()
         .expect("Response should contain queries array");
 
-    assert!(!queries.is_empty(), "Histogram query response should not be empty");
+    assert!(
+        !queries.is_empty(),
+        "Histogram query response should not be empty"
+    );
 
     let first_query = &queries[0];
     let results = first_query["results"]
         .as_array()
         .expect("Histogram query should contain results array");
 
-    assert!(!results.is_empty(), "Histogram query results should not be empty");
+    assert!(
+        !results.is_empty(),
+        "Histogram query results should not be empty"
+    );
 
     let first_result = &results[0];
     assert_eq!(
@@ -253,7 +268,10 @@ async fn test_histogram_data_flow() {
         .as_array()
         .expect("Histogram result should contain values array");
 
-    assert!(!values.is_empty(), "Histogram values array should not be empty");
+    assert!(
+        !values.is_empty(),
+        "Histogram values array should not be empty"
+    );
 
     println!("✅ Histogram end-to-end test passed: Histogram data successfully flowed from ingest to query");
 }
@@ -328,9 +346,9 @@ async fn test_multiple_metrics_batch() {
     // Step 3: Query each metric and verify data exists
     for metric_suffix in ["cpu_usage", "memory_usage", "disk_io"] {
         let metric_name = config.test_metric_name(metric_suffix);
-        
+
         println!("📥 Querying metric: {}", metric_name);
-        
+
         let query_payload = json!({
             "start_relative": {
                 "value": 1,
@@ -343,7 +361,10 @@ async fn test_multiple_metrics_batch() {
 
         let query_response = config
             .client
-            .post(format!("{}/api/v1/datapoints/query", JAVA_KAIROSDB_BASE_URL))
+            .post(format!(
+                "{}/api/v1/datapoints/query",
+                JAVA_KAIROSDB_BASE_URL
+            ))
             .header("Content-Type", "application/json")
             .json(&query_payload)
             .send()
@@ -363,10 +384,18 @@ async fn test_multiple_metrics_batch() {
             .unwrap_or_else(|_| panic!("Failed to parse response for metric {}", metric_name));
 
         let queries = query_result["queries"].as_array().unwrap();
-        assert!(!queries.is_empty(), "Query should return results for {}", metric_name);
+        assert!(
+            !queries.is_empty(),
+            "Query should return results for {}",
+            metric_name
+        );
 
         let results = queries[0]["results"].as_array().unwrap();
-        assert!(!results.is_empty(), "Should have results for {}", metric_name);
+        assert!(
+            !results.is_empty(),
+            "Should have results for {}",
+            metric_name
+        );
 
         let values = results[0]["values"].as_array().unwrap();
         assert!(!values.is_empty(), "Should have values for {}", metric_name);
@@ -378,7 +407,7 @@ async fn test_multiple_metrics_batch() {
 }
 
 #[tokio::test]
-#[ignore] // Run with --ignored flag, requires Tilt environment  
+#[ignore] // Run with --ignored flag, requires Tilt environment
 async fn test_data_flow_with_complex_tags() {
     let config = E2ETestConfig::new();
     let metric_name = config.test_metric_name("complex_tags");
@@ -411,7 +440,10 @@ async fn test_data_flow_with_complex_tags() {
         .await
         .expect("Failed to send data with complex tags");
 
-    assert!(ingest_response.status().is_success(), "Failed to ingest data with complex tags");
+    assert!(
+        ingest_response.status().is_success(),
+        "Failed to ingest data with complex tags"
+    );
 
     println!("✅ Data with complex tags sent successfully");
 
@@ -437,19 +469,33 @@ async fn test_data_flow_with_complex_tags() {
 
     let query_response = config
         .client
-        .post(format!("{}/api/v1/datapoints/query", JAVA_KAIROSDB_BASE_URL))
+        .post(format!(
+            "{}/api/v1/datapoints/query",
+            JAVA_KAIROSDB_BASE_URL
+        ))
         .header("Content-Type", "application/json")
         .json(&query_payload)
         .send()
         .await
         .expect("Failed to query with tag filters");
 
-    assert!(query_response.status().is_success(), "Failed to query with tag filters");
+    assert!(
+        query_response.status().is_success(),
+        "Failed to query with tag filters"
+    );
 
-    let query_result: Value = query_response.json().await.expect("Failed to parse tag query response");
+    let query_result: Value = query_response
+        .json()
+        .await
+        .expect("Failed to parse tag query response");
 
-    let queries = query_result["queries"].as_array().expect("Response should contain queries");
-    assert!(!queries.is_empty(), "Tag filtered query should return results");
+    let queries = query_result["queries"]
+        .as_array()
+        .expect("Response should contain queries");
+    assert!(
+        !queries.is_empty(),
+        "Tag filtered query should return results"
+    );
 
     println!("✅ Complex tags test passed: Data found with tag filtering");
 }
