@@ -104,11 +104,19 @@ impl IngestionService {
             Arc::new(MockCassandraClient::new())
         } else {
             info!("Using production Cassandra client");
-            Arc::new(
+            let client = Arc::new(
                 CassandraClientImpl::new(config.cassandra.clone())
                     .await
                     .context("Failed to initialize production Cassandra client")?
-            )
+            );
+            
+            // Ensure schema exists
+            info!("Ensuring KairosDB schema exists");
+            client.ensure_schema()
+                .await
+                .context("Failed to ensure Cassandra schema")?;
+            
+            client
         };
         
         // Initialize Prometheus metrics
