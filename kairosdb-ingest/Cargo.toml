@@ -62,7 +62,7 @@ url = { workspace = true }
 kairosdb-core = { path = "../kairosdb-core" }
 
 # Metrics collection (Prometheus)
-prometheus = "0.13"
+prometheus = "0.14"
 
 # Compression support
 flate2 = "1.0"
