@@ -52,6 +52,13 @@ validator = { workspace = true }
 # Base64 encoding for binary data
 base64 = { workspace = true }
 
+# Protocol Buffers for histogram V2 format compatibility
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.12"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"

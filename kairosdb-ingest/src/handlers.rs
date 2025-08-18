@@ -7,34 +7,21 @@ use axum::{
     body::Body,
     extract::{Request, State},
     http::{header, HeaderMap, StatusCode},
-    middleware::{self, Next},
+    middleware::Next,
     response::{IntoResponse, Json, Response},
-    routing::{get, post},
-    Router,
 };
 use flate2::read::GzDecoder;
-use kairosdb_core::{
-    datapoint::DataPointBatch,
-    error::{KairosError, KairosResult},
-};
-use prometheus::{Encoder, TextEncoder};
-use serde_json::{json, Value};
+use kairosdb_core::error::KairosError;
+use prometheus::TextEncoder;
+use serde_json::json;
 use std::{
     io::Read,
-    sync::Arc,
     time::Instant,
-};
-use tower::ServiceBuilder;
-use tower_http::{
-    compression::CompressionLayer,
-    cors::CorsLayer,
-    limit::RequestBodyLimitLayer,
-    trace::TraceLayer,
 };
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    ingestion::{HealthStatus, IngestionService},
+    ingestion::HealthStatus,
     json_parser::{ErrorResponse, IngestResponse, JsonParser},
     AppState,
 };

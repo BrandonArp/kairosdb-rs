@@ -23,6 +23,7 @@
 pub mod cassandra;
 pub mod datapoint;
 pub mod error;
+pub mod histogram_key_utility;
 pub mod metrics;
 pub mod query;
 pub mod schema;
@@ -31,7 +32,7 @@ pub mod time;
 pub mod validation;
 
 // Re-export commonly used types
-pub use datapoint::{DataPoint, DataPointValue};
+pub use datapoint::{DataPoint, DataPointValue, HistogramData, HistogramBuilder};
 pub use error::{KairosResult, KairosError};
 pub use metrics::MetricName;
 pub use tags::{TagSet, TagKey, TagValue};

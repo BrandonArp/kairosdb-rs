@@ -3,9 +3,9 @@
 //! This module provides JSON parsing that is fully compatible with the Java KairosDB API.
 //! It handles the specific JSON format used by KairosDB for data point ingestion.
 
-use anyhow::{Context, Result};
+use anyhow::Context;
 use kairosdb_core::{
-    datapoint::{DataPoint, DataPointBatch, DataPointValue},
+    datapoint::{DataPoint, DataPointBatch, DataPointValue, HistogramData},
     error::{KairosError, KairosResult},
     metrics::MetricName,
     tags::{TagKey, TagSet, TagValue},
@@ -14,7 +14,7 @@ use kairosdb_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 use validator::Validate;
 
 /// JSON request format for KairosDB data point ingestion
@@ -253,7 +253,7 @@ impl JsonParser {
         }
         
         // Create data point
-        let mut point = DataPoint {
+        let point = DataPoint {
             metric: metric_name.clone(),
             timestamp,
             value,
@@ -321,8 +321,265 @@ impl JsonParser {
                 // Convert boolean to integer (false=0, true=1)
                 Ok(DataPointValue::Long(if *b { 1 } else { 0 }))
             }
-            _ => Err(KairosError::validation("Value must be a number, string, or boolean")),
+            Value::Object(obj) => {
+                // Check if this is a histogram object
+                if obj.contains_key("buckets") || obj.contains_key("boundaries") || obj.contains_key("bins") {
+                    self.parse_histogram(obj)
+                } else if obj.contains_key("real") && obj.contains_key("imaginary") {
+                    // Complex number
+                    let real = obj.get("real")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| KairosError::validation("Complex number 'real' must be a number"))?;
+                    let imaginary = obj.get("imaginary")
+                        .and_then(|v| v.as_f64())
+                        .ok_or_else(|| KairosError::validation("Complex number 'imaginary' must be a number"))?;
+                    
+                    if !real.is_finite() || !imaginary.is_finite() {
+                        return Err(KairosError::validation("Complex number parts cannot be infinite or NaN"));
+                    }
+                    
+                    Ok(DataPointValue::Complex { real, imaginary })
+                } else {
+                    Err(KairosError::validation("Unsupported object value format"))
+                }
+            }
+            _ => Err(KairosError::validation("Value must be a number, string, boolean, or histogram object")),
         }
+    }
+    
+    /// Parse histogram from JSON object
+    /// Supports multiple histogram formats:
+    /// 1. KairosDB V1/V2: {"bins": {"0.1": 10, "1.0": 20}, "min": 0.05, "max": 0.95, "sum": 15.5, "mean": 0.52}
+    /// 2. Prometheus-style: {"buckets": [{"le": 10.0, "count": 5}, ...], "sum": 100, "count": 10}
+    /// 3. Direct format: {"boundaries": [0, 10, 50], "counts": [2, 3, 5], "sum": 150, "total_count": 10}
+    fn parse_histogram(&self, obj: &serde_json::Map<String, Value>) -> KairosResult<DataPointValue> {
+        // Check for KairosDB bins format first (most common)
+        if obj.contains_key("bins") {
+            return self.parse_bins_histogram(obj);
+        }
+        
+        // Check for Prometheus-style buckets format
+        if let Some(buckets_value) = obj.get("buckets") {
+            return self.parse_prometheus_histogram(obj, buckets_value);
+        }
+        
+        // Check for direct boundaries format
+        if let Some(boundaries_value) = obj.get("boundaries") {
+            return self.parse_direct_histogram(obj, boundaries_value);
+        }
+        
+        Err(KairosError::validation("Histogram must have 'bins', 'buckets', or 'boundaries' field"))
+    }
+    
+    /// Parse Prometheus-style histogram
+    fn parse_prometheus_histogram(&self, obj: &serde_json::Map<String, Value>, buckets_value: &Value) -> KairosResult<DataPointValue> {
+        let buckets = buckets_value.as_array()
+            .ok_or_else(|| KairosError::validation("Histogram 'buckets' must be an array"))?;
+        
+        let mut boundaries = Vec::new();
+        let mut counts = Vec::new();
+        
+        // Parse buckets
+        for (i, bucket) in buckets.iter().enumerate() {
+            let bucket_obj = bucket.as_object()
+                .ok_or_else(|| KairosError::validation(format!("Bucket {} must be an object", i)))?;
+            
+            let le = bucket_obj.get("le")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| KairosError::validation(format!("Bucket {} missing 'le' (less than or equal) field", i)))?;
+            
+            let count = bucket_obj.get("count")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| KairosError::validation(format!("Bucket {} missing 'count' field", i)))?;
+            
+            if !le.is_finite() {
+                return Err(KairosError::validation(format!("Bucket {} 'le' value must be finite", i)));
+            }
+            
+            boundaries.push(le);
+            counts.push(count);
+        }
+        
+        // Get total count and sum
+        let total_count = obj.get("count")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| KairosError::validation("Histogram missing 'count' field"))?;
+        
+        let sum = obj.get("sum")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        
+        if !sum.is_finite() {
+            return Err(KairosError::validation("Histogram 'sum' must be finite"));
+        }
+        
+        // Optional min/max
+        let min = obj.get("min").and_then(|v| v.as_f64());
+        let max = obj.get("max").and_then(|v| v.as_f64());
+        
+        // Validate min/max are finite if present
+        if let Some(min_val) = min {
+            if !min_val.is_finite() {
+                return Err(KairosError::validation("Histogram 'min' must be finite"));
+            }
+        }
+        if let Some(max_val) = max {
+            if !max_val.is_finite() {
+                return Err(KairosError::validation("Histogram 'max' must be finite"));
+            }
+        }
+        
+        // Convert Prometheus cumulative counts to individual bucket counts
+        let mut individual_counts = Vec::new();
+        let mut prev_count = 0;
+        for &cumulative_count in &counts {
+            if cumulative_count < prev_count {
+                return Err(KairosError::validation("Histogram bucket counts must be non-decreasing"));
+            }
+            individual_counts.push(cumulative_count - prev_count);
+            prev_count = cumulative_count;
+        }
+        
+        // Convert to bins format and create histogram
+        let bins: Vec<(f64, u64)> = boundaries.into_iter()
+            .zip(individual_counts.into_iter())
+            .collect();
+        
+        let histogram = HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
+        Ok(DataPointValue::Histogram(histogram))
+    }
+    
+    /// Parse KairosDB bins format: {"bins": {"0.1": 10, "1.0": 20}, "min": 0.05, "max": 0.95, "sum": 15.5, "mean": 0.52}
+    fn parse_bins_histogram(&self, obj: &serde_json::Map<String, Value>) -> KairosResult<DataPointValue> {
+        // Get bins object
+        let bins_value = obj.get("bins")
+            .ok_or_else(|| KairosError::validation("Histogram missing 'bins' field"))?;
+        
+        let bins_obj = bins_value.as_object()
+            .ok_or_else(|| KairosError::validation("Histogram 'bins' must be an object"))?;
+        
+        // Parse bins into sorted Vec<(f64, u64)>
+        let mut bins = Vec::new();
+        for (boundary_str, count_val) in bins_obj {
+            let boundary = boundary_str.parse::<f64>()
+                .map_err(|_| KairosError::validation(format!("Invalid bin boundary: {}", boundary_str)))?;
+            
+            let count = count_val.as_u64()
+                .ok_or_else(|| KairosError::validation(format!("Bin count must be integer: {}", count_val)))?;
+            
+            if !boundary.is_finite() {
+                return Err(KairosError::validation("Bin boundary must be finite"));
+            }
+            
+            bins.push((boundary, count));
+        }
+        
+        // Sort bins by boundary (KairosDB uses TreeMap which is sorted)
+        bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Get required fields
+        let sum = obj.get("sum")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'sum' field"))?;
+        
+        let min = obj.get("min")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'min' field"))?;
+        
+        let max = obj.get("max")
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'max' field"))?;
+        
+        // Precision is optional (V1 has no precision field, V2 does)
+        let precision = obj.get("precision")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u8)
+            .unwrap_or(7); // Default V1 precision
+        
+        // Validate values
+        if !sum.is_finite() || !min.is_finite() || !max.is_finite() {
+            return Err(KairosError::validation("Histogram values must be finite"));
+        }
+        
+        let histogram = HistogramData::from_bins(bins, sum, min, max, Some(precision))?;
+        Ok(DataPointValue::Histogram(histogram))
+    }
+    
+    /// Parse direct histogram format (boundaries/counts arrays)
+    fn parse_direct_histogram(&self, obj: &serde_json::Map<String, Value>, boundaries_value: &Value) -> KairosResult<DataPointValue> {
+        // Parse boundaries
+        let boundaries_array = boundaries_value.as_array()
+            .ok_or_else(|| KairosError::validation("Histogram 'boundaries' must be an array"))?;
+        
+        let mut boundaries = Vec::new();
+        for (i, boundary_val) in boundaries_array.iter().enumerate() {
+            let boundary = boundary_val.as_f64()
+                .ok_or_else(|| KairosError::validation(format!("Boundary {} must be a number", i)))?;
+            
+            if !boundary.is_finite() {
+                return Err(KairosError::validation(format!("Boundary {} must be finite", i)));
+            }
+            
+            boundaries.push(boundary);
+        }
+        
+        // Parse counts
+        let counts_value = obj.get("counts")
+            .ok_or_else(|| KairosError::validation("Histogram missing 'counts' field"))?;
+        
+        let counts_array = counts_value.as_array()
+            .ok_or_else(|| KairosError::validation("Histogram 'counts' must be an array"))?;
+        
+        let mut counts = Vec::new();
+        for (i, count_val) in counts_array.iter().enumerate() {
+            let count = count_val.as_u64()
+                .ok_or_else(|| KairosError::validation(format!("Count {} must be a non-negative integer", i)))?;
+            
+            counts.push(count);
+        }
+        
+        // Validate boundaries and counts have same length
+        if boundaries.len() != counts.len() {
+            return Err(KairosError::validation("Histogram boundaries and counts must have same length"));
+        }
+        
+        // Get total count (can be calculated or explicit)
+        let total_count = obj.get("total_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| counts.iter().sum());
+        
+        // Get sum
+        let sum = obj.get("sum")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        
+        if !sum.is_finite() {
+            return Err(KairosError::validation("Histogram 'sum' must be finite"));
+        }
+        
+        // Optional min/max
+        let min = obj.get("min").and_then(|v| v.as_f64());
+        let max = obj.get("max").and_then(|v| v.as_f64());
+        
+        // Validate min/max are finite if present
+        if let Some(min_val) = min {
+            if !min_val.is_finite() {
+                return Err(KairosError::validation("Histogram 'min' must be finite"));
+            }
+        }
+        if let Some(max_val) = max {
+            if !max_val.is_finite() {
+                return Err(KairosError::validation("Histogram 'max' must be finite"));
+            }
+        }
+        
+        // Convert to bins format and create histogram
+        let bins: Vec<(f64, u64)> = boundaries.into_iter()
+            .zip(counts.into_iter())
+            .collect();
+        
+        let histogram = HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
+        Ok(DataPointValue::Histogram(histogram))
     }
     
     /// Parse tags from HashMap
@@ -558,5 +815,217 @@ mod tests {
         let response = ErrorResponse::from_kairos_error(&error);
         assert_eq!(response.errors.len(), 1);
         assert!(response.errors[0].contains("Test error"));
+    }
+    
+    #[test]
+    fn test_parse_kairosdb_bins_histogram() {
+        let parser = JsonParser::default();
+        let json = json!({
+            "name": "response_time_histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "bins": {
+                        "0.1": 10,
+                        "1.0": 50,
+                        "5.0": 25,
+                        "10.0": 5
+                    },
+                    "min": 0.05,
+                    "max": 9.8,
+                    "sum": 195.5,
+                    "precision": 7
+                }
+            ]],
+            "tags": {"service": "web"}
+        }).to_string();
+        
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(warnings.is_empty());
+        
+        let point = &batch.points[0];
+        assert_eq!(point.metric.as_str(), "response_time_histogram");
+        assert!(matches!(point.value, DataPointValue::Histogram(_)));
+        
+        if let DataPointValue::Histogram(hist) = &point.value {
+            // Check sorted bins
+            let bins = hist.bins();
+            assert_eq!(bins.len(), 4);
+            assert_eq!(bins[0], (0.1, 10));
+            assert_eq!(bins[1], (1.0, 50));
+            assert_eq!(bins[2], (5.0, 25));
+            assert_eq!(bins[3], (10.0, 5));
+            
+            assert_eq!(hist.sum(), 195.5);
+            assert_eq!(hist.min(), 0.05);
+            assert_eq!(hist.max(), 9.8);
+            assert!((hist.mean() - 2.172222222222222).abs() < 1e-10); // sum/count = 195.5/90
+            assert_eq!(hist.precision(), 7);
+            assert_eq!(hist.total_count(), 90);
+        }
+    }
+    
+    #[test]
+    fn test_parse_kairosdb_v1_histogram_no_precision() {
+        let parser = JsonParser::default();
+        let json = json!({
+            "name": "latency_histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "bins": {
+                        "0.0": 5,
+                        "10.0": 15,
+                        "50.0": 8
+                    },
+                    "min": 1.0,
+                    "max": 45.0,
+                    "sum": 425.0
+                }
+            ]],
+            "tags": {"endpoint": "/api"}
+        }).to_string();
+        
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        
+        if let DataPointValue::Histogram(hist) = &batch.points[0].value {
+            assert_eq!(hist.precision(), 7); // Default V1 precision
+            assert_eq!(hist.total_count(), 28);
+        }
+    }
+    
+    #[test]
+    fn test_parse_direct_histogram() {
+        let parser = JsonParser::default();
+        let json = json!({
+            "name": "response_time_histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "boundaries": [0.0, 10.0, 50.0, 100.0],
+                    "counts": [5, 10, 8, 2],
+                    "total_count": 25,
+                    "sum": 650.5,
+                    "min": 1.2,
+                    "max": 95.0
+                }
+            ]],
+            "tags": {"service": "web"}
+        }).to_string();
+        
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(warnings.is_empty());
+        
+        let point = &batch.points[0];
+        assert_eq!(point.metric.as_str(), "response_time_histogram");
+        assert!(matches!(point.value, DataPointValue::Histogram(_)));
+        
+        if let DataPointValue::Histogram(hist) = &point.value {
+            assert_eq!(hist.boundaries, vec![0.0, 10.0, 50.0, 100.0]);
+            assert_eq!(hist.counts, vec![5, 10, 8, 2]);
+            assert_eq!(hist.total_count(), 25);
+            assert_eq!(hist.sum, 650.5);
+            assert_eq!(hist.min, 1.2);
+            assert_eq!(hist.max, 95.0);
+        }
+    }
+    
+    #[test]
+    fn test_parse_prometheus_histogram() {
+        let parser = JsonParser::default();
+        let json = json!({
+            "name": "http_request_duration",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "buckets": [
+                        {"le": 0.1, "count": 5},
+                        {"le": 0.5, "count": 15},
+                        {"le": 1.0, "count": 25},
+                        {"le": 5.0, "count": 30}
+                    ],
+                    "count": 30,
+                    "sum": 45.5
+                }
+            ]],
+            "tags": {"method": "GET"}
+        }).to_string();
+        
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(warnings.is_empty());
+        
+        let point = &batch.points[0];
+        assert!(matches!(point.value, DataPointValue::Histogram(_)));
+        
+        if let DataPointValue::Histogram(hist) = &point.value {
+            assert_eq!(hist.boundaries, vec![0.1, 0.5, 1.0, 5.0]);
+            assert_eq!(hist.counts, vec![5, 10, 10, 5]); // Individual bucket counts, not cumulative
+            assert_eq!(hist.total_count(), 30);
+            assert_eq!(hist.sum, 45.5);
+        }
+    }
+    
+    #[test]
+    fn test_parse_complex_number() {
+        let parser = JsonParser::default();
+        let json = json!({
+            "name": "signal.complex",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "real": 3.14,
+                    "imaginary": 2.71
+                }
+            ]],
+            "tags": {}
+        }).to_string();
+        
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(warnings.is_empty());
+        
+        let point = &batch.points[0];
+        assert!(matches!(point.value, DataPointValue::Complex { real: 3.14, imaginary: 2.71 }));
+    }
+    
+    #[test]
+    fn test_histogram_validation_errors() {
+        let parser = JsonParser::default();
+        
+        // Test missing required fields
+        let json = json!({
+            "name": "test_histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "boundaries": [1.0, 2.0]
+                    // Missing counts
+                }
+            ]],
+            "tags": {}
+        }).to_string();
+        
+        let result = parser.parse_json(&json);
+        assert!(result.is_err());
+        
+        // Test mismatched array lengths
+        let json = json!({
+            "name": "test_histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "boundaries": [1.0, 2.0, 3.0],
+                    "counts": [5, 10] // Wrong length
+                }
+            ]],
+            "tags": {}
+        }).to_string();
+        
+        let result = parser.parse_json(&json);
+        assert!(result.is_err());
     }
 }

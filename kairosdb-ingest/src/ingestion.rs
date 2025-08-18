@@ -7,11 +7,11 @@
 //! - Metrics collection and monitoring
 
 use anyhow::{Context, Result};
-use dashmap::DashMap;
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 use kairosdb_core::{
     datapoint::{DataPoint, DataPointBatch},
     error::{KairosError, KairosResult},
+    time::Timestamp,
 };
 use parking_lot::RwLock;
 use prometheus::{
@@ -22,22 +22,16 @@ use std::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 use sysinfo::System;
-use tokio::{
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Semaphore,
-    },
-    task::JoinHandle,
-    time::{interval, sleep, timeout},
-};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    mock_cassandra::MockCassandraClient,
+    cassandra::{BoxedCassandraClient, CassandraClient},
+    cassandra_client::CassandraClientImpl,
     config::IngestConfig,
+    mock_client::MockCassandraClient,
 };
 
 /// Comprehensive metrics for monitoring ingestion service
@@ -82,7 +76,7 @@ pub struct IngestionService {
     config: Arc<IngestConfig>,
     
     /// Cassandra client for data persistence
-    cassandra_client: Arc<MockCassandraClient>,
+    cassandra_client: BoxedCassandraClient,
     
     /// Metrics collection
     metrics: IngestionMetrics,
@@ -101,12 +95,21 @@ impl IngestionService {
         
         info!("Initializing ingestion service");
         
-        // Initialize Cassandra client
-        let cassandra_client = Arc::new(
-            MockCassandraClient::new(Arc::new(config.cassandra.clone()))
-                .await
-                .context("Failed to initialize Cassandra client")?
-        );
+        // Initialize Cassandra client based on environment
+        let cassandra_client: BoxedCassandraClient = if std::env::var("USE_MOCK_CASSANDRA")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false) 
+        {
+            info!("Using mock Cassandra client for testing");
+            Arc::new(MockCassandraClient::new())
+        } else {
+            info!("Using production Cassandra client");
+            Arc::new(
+                CassandraClientImpl::new(Arc::new(config.cassandra.clone()))
+                    .await
+                    .context("Failed to initialize production Cassandra client")?
+            )
+        };
         
         // Initialize Prometheus metrics
         let prometheus_metrics = PrometheusMetrics::new()?;
@@ -145,6 +148,49 @@ impl IngestionService {
         // TODO: Implement proper worker threads and monitoring
         
         info!("Ingestion service initialized with {} worker threads", config.ingestion.worker_threads);
+        Ok(service)
+    }
+    
+    /// Create a new ingestion service with mock client for testing
+    #[cfg(test)]
+    pub async fn new_with_mock(config: Arc<IngestConfig>) -> Result<Self> {
+        config.validate().context("Invalid configuration")?;
+        
+        info!("Initializing ingestion service with mock client for testing");
+        
+        // Use mock client for testing
+        let cassandra_client: BoxedCassandraClient = Arc::new(MockCassandraClient::new());
+        
+        // Initialize Prometheus metrics
+        let prometheus_metrics = PrometheusMetrics::new()?;
+        
+        // Initialize ingestion metrics
+        let metrics = IngestionMetrics {
+            datapoints_ingested: Arc::new(AtomicU64::new(0)),
+            batches_processed: Arc::new(AtomicU64::new(0)),
+            ingestion_errors: Arc::new(AtomicU64::new(0)),
+            validation_errors: Arc::new(AtomicU64::new(0)),
+            cassandra_errors: Arc::new(AtomicU64::new(0)),
+            queue_size: Arc::new(AtomicUsize::new(0)),
+            memory_usage: Arc::new(AtomicU64::new(0)),
+            avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
+            last_batch_time: Arc::new(RwLock::new(None)),
+            prometheus_metrics,
+        };
+        
+        // Initialize system monitor
+        let system_monitor = Arc::new(RwLock::new(System::new_all()));
+        let backpressure_active = Arc::new(AtomicU64::new(0));
+        
+        let service = Self {
+            config,
+            cassandra_client,
+            metrics,
+            system_monitor,
+            backpressure_active,
+        };
+        
+        info!("Test ingestion service initialized with mock client");
         Ok(service)
     }
     

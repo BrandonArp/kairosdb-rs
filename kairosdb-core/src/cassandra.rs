@@ -242,6 +242,34 @@ impl CassandraValue {
             }
             DataPointValue::Text(s) => s.as_bytes().to_vec(),
             DataPointValue::Binary(b) => b.clone(),
+            DataPointValue::Histogram(h) => {
+                // Serialize histogram as binary data
+                // Format: [boundaries_len][boundaries...][counts...][total_count][sum][min][max]
+                let mut bytes = Vec::new();
+                
+                // Write boundaries length
+                bytes.extend_from_slice(&(h.boundaries.len() as u32).to_be_bytes());
+                
+                // Write boundaries
+                for boundary in &h.boundaries {
+                    bytes.extend_from_slice(&boundary.to_be_bytes());
+                }
+                
+                // Write counts
+                for count in &h.counts {
+                    bytes.extend_from_slice(&count.to_be_bytes());
+                }
+                
+                // Write metadata  
+                bytes.extend_from_slice(&h.total_count().to_le_bytes());
+                bytes.extend_from_slice(&h.sum.to_le_bytes());
+                bytes.extend_from_slice(&h.mean.to_le_bytes());
+                bytes.extend_from_slice(&h.min.to_le_bytes());
+                bytes.extend_from_slice(&h.max.to_le_bytes());
+                bytes.push(h.precision);
+                
+                bytes
+            }
         };
         
         Self { bytes, ttl }

@@ -25,6 +25,8 @@ pub struct ValidationLimits {
     pub max_text_value_length: usize,
     /// Maximum binary value length
     pub max_binary_value_length: usize,
+    /// Maximum histogram buckets
+    pub max_histogram_buckets: usize,
 }
 
 impl Default for ValidationLimits {
@@ -38,6 +40,7 @@ impl Default for ValidationLimits {
             max_metrics_per_query: 100,
             max_text_value_length: 1024 * 1024, // 1MB
             max_binary_value_length: 10 * 1024 * 1024, // 10MB
+            max_histogram_buckets: 1000, // Maximum buckets per histogram
         }
     }
 }
@@ -226,6 +229,57 @@ impl Validator {
                         data.len(),
                         self.limits.max_binary_value_length
                     )));
+                }
+            }
+            DataPointValue::Histogram(hist) => {
+                // Validate histogram structure
+                if hist.boundaries.is_empty() {
+                    return Err(KairosError::validation("Histogram must have at least one boundary"));
+                }
+                
+                if hist.boundaries.len() != hist.counts.len() {
+                    return Err(KairosError::validation("Histogram boundaries and counts must have same length"));
+                }
+                
+                // Check boundaries are sorted
+                for i in 1..hist.boundaries.len() {
+                    if hist.boundaries[i] <= hist.boundaries[i-1] {
+                        return Err(KairosError::validation("Histogram boundaries must be sorted"));
+                    }
+                }
+                
+                // Check counts sum matches computed total
+                let counts_sum: u64 = hist.counts.iter().sum();
+                if counts_sum != hist.total_count() {
+                    return Err(KairosError::validation("Histogram counts sum must equal total_count"));
+                }
+                
+                // Validate bucket count limit
+                if hist.boundaries.len() > self.limits.max_histogram_buckets {
+                    return Err(KairosError::validation(format!(
+                        "Too many histogram buckets: {} > {}",
+                        hist.boundaries.len(),
+                        self.limits.max_histogram_buckets
+                    )));
+                }
+                
+                // Validate numeric values
+                for boundary in &hist.boundaries {
+                    if boundary.is_infinite() || boundary.is_nan() {
+                        return Err(KairosError::validation("Histogram boundary cannot be infinite or NaN"));
+                    }
+                }
+                
+                if hist.sum.is_infinite() || hist.sum.is_nan() {
+                    return Err(KairosError::validation("Histogram sum cannot be infinite or NaN"));
+                }
+                
+                if hist.min.is_infinite() || hist.min.is_nan() {
+                    return Err(KairosError::validation("Histogram min cannot be infinite or NaN"));
+                }
+                
+                if hist.max.is_infinite() || hist.max.is_nan() {
+                    return Err(KairosError::validation("Histogram max cannot be infinite or NaN"));
                 }
             }
         }

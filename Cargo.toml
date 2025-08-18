@@ -71,6 +71,10 @@ validator = { version = "0.18", features = ["derive"] }
 # Base64 encoding for binary data
 base64 = "0.22"
 
+# Protocol Buffers for histogram V2 format compatibility
+prost = "0.12"
+prost-types = "0.12"
+
 # HTTP client for health checks and inter-service communication
 reqwest = { version = "0.11", features = ["json"] }
 url = "2.4"
