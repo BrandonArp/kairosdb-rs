@@ -131,7 +131,7 @@ pub async fn tag_names_handler(
 
     let metric = params
         .get("metric")
-        .map(|m| kairosdb_core::metrics::MetricName::new(m))
+        .map(kairosdb_core::metrics::MetricName::new)
         .transpose()
         .map_err(|err| {
             (

@@ -409,7 +409,7 @@ impl HistogramData {
     /// Calculate percentile (0.0 to 1.0)
     pub fn percentile(&self, p: f64) -> Option<f64> {
         let total = self.total_count();
-        if p < 0.0 || p > 1.0 || total == 0 {
+        if !(0.0..=1.0).contains(&p) || total == 0 {
             return None;
         }
 
@@ -659,7 +659,7 @@ impl HistogramBuilder {
         let bins: Vec<(f64, u64)> = self
             .boundaries
             .into_iter()
-            .zip(self.counts.into_iter())
+            .zip(self.counts)
             .collect();
 
         HistogramData::from_bins(bins, self.sum, self.min, self.max, Some(self.precision))
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_data_point_with_tags() {
-        let dp = DataPoint::new_double("test.metric", Timestamp::now(), 3.14)
+        let dp = DataPoint::new_double("test.metric", Timestamp::now(), std::f64::consts::PI)
             .with_tag("host", "server1")
             .unwrap()
             .with_tag("region", "us-east-1")
@@ -738,8 +738,8 @@ mod tests {
         assert_eq!(long_val.as_i64(), Some(42));
         assert_eq!(long_val.as_f64(), Some(42.0));
 
-        let double_val = DataPointValue::Double(OrderedFloat(3.14));
-        assert_eq!(double_val.as_f64(), Some(3.14));
+        let double_val = DataPointValue::Double(OrderedFloat(std::f64::consts::PI));
+        assert_eq!(double_val.as_f64(), Some(std::f64::consts::PI));
         assert!(double_val.as_i64().is_none());
     }
 

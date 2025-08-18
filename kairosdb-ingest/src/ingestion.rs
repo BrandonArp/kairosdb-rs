@@ -220,12 +220,12 @@ impl IngestionService {
 
         // Validate batch if validation is enabled
         if self.config.ingestion.enable_validation {
-            batch.validate_self().map_err(|e| {
+            if let Err(e) = batch.validate_self() {
                 self.metrics
                     .validation_errors
                     .fetch_add(1, Ordering::Relaxed);
-                e
-            })?;
+                return Err(e);
+            }
         }
 
         // Process the batch directly with the Cassandra client
@@ -417,7 +417,6 @@ pub enum HealthStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kairosdb_core::time::Timestamp;
 
     #[tokio::test]
     async fn test_ingestion_service_creation() {

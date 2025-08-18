@@ -265,7 +265,7 @@ impl QueryEngine {
             data_points.push(point);
 
             current_ms += interval_ms;
-            value += (current_ms % 10) as i64; // Simulate varying values
+            value += current_ms % 10; // Simulate varying values
         }
 
         debug!(
@@ -461,7 +461,6 @@ struct TimeSeriesInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kairosdb_core::time::{RelativeTime, TimeUnit};
 
     #[tokio::test]
     async fn test_query_engine_creation() {

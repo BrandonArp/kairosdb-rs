@@ -280,15 +280,12 @@ impl MetricQuery {
 impl Aggregator {
     /// Validate the aggregator
     pub fn validate_self(&self) -> KairosResult<()> {
-        match self {
-            Aggregator::Percentile { percentile, .. } => {
-                if *percentile < 0.0 || *percentile > 100.0 {
-                    return Err(KairosError::validation(
-                        "Percentile must be between 0 and 100",
-                    ));
-                }
+        if let Aggregator::Percentile { percentile, .. } = self {
+            if *percentile < 0.0 || *percentile > 100.0 {
+                return Err(KairosError::validation(
+                    "Percentile must be between 0 and 100",
+                ));
             }
-            _ => {}
         }
         Ok(())
     }

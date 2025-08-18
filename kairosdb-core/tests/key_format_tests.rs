@@ -17,15 +17,15 @@ fn test_row_key_binary_format() {
     // Create a data point with known values for consistent testing
     let timestamp = Timestamp::from_millis(1755538800000).unwrap();
     let mut tags = TagSet::new();
-    tags.insert(
+    let _ = tags.insert(
         TagKey::new("application").unwrap(),
         TagValue::new("database").unwrap(),
     );
-    tags.insert(
+    let _ = tags.insert(
         TagKey::new("datacenter").unwrap(),
         TagValue::new("us-west-1").unwrap(),
     );
-    tags.insert(
+    let _ = tags.insert(
         TagKey::new("host").unwrap(),
         TagValue::new("server-01").unwrap(),
     );
@@ -92,7 +92,7 @@ fn test_column_key_format() {
 
 #[test]
 fn test_tag_format_compatibility() {
-    let test_cases = vec![
+    let test_cases = [
         // Simple tags
         vec![("host", "server1"), ("env", "prod")],
         // Tags with special characters
@@ -108,7 +108,7 @@ fn test_tag_format_compatibility() {
     for (i, tag_pairs) in test_cases.iter().enumerate() {
         let mut tags = TagSet::new();
         for (key, value) in tag_pairs {
-            tags.insert(TagKey::new(*key).unwrap(), TagValue::new(*value).unwrap());
+            let _ = tags.insert(TagKey::new(*key).unwrap(), TagValue::new(*value).unwrap());
         }
 
         let cassandra_format = tags.to_cassandra_format();
@@ -211,7 +211,7 @@ fn test_value_serialization_format() {
                         name
                     );
                     assert!(
-                        cassandra_value.bytes.len() > 0,
+                        !cassandra_value.bytes.is_empty(),
                         "Long {} should be > 0 bytes",
                         name
                     );
@@ -226,7 +226,7 @@ fn test_value_serialization_format() {
             DataPointValue::Text(s) => {
                 assert_eq!(
                     cassandra_value.bytes.len(),
-                    s.as_bytes().len(),
+                    s.len(),
                     "Text {} length mismatch",
                     name
                 );
@@ -315,7 +315,7 @@ fn test_data_type_assignment() {
     ];
 
     for (value, expected_type) in test_cases {
-        let mut data_point = match &value {
+        let data_point = match &value {
             DataPointValue::Double(d) => {
                 DataPoint::new_double("test", Timestamp::now(), d.into_inner())
             }

@@ -46,17 +46,11 @@ impl Default for ValidationLimits {
 }
 
 /// Comprehensive validator for KairosDB data
+#[derive(Default)]
 pub struct Validator {
     limits: ValidationLimits,
 }
 
-impl Default for Validator {
-    fn default() -> Self {
-        Self {
-            limits: ValidationLimits::default(),
-        }
-    }
-}
 
 impl Validator {
     /// Create a new validator with custom limits
@@ -478,15 +472,12 @@ impl Validator {
 
     /// Validate an aggregator
     pub fn validate_aggregator(&self, aggregator: &Aggregator) -> KairosResult<()> {
-        match aggregator {
-            Aggregator::Percentile { percentile, .. } => {
-                if *percentile < 0.0 || *percentile > 100.0 {
-                    return Err(KairosError::validation(
-                        "Percentile must be between 0 and 100",
-                    ));
-                }
+        if let Aggregator::Percentile { percentile, .. } = aggregator {
+            if *percentile < 0.0 || *percentile > 100.0 {
+                return Err(KairosError::validation(
+                    "Percentile must be between 0 and 100",
+                ));
             }
-            _ => {}
         }
 
         Ok(())

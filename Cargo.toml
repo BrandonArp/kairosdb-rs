@@ -2,7 +2,8 @@
 members = [
     "kairosdb-core",
     "kairosdb-ingest", 
-    "kairosdb-query"
+    "kairosdb-query",
+    "tests"
 ]
 resolver = "2"
 

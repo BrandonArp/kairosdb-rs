@@ -484,7 +484,7 @@ impl JsonParser {
         // Convert to bins format and create histogram
         let bins: Vec<(f64, u64)> = boundaries
             .into_iter()
-            .zip(individual_counts.into_iter())
+            .zip(individual_counts)
             .collect();
 
         let histogram =
@@ -641,7 +641,7 @@ impl JsonParser {
         }
 
         // Convert to bins format and create histogram
-        let bins: Vec<(f64, u64)> = boundaries.into_iter().zip(counts.into_iter()).collect();
+        let bins: Vec<(f64, u64)> = boundaries.into_iter().zip(counts).collect();
 
         let histogram =
             HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
@@ -727,7 +727,7 @@ mod tests {
         let parser = JsonParser::default();
         let json = json!({
             "name": "test.metric",
-            "datapoints": [[1634567890000i64, 3.14]],
+            "datapoints": [[1634567890000i64, std::f64::consts::PI]],
             "tags": {"host": "server1"}
         })
         .to_string();
@@ -771,7 +771,7 @@ mod tests {
             },
             {
                 "name": "metric2",
-                "datapoints": [[1634567890000i64, 3.14]],
+                "datapoints": [[1634567890000i64, std::f64::consts::PI]],
                 "tags": {"host": "server2"}
             }
         ])
@@ -968,7 +968,7 @@ mod tests {
         })
         .to_string();
 
-        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        let (batch, _warnings) = parser.parse_json(&json).unwrap();
         assert_eq!(batch.len(), 1);
 
         if let DataPointValue::Histogram(hist) = &batch.points[0].value {
@@ -1060,7 +1060,7 @@ mod tests {
             "datapoints": [[
                 1634567890000i64,
                 {
-                    "real": 3.14,
+                    "real": std::f64::consts::PI,
                     "imaginary": 2.71
                 }
             ]],
@@ -1076,7 +1076,7 @@ mod tests {
         assert!(matches!(
             point.value,
             DataPointValue::Complex {
-                real: 3.14,
+                real: std::f64::consts::PI,
                 imaginary: 2.71
             }
         ));
