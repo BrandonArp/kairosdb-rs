@@ -24,7 +24,6 @@ use std::{
     },
     time::Instant,
 };
-use sysinfo::System;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -81,8 +80,6 @@ pub struct IngestionService {
     /// Metrics collection
     metrics: IngestionMetrics,
     
-    /// System monitor for memory tracking
-    system_monitor: Arc<RwLock<System>>,
     
     /// Backpressure handler
     backpressure_active: Arc<AtomicU64>,
@@ -140,10 +137,6 @@ impl IngestionService {
             prometheus_metrics,
         };
         
-        // Initialize system monitor for memory tracking
-        let mut system = System::new_all();
-        system.refresh_all();
-        let system_monitor = Arc::new(RwLock::new(system));
         
         // Initialize backpressure tracking
         let backpressure_active = Arc::new(AtomicU64::new(0));
@@ -152,7 +145,6 @@ impl IngestionService {
             config: config.clone(),
             cassandra_client,
             metrics,
-            system_monitor,
             backpressure_active,
         };
         
@@ -190,15 +182,12 @@ impl IngestionService {
             prometheus_metrics,
         };
         
-        // Initialize system monitor
-        let system_monitor = Arc::new(RwLock::new(System::new_all()));
         let backpressure_active = Arc::new(AtomicU64::new(0));
         
         let service = Self {
             config,
             cassandra_client,
             metrics,
-            system_monitor,
             backpressure_active,
         };
         
