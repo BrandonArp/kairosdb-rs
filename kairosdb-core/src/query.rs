@@ -8,31 +8,31 @@ use crate::datapoint::{DataPoint, DataPointValue};
 use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
 use crate::tags::TagSet;
-use crate::time::{TimeRange, Timestamp, RelativeTime};
+use crate::time::{RelativeTime, TimeRange, Timestamp};
 
 /// Query request for time series data
 #[derive(Debug, Clone, Serialize, Deserialize, Validate)]
 pub struct QueryRequest {
     /// Start time for the query
     pub start_absolute: Option<Timestamp>,
-    
+
     /// Start time relative to now
     pub start_relative: Option<RelativeTime>,
-    
+
     /// End time for the query (optional, defaults to now)
     pub end_absolute: Option<Timestamp>,
-    
+
     /// End time relative to now
     pub end_relative: Option<RelativeTime>,
-    
+
     /// Metrics to query
     #[validate(length(min = 1, max = 100))]
     pub metrics: Vec<MetricQuery>,
-    
+
     /// Maximum number of data points to return
     #[serde(default)]
     pub limit: Option<usize>,
-    
+
     /// Cache time in seconds
     #[serde(default)]
     pub cache_time: Option<u32>,
@@ -43,19 +43,19 @@ pub struct QueryRequest {
 pub struct MetricQuery {
     /// Name of the metric to query
     pub name: MetricName,
-    
+
     /// Tags to filter by (all must match)
     #[serde(default)]
     pub tags: HashMap<String, String>,
-    
+
     /// Tags to group by (creates separate series)
     #[serde(default)]
     pub group_by: Vec<GroupBy>,
-    
+
     /// Aggregators to apply to the data
     #[serde(default)]
     pub aggregators: Vec<Aggregator>,
-    
+
     /// Limit for this specific metric
     #[serde(default)]
     pub limit: Option<usize>,
@@ -67,16 +67,16 @@ pub struct MetricQuery {
 pub enum GroupBy {
     #[serde(rename = "tag")]
     Tag { tags: Vec<String> },
-    
+
     #[serde(rename = "time")]
-    Time { 
+    Time {
         range_size: RelativeTime,
         group_count: Option<usize>,
     },
-    
+
     #[serde(rename = "value")]
     Value { range_size: f64 },
-    
+
     #[serde(rename = "type")]
     Type,
 }
@@ -90,53 +90,49 @@ pub enum Aggregator {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "sum")]
     Sum {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "min")]
     Min {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "max")]
     Max {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "count")]
     Count {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "dev")]
     StandardDeviation {
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "percentile")]
     Percentile {
         percentile: f64,
         #[serde(default)]
         sampling: Option<Sampling>,
     },
-    
+
     #[serde(rename = "rate")]
-    Rate {
-        unit: String,
-    },
-    
+    Rate { unit: String },
+
     #[serde(rename = "sampler")]
-    Sampler {
-        unit: String,
-    },
+    Sampler { unit: String },
 }
 
 /// Sampling specification for aggregators
@@ -144,7 +140,7 @@ pub enum Aggregator {
 pub struct Sampling {
     /// Sampling value (e.g., number or time amount)
     pub value: i64,
-    
+
     /// Sampling unit
     pub unit: String,
 }
@@ -154,7 +150,7 @@ pub struct Sampling {
 pub struct QueryResponse {
     /// Queried metrics and their results
     pub queries: Vec<MetricQueryResult>,
-    
+
     /// Sample count across all metrics
     pub sample_size: usize,
 }
@@ -164,7 +160,7 @@ pub struct QueryResponse {
 pub struct MetricQueryResult {
     /// Sample count for this metric
     pub sample_size: usize,
-    
+
     /// The queried results grouped by tags/time/etc
     pub results: Vec<QueryResult>,
 }
@@ -174,14 +170,14 @@ pub struct MetricQueryResult {
 pub struct QueryResult {
     /// Name of the metric
     pub name: MetricName,
-    
+
     /// Tags for this time series
     pub tags: HashMap<String, String>,
-    
+
     /// Group by values if grouping was applied
     #[serde(default)]
     pub group_by: Vec<GroupByResult>,
-    
+
     /// Data points in this time series
     pub values: Vec<DataPointResult>,
 }
@@ -191,24 +187,19 @@ pub struct QueryResult {
 #[serde(tag = "name")]
 pub enum GroupByResult {
     #[serde(rename = "tag")]
-    Tag { 
-        group: HashMap<String, String>,
-    },
-    
+    Tag { group: HashMap<String, String> },
+
     #[serde(rename = "time")]
-    Time { 
+    Time {
         range_start: Timestamp,
         range_end: Timestamp,
     },
-    
+
     #[serde(rename = "value")]
-    Value { 
-        range_start: f64,
-        range_end: f64,
-    },
-    
+    Value { range_start: f64, range_end: f64 },
+
     #[serde(rename = "type")]
-    Type { 
+    Type {
         #[serde(rename = "type")]
         data_type: String,
     },
@@ -219,7 +210,7 @@ pub enum GroupByResult {
 pub struct DataPointResult {
     /// Timestamp
     pub timestamp: Timestamp,
-    
+
     /// Value
     pub value: DataPointValue,
 }
@@ -228,7 +219,7 @@ impl QueryRequest {
     /// Get the effective time range for this query
     pub fn time_range(&self) -> KairosResult<TimeRange> {
         let now = Timestamp::now();
-        
+
         // Determine start time
         let start = if let Some(start_abs) = self.start_absolute {
             start_abs
@@ -237,7 +228,7 @@ impl QueryRequest {
         } else {
             return Err(KairosError::validation("Must specify start time"));
         };
-        
+
         // Determine end time
         let end = if let Some(end_abs) = self.end_absolute {
             end_abs
@@ -246,28 +237,28 @@ impl QueryRequest {
         } else {
             now
         };
-        
+
         TimeRange::new(start, end)
     }
-    
+
     /// Validate the query request
     pub fn validate_self(&self) -> KairosResult<()> {
         self.validate()
             .map_err(|e| KairosError::validation(format!("Invalid query: {}", e)))?;
-        
+
         // Check that we have either absolute or relative start time
         if self.start_absolute.is_none() && self.start_relative.is_none() {
             return Err(KairosError::validation("Must specify start time"));
         }
-        
+
         // Validate time range
         let _range = self.time_range()?;
-        
+
         // Validate each metric query
         for metric_query in &self.metrics {
             metric_query.validate_self()?;
         }
-        
+
         Ok(())
     }
 }
@@ -277,12 +268,12 @@ impl MetricQuery {
     pub fn validate_self(&self) -> KairosResult<()> {
         self.validate()
             .map_err(|e| KairosError::validation(format!("Invalid metric query: {}", e)))?;
-        
+
         // Validate aggregators
         for aggregator in &self.aggregators {
             aggregator.validate_self()?;
         }
-        
+
         Ok(())
     }
 }
@@ -293,14 +284,16 @@ impl Aggregator {
         match self {
             Aggregator::Percentile { percentile, .. } => {
                 if *percentile < 0.0 || *percentile > 100.0 {
-                    return Err(KairosError::validation("Percentile must be between 0 and 100"));
+                    return Err(KairosError::validation(
+                        "Percentile must be between 0 and 100",
+                    ));
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    
+
     /// Get the aggregator name
     pub fn name(&self) -> &'static str {
         match self {
@@ -332,7 +325,7 @@ pub struct MetricNamesQuery {
     /// Optional prefix to filter by
     #[serde(default)]
     pub prefix: Option<String>,
-    
+
     /// Maximum number of metric names to return
     #[serde(default)]
     pub limit: Option<usize>,
@@ -351,7 +344,7 @@ pub struct TagNamesQuery {
     /// Optional metric name to scope tags to
     #[serde(default)]
     pub metric: Option<MetricName>,
-    
+
     /// Maximum number of tag names to return
     #[serde(default)]
     pub limit: Option<usize>,
@@ -369,14 +362,14 @@ pub struct TagNamesResponse {
 pub struct TagValuesQuery {
     /// Metric name to get tag values for
     pub metric: MetricName,
-    
+
     /// Tag name to get values for
     pub tag_name: String,
-    
+
     /// Optional prefix to filter values
     #[serde(default)]
     pub prefix: Option<String>,
-    
+
     /// Maximum number of tag values to return
     #[serde(default)]
     pub limit: Option<usize>,
@@ -393,7 +386,7 @@ pub struct TagValuesResponse {
 mod tests {
     use super::*;
     use crate::time::TimeUnit;
-    
+
     #[test]
     fn test_query_request_validation() {
         let mut query = QueryRequest {
@@ -411,14 +404,14 @@ mod tests {
             limit: None,
             cache_time: None,
         };
-        
+
         assert!(query.validate_self().is_ok());
-        
+
         // Test invalid query (no start time)
         query.start_relative = None;
         assert!(query.validate_self().is_err());
     }
-    
+
     #[test]
     fn test_aggregator_validation() {
         let agg = Aggregator::Percentile {
@@ -426,14 +419,14 @@ mod tests {
             sampling: None,
         };
         assert!(agg.validate_self().is_ok());
-        
+
         let invalid_agg = Aggregator::Percentile {
             percentile: 150.0,
             sampling: None,
         };
         assert!(invalid_agg.validate_self().is_err());
     }
-    
+
     #[test]
     fn test_time_range_calculation() {
         let query = QueryRequest {
@@ -445,7 +438,7 @@ mod tests {
             limit: None,
             cache_time: None,
         };
-        
+
         let range = query.time_range().unwrap();
         assert!(range.duration_millis() > 0);
     }

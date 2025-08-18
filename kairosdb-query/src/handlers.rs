@@ -4,12 +4,12 @@ use axum::{
     response::Json,
 };
 use kairosdb_core::{
-    query::{QueryRequest, MetricNamesQuery, TagNamesQuery, TagValuesQuery},
     error::KairosError,
+    query::{MetricNamesQuery, QueryRequest, TagNamesQuery, TagValuesQuery},
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 
 use crate::AppState;
 
@@ -25,7 +25,7 @@ pub async fn health_handler() -> Result<Json<Value>, StatusCode> {
 /// Metrics endpoint (Prometheus format)
 pub async fn metrics_handler(State(state): State<AppState>) -> Result<String, StatusCode> {
     let metrics = state.query_engine.get_metrics().await;
-    
+
     Ok(format!(
         "# HELP kairosdb_queries_total Total number of queries executed\n\
          # TYPE kairosdb_queries_total counter\n\
@@ -52,7 +52,7 @@ pub async fn query_handler(
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     debug!("Received query request: {:?}", payload);
-    
+
     // Validate the query request
     if let Err(err) = payload.validate_self() {
         warn!("Query validation failed: {}", err);
@@ -61,14 +61,17 @@ pub async fn query_handler(
             Json(json!({
                 "error": "Invalid query",
                 "message": err.to_string()
-            }))
+            })),
         ));
     }
-    
+
     // Execute the query
     match state.query_engine.execute_query(payload).await {
         Ok(response) => {
-            info!("Query executed successfully, returned {} metrics", response.queries.len());
+            info!(
+                "Query executed successfully, returned {} metrics",
+                response.queries.len()
+            );
             Ok(Json(serde_json::to_value(response).unwrap()))
         }
         Err(err) => {
@@ -79,14 +82,14 @@ pub async fn query_handler(
                 "rate_limit" => StatusCode::TOO_MANY_REQUESTS,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            
+
             Err((
                 status_code,
                 Json(json!({
                     "error": "Query execution failed",
                     "message": err.to_string(),
                     "category": err.category()
-                }))
+                })),
             ))
         }
     }
@@ -98,13 +101,12 @@ pub async fn metric_names_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     debug!("Received metric names query: {:?}", params);
-    
+
     let query = MetricNamesQuery {
         prefix: params.get("prefix").cloned(),
-        limit: params.get("limit")
-            .and_then(|l| l.parse().ok()),
+        limit: params.get("limit").and_then(|l| l.parse().ok()),
     };
-    
+
     match state.query_engine.get_metric_names(query).await {
         Ok(response) => {
             info!("Returned {} metric names", response.results.len());
@@ -117,7 +119,7 @@ pub async fn metric_names_handler(
                 Json(json!({
                     "error": "Failed to get metric names",
                     "message": err.to_string()
-                }))
+                })),
             ))
         }
     }
@@ -129,8 +131,9 @@ pub async fn tag_names_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     debug!("Received tag names query: {:?}", params);
-    
-    let metric = params.get("metric")
+
+    let metric = params
+        .get("metric")
         .map(|m| kairosdb_core::metrics::MetricName::new(m))
         .transpose()
         .map_err(|err| {
@@ -139,16 +142,15 @@ pub async fn tag_names_handler(
                 Json(json!({
                     "error": "Invalid metric name",
                     "message": err.to_string()
-                }))
+                })),
             )
         })?;
-    
+
     let query = TagNamesQuery {
         metric,
-        limit: params.get("limit")
-            .and_then(|l| l.parse().ok()),
+        limit: params.get("limit").and_then(|l| l.parse().ok()),
     };
-    
+
     match state.query_engine.get_tag_names(query).await {
         Ok(response) => {
             info!("Returned {} tag names", response.results.len());
@@ -161,7 +163,7 @@ pub async fn tag_names_handler(
                 Json(json!({
                     "error": "Failed to get tag names",
                     "message": err.to_string()
-                }))
+                })),
             ))
         }
     }
@@ -173,49 +175,49 @@ pub async fn tag_values_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     debug!("Received tag values query: {:?}", params);
-    
-    let metric = params.get("metric")
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Missing required parameter 'metric'"
-                }))
-            )
-        })?;
-    
-    let tag_name = params.get("tag")
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Missing required parameter 'tag'"
-                }))
-            )
-        })?;
-    
-    let metric_name = kairosdb_core::metrics::MetricName::new(metric)
-        .map_err(|err| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Invalid metric name",
-                    "message": err.to_string()
-                }))
-            )
-        })?;
-    
+
+    let metric = params.get("metric").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Missing required parameter 'metric'"
+            })),
+        )
+    })?;
+
+    let tag_name = params.get("tag").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Missing required parameter 'tag'"
+            })),
+        )
+    })?;
+
+    let metric_name = kairosdb_core::metrics::MetricName::new(metric).map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Invalid metric name",
+                "message": err.to_string()
+            })),
+        )
+    })?;
+
     let query = TagValuesQuery {
         metric: metric_name,
         tag_name: tag_name.clone(),
         prefix: params.get("prefix").cloned(),
-        limit: params.get("limit")
-            .and_then(|l| l.parse().ok()),
+        limit: params.get("limit").and_then(|l| l.parse().ok()),
     };
-    
+
     match state.query_engine.get_tag_values(query).await {
         Ok(response) => {
-            info!("Returned {} tag values for tag '{}'", response.results.len(), tag_name);
+            info!(
+                "Returned {} tag values for tag '{}'",
+                response.results.len(),
+                tag_name
+            );
             Ok(Json(serde_json::to_value(response).unwrap()))
         }
         Err(err) => {
@@ -225,7 +227,7 @@ pub async fn tag_values_handler(
                 Json(json!({
                     "error": "Failed to get tag values",
                     "message": err.to_string()
-                }))
+                })),
             ))
         }
     }

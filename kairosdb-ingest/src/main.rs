@@ -1,54 +1,50 @@
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::{
-    net::TcpListener,
-    signal,
-};
+use tokio::{net::TcpListener, signal};
 use tracing::{error, info};
 
 // Use the library modules
-use kairosdb_ingest::{AppState, IngestConfig, IngestionService, create_router};
+use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
-    
+
     info!("Starting KairosDB Ingestion Service");
-    
+
     // Load configuration
     let config = Arc::new(IngestConfig::load()?);
     info!("Configuration loaded successfully");
-    
-    // Initialize ingestion service  
+
+    // Initialize ingestion service
     let ingestion_service = IngestionService::new(config.clone()).await?;
     info!("Ingestion service initialized");
-    
+
     // Create shared state
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
         config: config.clone(),
     };
-    
+
     // Build router using the library function
     let app = create_router(state);
-    
+
     // Start server with graceful shutdown
     let listener = TcpListener::bind(&config.bind_address).await?;
     let addr = listener.local_addr()?;
     info!("KairosDB Ingest Service listening on {}", addr);
-    
+
     // Graceful shutdown handling
-    let graceful = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal());
-    
+    let graceful = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+
     info!("Service ready to accept connections");
-    
+
     if let Err(e) = graceful.await {
         error!("Server error: {}", e);
         return Err(e.into());
     }
-    
+
     info!("Service shutdown complete");
     Ok(())
 }
@@ -81,4 +77,3 @@ async fn shutdown_signal() {
         },
     }
 }
-

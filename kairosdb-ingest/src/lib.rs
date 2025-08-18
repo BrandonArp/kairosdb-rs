@@ -27,15 +27,13 @@ pub struct AppState {
 
 /// Create the main application router
 pub fn create_router(state: AppState) -> axum::Router {
+    use crate::handlers::*;
     use axum::routing::{get, post};
     use tower::ServiceBuilder;
     use tower_http::{
-        compression::CompressionLayer,
-        cors::CorsLayer,
-        limit::RequestBodyLimitLayer,
+        compression::CompressionLayer, cors::CorsLayer, limit::RequestBodyLimitLayer,
         trace::TraceLayer,
     };
-    use crate::handlers::*;
 
     axum::Router::new()
         // Health and monitoring endpoints
@@ -44,24 +42,25 @@ pub fn create_router(state: AppState) -> axum::Router {
         .route(&state.config.health.liveness_path, get(health_handler))
         .route(&state.config.metrics.metrics_path, get(metrics_handler))
         .route("/api/v1/metrics", get(metrics_json_handler))
-        
         // Data ingestion endpoints (KairosDB compatible)
-        .route("/api/v1/datapoints", 
-            post(ingest_handler)
-                .options(cors_preflight_datapoints))
-        .route("/api/v1/datapoints/gzip", 
-            post(ingest_gzip_handler)
-                .options(cors_preflight_datapoints))
-        
+        .route(
+            "/api/v1/datapoints",
+            post(ingest_handler).options(cors_preflight_datapoints),
+        )
+        .route(
+            "/api/v1/datapoints/gzip",
+            post(ingest_gzip_handler).options(cors_preflight_datapoints),
+        )
         // Version endpoint for compatibility
         .route("/api/v1/version", get(version_handler))
-        
         // Apply middleware layers in order (bottom to top)
         .layer(
             ServiceBuilder::new()
                 .layer(axum::middleware::from_fn(timing_middleware))
                 .layer(axum::middleware::from_fn(request_size_middleware))
-                .layer(RequestBodyLimitLayer::new(state.config.ingestion.max_request_size))
+                .layer(RequestBodyLimitLayer::new(
+                    state.config.ingestion.max_request_size,
+                ))
                 .layer(if state.config.is_compression_enabled() {
                     CompressionLayer::new()
                 } else {
@@ -76,7 +75,7 @@ pub fn create_router(state: AppState) -> axum::Router {
 /// Version endpoint for KairosDB compatibility
 async fn version_handler() -> impl axum::response::IntoResponse {
     use serde_json::json;
-    
+
     axum::Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "service": "kairosdb-ingest-rs",

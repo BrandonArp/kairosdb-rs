@@ -1,15 +1,15 @@
 //! Production-grade Cassandra client for KairosDB using ScyllaDB Rust driver
-//! 
+//!
 //! This client provides robust, high-performance data persistence using the ScyllaDB Rust driver
 //! with proper error handling, connection management, and KairosDB schema compatibility.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use kairosdb_core::{
-    cassandra::{RowKey, ColumnName, CassandraValue},
+    cassandra::{CassandraValue, ColumnName, RowKey},
     datapoint::{DataPointBatch, DataPointValue},
     error::{KairosError, KairosResult},
-    schema::{StringIndexEntry, RowKeyIndexEntry},
+    schema::{RowKeyIndexEntry, StringIndexEntry},
 };
 use std::{
     collections::HashSet,
@@ -24,8 +24,8 @@ use tracing::{debug, error, info, warn};
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::response::query_result::QueryResult;
-use scylla::statement::prepared::PreparedStatement;
 use scylla::serialize::row::SerializeRow;
+use scylla::statement::prepared::PreparedStatement;
 
 use crate::cassandra::{CassandraClient, CassandraStats};
 use crate::config::CassandraConfig;
@@ -64,12 +64,15 @@ impl CassandraClientImpl {
     /// Create a new Cassandra client instance
     pub async fn new(config: CassandraConfig) -> KairosResult<Self> {
         let config = Arc::new(config);
-        
-        info!("Initializing ScyllaDB client with contact points: {:?}", config.contact_points);
-        
+
+        info!(
+            "Initializing ScyllaDB client with contact points: {:?}",
+            config.contact_points
+        );
+
         // Build session with contact points
         let mut session_builder = SessionBuilder::new();
-        
+
         for contact_point in &config.contact_points {
             session_builder = session_builder.known_node(contact_point);
         }
@@ -81,10 +84,9 @@ impl CassandraClientImpl {
 
         // Don't set default keyspace here - we'll create it in ensure_schema()
 
-        let session = session_builder
-            .build()
-            .await
-            .map_err(|e| KairosError::cassandra(format!("Failed to create ScyllaDB session: {}", e)))?;
+        let session = session_builder.build().await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to create ScyllaDB session: {}", e))
+        })?;
 
         info!("ScyllaDB session established successfully");
 
@@ -107,15 +109,25 @@ impl CassandraClientImpl {
             self.session
                 .prepare("INSERT INTO data_points (key, column1, value) VALUES (?, ?, ?)")
                 .await
-                .map_err(|e| KairosError::cassandra(format!("Failed to prepare data_points statement: {}", e)))?
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare data_points statement: {}",
+                        e
+                    ))
+                })?,
         );
 
-        // Prepare row key index insertion statement  
+        // Prepare row key index insertion statement
         self.insert_row_key_index = Some(
             self.session
                 .prepare("INSERT INTO row_key_index (key, column1, value) VALUES (?, ?, ?)")
                 .await
-                .map_err(|e| KairosError::cassandra(format!("Failed to prepare row_key_index statement: {}", e)))?
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare row_key_index statement: {}",
+                        e
+                    ))
+                })?,
         );
 
         // Prepare string index insertion statement
@@ -123,7 +135,12 @@ impl CassandraClientImpl {
             self.session
                 .prepare("INSERT INTO string_index (key, column1, value) VALUES (?, ?, ?)")
                 .await
-                .map_err(|e| KairosError::cassandra(format!("Failed to prepare string_index statement: {}", e)))?
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare string_index statement: {}",
+                        e
+                    ))
+                })?,
         );
 
         debug!("All CQL statements prepared successfully");
@@ -133,9 +150,9 @@ impl CassandraClientImpl {
     /// Execute a simple query without parameters
     async fn execute_query(&self, query: &str) -> KairosResult<QueryResult> {
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-        
+
         debug!("Executing query: {}", query);
-        
+
         match self.session.query_unpaged(query, &[]).await {
             Ok(result) => {
                 debug!("Query executed successfully");
@@ -150,12 +167,16 @@ impl CassandraClientImpl {
     }
 
     /// Execute a prepared statement with values
-    async fn execute_prepared<T>(&self, prepared: &PreparedStatement, values: T) -> KairosResult<QueryResult>
+    async fn execute_prepared<T>(
+        &self,
+        prepared: &PreparedStatement,
+        values: T,
+    ) -> KairosResult<QueryResult>
     where
         T: SerializeRow,
     {
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-        
+
         match self.session.execute_unpaged(prepared, values).await {
             Ok(result) => {
                 debug!("Prepared statement executed successfully");
@@ -164,7 +185,10 @@ impl CassandraClientImpl {
             Err(e) => {
                 self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 error!("Prepared statement execution failed: {}", e);
-                Err(KairosError::cassandra(format!("Prepared statement failed: {}", e)))
+                Err(KairosError::cassandra(format!(
+                    "Prepared statement failed: {}",
+                    e
+                )))
             }
         }
     }
@@ -188,9 +212,12 @@ impl CassandraClientImpl {
         );
 
         if let Some(ref prepared) = self.insert_data_point {
-            self.execute_prepared(prepared, (row_key_bytes, column_key_bytes, value_bytes)).await?;
+            self.execute_prepared(prepared, (row_key_bytes, column_key_bytes, value_bytes))
+                .await?;
         } else {
-            return Err(KairosError::cassandra("Data point prepared statement not available"));
+            return Err(KairosError::cassandra(
+                "Data point prepared statement not available",
+            ));
         }
 
         debug!("Data point written successfully");
@@ -206,9 +233,12 @@ impl CassandraClientImpl {
         debug!("Writing row key index entry");
 
         if let Some(ref prepared) = self.insert_row_key_index {
-            self.execute_prepared(prepared, (key_bytes, column_bytes, value_bytes)).await?;
+            self.execute_prepared(prepared, (key_bytes, column_bytes, value_bytes))
+                .await?;
         } else {
-            return Err(KairosError::cassandra("Row key index prepared statement not available"));
+            return Err(KairosError::cassandra(
+                "Row key index prepared statement not available",
+            ));
         }
 
         debug!("Row key index entry written successfully");
@@ -224,9 +254,12 @@ impl CassandraClientImpl {
         debug!("Writing string index entry: {}", column_name);
 
         if let Some(ref prepared) = self.insert_string_index {
-            self.execute_prepared(prepared, (key_bytes, column_name, value_bytes)).await?;
+            self.execute_prepared(prepared, (key_bytes, column_name, value_bytes))
+                .await?;
         } else {
-            return Err(KairosError::cassandra("String index prepared statement not available"));
+            return Err(KairosError::cassandra(
+                "String index prepared statement not available",
+            ));
         }
 
         debug!("String index entry written successfully");
@@ -242,15 +275,19 @@ impl CassandraClientImpl {
         // Collect all unique metric names and tags
         for data_point in &batch.points {
             metric_names.insert(data_point.metric.as_str());
-            
+
             for (tag_key, tag_value) in data_point.tags.iter() {
                 tag_names.insert(tag_key.as_str());
                 tag_values.insert(tag_value.as_str());
             }
         }
 
-        debug!("Writing indexes for {} metrics, {} tag keys, {} tag values", 
-               metric_names.len(), tag_names.len(), tag_values.len());
+        debug!(
+            "Writing indexes for {} metrics, {} tag keys, {} tag values",
+            metric_names.len(),
+            tag_names.len(),
+            tag_values.len()
+        );
 
         // Write metric name indexes
         for metric_name in metric_names {
@@ -291,7 +328,9 @@ impl CassandraClient for CassandraClientImpl {
         }
 
         info!("Writing batch of {} data points", batch.points.len());
-        self.stats.total_datapoints.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        self.stats
+            .total_datapoints
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
         // Write data points
         for data_point in &batch.points {
@@ -299,7 +338,8 @@ impl CassandraClient for CassandraClientImpl {
             let column_name = ColumnName::from_timestamp(data_point.timestamp);
             let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
 
-            self.write_data_point(&row_key, &column_name, &cassandra_value).await?;
+            self.write_data_point(&row_key, &column_name, &cassandra_value)
+                .await?;
         }
 
         // Write indexes
@@ -311,7 +351,7 @@ impl CassandraClient for CassandraClientImpl {
 
     async fn health_check(&self) -> KairosResult<bool> {
         debug!("Performing health check");
-        
+
         match self.execute_query("SELECT now() FROM system.local").await {
             Ok(_) => {
                 debug!("Health check passed");

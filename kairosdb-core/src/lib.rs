@@ -4,7 +4,7 @@
 //! for KairosDB ingest and query services.
 //!
 //! ## Features
-//! 
+//!
 //! - **Data Types**: Time series data points, metrics, and tags
 //! - **Cassandra**: Connection management, schema operations, and data access
 //! - **Serialization**: Efficient binary and JSON serialization
@@ -32,11 +32,11 @@ pub mod time;
 pub mod validation;
 
 // Re-export commonly used types
-pub use datapoint::{DataPoint, DataPointValue, HistogramData, HistogramBuilder};
-pub use error::{KairosResult, KairosError};
+pub use datapoint::{DataPoint, DataPointValue, HistogramBuilder, HistogramData};
+pub use error::{KairosError, KairosResult};
 pub use metrics::MetricName;
-pub use tags::{TagSet, TagKey, TagValue};
-pub use time::{Timestamp, TimeRange};
+pub use tags::{TagKey, TagSet, TagValue};
+pub use time::{TimeRange, Timestamp};
 
 /// Version information for KairosDB-rs
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

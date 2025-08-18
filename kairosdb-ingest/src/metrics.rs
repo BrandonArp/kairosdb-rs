@@ -8,22 +8,22 @@ use std::time::{Duration, Instant};
 pub struct MetricsCollector {
     /// Total data points ingested
     pub datapoints_total: AtomicU64,
-    
+
     /// Total batches processed
     pub batches_total: AtomicU64,
-    
+
     /// Total errors encountered
     pub errors_total: AtomicU64,
-    
+
     /// Validation errors
     pub validation_errors_total: AtomicU64,
-    
+
     /// Cassandra errors
     pub cassandra_errors_total: AtomicU64,
-    
+
     /// Total processing time
     pub processing_time_total_ms: AtomicU64,
-    
+
     /// Start time for rate calculations
     start_time: Instant,
 }
@@ -47,44 +47,45 @@ impl MetricsCollector {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Increment data points counter
     pub fn increment_datapoints(&self, count: u64) {
         self.datapoints_total.fetch_add(count, Ordering::Relaxed);
     }
-    
+
     /// Increment batches counter
     pub fn increment_batches(&self) {
         self.batches_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Increment errors counter
     pub fn increment_errors(&self) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Increment validation errors counter
     pub fn increment_validation_errors(&self) {
         self.validation_errors_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Increment Cassandra errors counter
     pub fn increment_cassandra_errors(&self) {
         self.cassandra_errors_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Add processing time
     pub fn add_processing_time(&self, duration: Duration) {
         let millis = duration.as_millis() as u64;
-        self.processing_time_total_ms.fetch_add(millis, Ordering::Relaxed);
+        self.processing_time_total_ms
+            .fetch_add(millis, Ordering::Relaxed);
     }
-    
+
     /// Get current metrics snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
         let uptime = self.start_time.elapsed();
         let datapoints = self.datapoints_total.load(Ordering::Relaxed);
         let batches = self.batches_total.load(Ordering::Relaxed);
-        
+
         MetricsSnapshot {
             datapoints_total: datapoints,
             batches_total: batches,
@@ -105,11 +106,11 @@ impl MetricsCollector {
             },
         }
     }
-    
+
     /// Generate Prometheus format metrics
     pub fn prometheus_format(&self) -> String {
         let snapshot = self.snapshot();
-        
+
         format!(
             "# HELP kairosdb_ingest_datapoints_total Total number of data points ingested\n\
              # TYPE kairosdb_ingest_datapoints_total counter\n\
@@ -185,12 +186,12 @@ impl Timer {
             start: Instant::now(),
         }
     }
-    
+
     /// Get elapsed duration
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
-    
+
     /// Finish timing and record to metrics collector
     pub fn finish(self, collector: &MetricsCollector) {
         collector.add_processing_time(self.elapsed());
@@ -202,40 +203,40 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
-    
+
     #[test]
     fn test_metrics_collector() {
         let collector = MetricsCollector::new();
-        
+
         collector.increment_datapoints(100);
         collector.increment_batches();
         collector.increment_errors();
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.datapoints_total, 100);
         assert_eq!(snapshot.batches_total, 1);
         assert_eq!(snapshot.errors_total, 1);
     }
-    
+
     #[test]
     fn test_prometheus_format() {
         let collector = MetricsCollector::new();
         collector.increment_datapoints(42);
-        
+
         let metrics = collector.prometheus_format();
         assert!(metrics.contains("kairosdb_ingest_datapoints_total 42"));
         assert!(metrics.contains("# HELP"));
         assert!(metrics.contains("# TYPE"));
     }
-    
+
     #[test]
     fn test_timer() {
         let collector = MetricsCollector::new();
         let timer = Timer::start();
-        
+
         thread::sleep(Duration::from_millis(10));
         timer.finish(&collector);
-        
+
         let snapshot = collector.snapshot();
         assert!(snapshot.processing_time_total_ms >= 10);
     }

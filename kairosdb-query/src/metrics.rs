@@ -8,25 +8,25 @@ use std::time::{Duration, Instant};
 pub struct QueryMetricsCollector {
     /// Total queries executed
     pub queries_total: AtomicU64,
-    
+
     /// Total query errors
     pub errors_total: AtomicU64,
-    
+
     /// Cache hits
     pub cache_hits_total: AtomicU64,
-    
+
     /// Cache misses
     pub cache_misses_total: AtomicU64,
-    
+
     /// Total data points returned
     pub datapoints_returned_total: AtomicU64,
-    
+
     /// Total query execution time
     pub query_time_total_ms: AtomicU64,
-    
+
     /// Slow queries (above threshold)
     pub slow_queries_total: AtomicU64,
-    
+
     /// Service start time
     start_time: Instant,
 }
@@ -51,35 +51,42 @@ impl QueryMetricsCollector {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Record a completed query
-    pub fn record_query(&self, duration: Duration, datapoints_returned: usize, slow_query_threshold_ms: u64) {
+    pub fn record_query(
+        &self,
+        duration: Duration,
+        datapoints_returned: usize,
+        slow_query_threshold_ms: u64,
+    ) {
         self.queries_total.fetch_add(1, Ordering::Relaxed);
-        self.datapoints_returned_total.fetch_add(datapoints_returned as u64, Ordering::Relaxed);
-        
+        self.datapoints_returned_total
+            .fetch_add(datapoints_returned as u64, Ordering::Relaxed);
+
         let duration_ms = duration.as_millis() as u64;
-        self.query_time_total_ms.fetch_add(duration_ms, Ordering::Relaxed);
-        
+        self.query_time_total_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+
         if duration_ms > slow_query_threshold_ms {
             self.slow_queries_total.fetch_add(1, Ordering::Relaxed);
         }
     }
-    
+
     /// Record a query error
     pub fn record_error(&self) {
         self.errors_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Record a cache hit
     pub fn record_cache_hit(&self) {
         self.cache_hits_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Record a cache miss
     pub fn record_cache_miss(&self) {
         self.cache_misses_total.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Get current metrics snapshot
     pub fn snapshot(&self) -> QueryMetricsSnapshot {
         let uptime = self.start_time.elapsed();
@@ -87,7 +94,7 @@ impl QueryMetricsCollector {
         let total_time = self.query_time_total_ms.load(Ordering::Relaxed);
         let cache_hits = self.cache_hits_total.load(Ordering::Relaxed);
         let cache_misses = self.cache_misses_total.load(Ordering::Relaxed);
-        
+
         QueryMetricsSnapshot {
             queries_total: queries,
             errors_total: self.errors_total.load(Ordering::Relaxed),
@@ -114,11 +121,11 @@ impl QueryMetricsCollector {
             },
         }
     }
-    
+
     /// Generate Prometheus format metrics
     pub fn prometheus_format(&self) -> String {
         let snapshot = self.snapshot();
-        
+
         format!(
             "# HELP kairosdb_query_queries_total Total number of queries executed\n\
              # TYPE kairosdb_query_queries_total counter\n\
@@ -206,14 +213,19 @@ impl QueryTimer {
             start: Instant::now(),
         }
     }
-    
+
     /// Get elapsed duration
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
-    
+
     /// Finish timing and record to metrics collector
-    pub fn finish(self, collector: &QueryMetricsCollector, datapoints_returned: usize, slow_threshold_ms: u64) {
+    pub fn finish(
+        self,
+        collector: &QueryMetricsCollector,
+        datapoints_returned: usize,
+        slow_threshold_ms: u64,
+    ) {
         collector.record_query(self.elapsed(), datapoints_returned, slow_threshold_ms);
     }
 }
@@ -223,15 +235,15 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
-    
+
     #[test]
     fn test_query_metrics_collector() {
         let collector = QueryMetricsCollector::new();
-        
+
         collector.record_query(Duration::from_millis(100), 1000, 500);
         collector.record_cache_hit();
         collector.record_error();
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.queries_total, 1);
         assert_eq!(snapshot.errors_total, 1);
@@ -239,39 +251,39 @@ mod tests {
         assert_eq!(snapshot.datapoints_returned_total, 1000);
         assert_eq!(snapshot.avg_query_time_ms, 100.0);
     }
-    
+
     #[test]
     fn test_prometheus_format() {
         let collector = QueryMetricsCollector::new();
         collector.record_query(Duration::from_millis(250), 500, 1000);
-        
+
         let metrics = collector.prometheus_format();
         assert!(metrics.contains("kairosdb_query_queries_total 1"));
         assert!(metrics.contains("kairosdb_query_datapoints_returned_total 500"));
         assert!(metrics.contains("# HELP"));
         assert!(metrics.contains("# TYPE"));
     }
-    
+
     #[test]
     fn test_cache_hit_rate() {
         let collector = QueryMetricsCollector::new();
-        
+
         collector.record_cache_hit();
         collector.record_cache_hit();
         collector.record_cache_miss();
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.cache_hit_rate, 2.0 / 3.0);
     }
-    
+
     #[test]
     fn test_query_timer() {
         let collector = QueryMetricsCollector::new();
         let timer = QueryTimer::start();
-        
+
         thread::sleep(Duration::from_millis(10));
         timer.finish(&collector, 100, 1000);
-        
+
         let snapshot = collector.snapshot();
         assert_eq!(snapshot.queries_total, 1);
         assert_eq!(snapshot.datapoints_returned_total, 100);

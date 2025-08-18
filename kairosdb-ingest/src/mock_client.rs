@@ -1,13 +1,10 @@
 //! Mock Cassandra client for unit testing
-//! 
+//!
 //! This client provides a simple in-memory implementation that can be used
 //! for unit tests without requiring a real Cassandra instance.
 
 use async_trait::async_trait;
-use kairosdb_core::{
-    datapoint::DataPointBatch,
-    error::KairosResult,
-};
+use kairosdb_core::{datapoint::DataPointBatch, error::KairosResult};
 use std::{
     collections::HashMap,
     sync::{
@@ -58,40 +55,45 @@ impl MockCassandraClient {
     /// Create a new mock client
     pub fn new() -> Self {
         info!("Creating a mock Cassandra client for testing");
-        
+
         Self {
             storage: Arc::new(Mutex::new(MockStorage::default())),
             stats: MockClientStats::default(),
             simulate_errors: false,
         }
     }
-    
+
     /// Enable error simulation for testing error handling
     pub fn with_error_simulation(mut self) -> Self {
         self.simulate_errors = true;
         self
     }
-    
+
     /// Get the number of stored data points (for testing)
     pub fn get_stored_count(&self) -> usize {
         self.storage.lock().unwrap().data_points.len()
     }
-    
+
     /// Get the operation log (for testing)
     pub fn get_operations(&self) -> Vec<String> {
         self.storage.lock().unwrap().operations.clone()
     }
-    
+
     /// Clear all stored data (for testing)
     pub fn clear(&self) {
         let mut storage = self.storage.lock().unwrap();
         storage.data_points.clear();
         storage.operations.clear();
     }
-    
+
     /// Check if a specific operation was recorded
     pub fn has_operation(&self, operation: &str) -> bool {
-        self.storage.lock().unwrap().operations.iter().any(|op| op.contains(operation))
+        self.storage
+            .lock()
+            .unwrap()
+            .operations
+            .iter()
+            .any(|op| op.contains(operation))
     }
 }
 
@@ -106,28 +108,33 @@ impl CassandraClient for MockCassandraClient {
     async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
         if self.simulate_errors {
             self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-            return Err(kairosdb_core::error::KairosError::cassandra("Simulated error"));
+            return Err(kairosdb_core::error::KairosError::cassandra(
+                "Simulated error",
+            ));
         }
-        
+
         if batch.points.is_empty() {
             return Ok(());
         }
-        
+
         debug!("Mock: Writing batch of {} data points", batch.points.len());
-        
+
         let mut storage = self.storage.lock().unwrap();
-        
+
         // Record the operation
-        storage.operations.push(format!("write_batch({} points)", batch.points.len()));
-        
+        storage
+            .operations
+            .push(format!("write_batch({} points)", batch.points.len()));
+
         // Store each data point
         for point in &batch.points {
-            let key = format!("{}:{}:{}", 
+            let key = format!(
+                "{}:{}:{}",
                 point.metric.as_str(),
                 point.timestamp.timestamp_millis(),
                 point.data_type()
             );
-            
+
             // Store a simple representation of the value
             let value = match &point.value {
                 kairosdb_core::datapoint::DataPointValue::Long(v) => v.to_le_bytes().to_vec(),
@@ -139,60 +146,65 @@ impl CassandraClient for MockCassandraClient {
                     bytes.extend_from_slice(&real.to_le_bytes());
                     bytes.extend_from_slice(&imaginary.to_le_bytes());
                     bytes
-                },
+                }
                 kairosdb_core::datapoint::DataPointValue::Histogram(h) => {
                     // Store histogram as V2 binary format (same as production)
                     h.to_v2_bytes()
-                },
+                }
             };
-            
+
             storage.data_points.insert(key, value);
             self.stats.total_datapoints.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-        
-        info!("Mock: Successfully wrote batch of {} data points", batch.points.len());
+
+        info!(
+            "Mock: Successfully wrote batch of {} data points",
+            batch.points.len()
+        );
         Ok(())
     }
-    
+
     async fn health_check(&self) -> KairosResult<bool> {
         if self.simulate_errors {
             debug!("Mock: Health check failed (simulated error)");
             return Ok(false);
         }
-        
+
         debug!("Mock: Health check passed");
         Ok(true)
     }
-    
+
     fn get_stats(&self) -> CassandraStats {
         let total_queries = self.stats.total_queries.load(Ordering::Relaxed);
         let total_datapoints = self.stats.total_datapoints.load(Ordering::Relaxed);
-        
+
         CassandraStats {
             total_queries,
             failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
             total_datapoints_written: total_datapoints,
-            avg_batch_size: if total_queries > 0 { 
-                total_datapoints as f64 / total_queries as f64 
-            } else { 
-                0.0 
+            avg_batch_size: if total_queries > 0 {
+                total_datapoints as f64 / total_queries as f64
+            } else {
+                0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
         }
     }
-    
+
     async fn ensure_schema(&self) -> KairosResult<()> {
         debug!("Mock: Schema initialization (no-op)");
-        
+
         let mut storage = self.storage.lock().unwrap();
         storage.operations.push("ensure_schema".to_string());
-        
+
         if self.simulate_errors {
-            return Err(kairosdb_core::error::KairosError::cassandra("Simulated schema error"));
+            return Err(kairosdb_core::error::KairosError::cassandra(
+                "Simulated schema error",
+            ));
         }
-        
+
         Ok(())
     }
 }
@@ -200,79 +212,75 @@ impl CassandraClient for MockCassandraClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kairosdb_core::{
-        datapoint::DataPoint
-        ,
-        time::Timestamp,
-    };
+    use kairosdb_core::{datapoint::DataPoint, time::Timestamp};
 
     #[tokio::test]
     async fn test_mock_client_basic_operations() {
         let client = MockCassandraClient::new();
-        
+
         // Test health check
         assert!(client.health_check().await.unwrap());
-        
+
         // Test schema initialization
         client.ensure_schema().await.unwrap();
         assert!(client.has_operation("ensure_schema"));
-        
+
         // Test writing data points
         let mut batch = DataPointBatch::new();
         let point = DataPoint::new_long("test.metric", Timestamp::now(), 42);
         batch.add_point(point).unwrap();
-        
+
         client.write_batch(&batch).await.unwrap();
-        
+
         assert_eq!(client.get_stored_count(), 1);
         assert!(client.has_operation("write_batch"));
-        
+
         // Check stats
         let stats = client.get_stats();
         assert_eq!(stats.total_datapoints_written, 1);
         assert!(stats.total_queries > 0);
     }
-    
+
     #[tokio::test]
     async fn test_mock_client_error_simulation() {
         let client = MockCassandraClient::new().with_error_simulation();
-        
+
         // Health check should fail
         assert!(!client.health_check().await.unwrap());
-        
+
         // Schema should fail
         assert!(client.ensure_schema().await.is_err());
-        
+
         // Write should fail
         let mut batch = DataPointBatch::new();
         let point = DataPoint::new_long("test.metric", Timestamp::now(), 42);
         batch.add_point(point).unwrap();
-        
+
         assert!(client.write_batch(&batch).await.is_err());
-        
+
         // Check error stats
         let stats = client.get_stats();
         assert!(stats.failed_queries > 0);
     }
-    
+
     #[tokio::test]
     async fn test_mock_client_histogram_support() {
         let client = MockCassandraClient::new();
-        
+
         // Create a histogram data point
         let bins = vec![(0.0, 10), (10.0, 20), (50.0, 5)];
-        let hist = kairosdb_core::datapoint::HistogramData::from_bins(
-            bins, 125.0, 0.1, 45.0, Some(7)
-        ).unwrap();
-        
+        let hist =
+            kairosdb_core::datapoint::HistogramData::from_bins(bins, 125.0, 0.1, 45.0, Some(7))
+                .unwrap();
+
         let point = DataPoint::new_histogram("test.histogram", Timestamp::now(), hist);
         let mut batch = DataPointBatch::new();
         batch.add_point(point).unwrap();
-        
+
         client.write_batch(&batch).await.unwrap();
-        
+
         assert_eq!(client.get_stored_count(), 1);
-        
+
         // Verify the histogram was stored (it would be serialized to V2 format)
         assert!(client.has_operation("write_batch(1 points)"));
     }

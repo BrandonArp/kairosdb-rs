@@ -1,5 +1,5 @@
 //! HistogramKeyUtility for compressing bucket keys
-//! 
+//!
 //! This module provides exact compatibility with the Java HistogramKeyUtility
 //! for efficient storage of histogram bucket keys using precision-based compression.
 
@@ -17,13 +17,14 @@ pub struct HistogramKeyUtility {
 }
 
 // Global cache of HistogramKeyUtility instances by precision
-static KEY_UTILITY_MAP: LazyLock<Mutex<HashMap<u8, HistogramKeyUtility>>> = 
+static KEY_UTILITY_MAP: LazyLock<Mutex<HashMap<u8, HistogramKeyUtility>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl HistogramKeyUtility {
     const MANTISSA_BITS: u8 = 52;
     const EXPONENT_BITS: u8 = 11;
-    const BASE_MASK: u64 = (1u64 << (Self::MANTISSA_BITS + Self::EXPONENT_BITS)) >> Self::EXPONENT_BITS;
+    const BASE_MASK: u64 =
+        (1u64 << (Self::MANTISSA_BITS + Self::EXPONENT_BITS)) >> Self::EXPONENT_BITS;
 
     /// Create a new HistogramKeyUtility for the given precision
     fn new(precision: u8) -> Self {
@@ -43,7 +44,7 @@ impl HistogramKeyUtility {
     /// Uses a global cache to ensure singleton behavior per precision.
     pub fn get_instance(precision: u8) -> HistogramKeyUtility {
         let mut map = KEY_UTILITY_MAP.lock().unwrap();
-        
+
         if let Some(utility) = map.get(&precision) {
             // Clone the utility (it's small and contains only primitive data)
             HistogramKeyUtility {
@@ -90,7 +91,7 @@ impl HistogramKeyUtility {
         f64::from_bits(bound)
     }
 
-    /// Pack a f64 key for storage as a u64. In addition to truncation, this also 
+    /// Pack a f64 key for storage as a u64. In addition to truncation, this also
     /// shifts the value to optimize its size under varint encoding.
     pub fn pack(&self, val: f64) -> u64 {
         let truncated = self.truncate_to_long(val);
@@ -117,7 +118,7 @@ mod tests {
     fn test_singleton_behavior() {
         let util1 = HistogramKeyUtility::get_instance(7);
         let util2 = HistogramKeyUtility::get_instance(7);
-        
+
         assert_eq!(util1.precision, util2.precision);
         assert_eq!(util1.truncate_mask, util2.truncate_mask);
         assert_eq!(util1.pack_mask, util2.pack_mask);
@@ -128,10 +129,10 @@ mod tests {
     fn test_pack_unpack_roundtrip() {
         let utility = HistogramKeyUtility::get_instance(7);
         let original = 123.456;
-        
+
         let packed = utility.pack(original);
         let unpacked = utility.unpack(packed);
-        
+
         // Should be close after truncation
         let truncated = utility.truncate_to_double(original);
         assert_eq!(unpacked, truncated);
@@ -141,21 +142,21 @@ mod tests {
     fn test_truncation() {
         let utility = HistogramKeyUtility::get_instance(7);
         let value = 123.456789;
-        
+
         let truncated = utility.truncate_to_double(value);
         let truncated_long = utility.truncate_to_long(value);
-        
+
         assert_eq!(truncated, f64::from_bits(truncated_long));
     }
 
     #[test]
     fn test_bin_inclusive_bound() {
         let utility = HistogramKeyUtility::get_instance(7);
-        
+
         let positive_val = 10.5;
         let bound = utility.bin_inclusive_bound(positive_val);
         assert!(bound >= positive_val);
-        
+
         let negative_val = -10.5;
         let neg_bound = utility.bin_inclusive_bound(negative_val);
         assert!(neg_bound <= negative_val);
@@ -165,7 +166,7 @@ mod tests {
     fn test_different_precisions() {
         let util_7 = HistogramKeyUtility::get_instance(7);
         let util_10 = HistogramKeyUtility::get_instance(10);
-        
+
         assert_ne!(util_7.precision, util_10.precision);
         assert_ne!(util_7.truncate_mask, util_10.truncate_mask);
         assert_ne!(util_7.pack_mask, util_10.pack_mask);

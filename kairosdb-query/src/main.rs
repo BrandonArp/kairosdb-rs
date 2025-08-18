@@ -7,33 +7,26 @@ use axum::{
     Router,
 };
 use kairosdb_core::{
-    query::{QueryRequest, QueryResponse, MetricNamesQuery, TagNamesQuery, TagValuesQuery},
     error::KairosError,
+    query::{MetricNamesQuery, QueryRequest, QueryResponse, TagNamesQuery, TagValuesQuery},
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
-use tower_http::{
-    cors::CorsLayer,
-    trace::TraceLayer,
-};
-use tracing::{info, warn, error};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tracing::{error, info, warn};
 
+mod aggregation;
 mod config;
 mod handlers;
-mod query_engine;
-mod aggregation;
 mod metrics;
+mod query_engine;
 
 use config::QueryConfig;
 use handlers::{
-    query_handler, 
-    metric_names_handler, 
-    tag_names_handler, 
+    health_handler, metric_names_handler, metrics_handler, query_handler, tag_names_handler,
     tag_values_handler,
-    health_handler, 
-    metrics_handler
 };
 use query_engine::QueryEngine;
 
@@ -48,21 +41,21 @@ pub struct AppState {
 async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
-    
+
     // Load configuration
     let config = Arc::new(QueryConfig::load()?);
     info!("Loaded configuration: {:?}", config);
-    
+
     // Initialize query engine
     let query_engine = Arc::new(QueryEngine::new(config.clone()).await?);
     info!("Initialized query engine");
-    
+
     // Create shared state
     let state = AppState {
         query_engine,
         config: config.clone(),
     };
-    
+
     // Build router
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -79,13 +72,13 @@ async fn main() -> Result<()> {
                 .layer(CorsLayer::permissive()),
         )
         .with_state(state);
-    
+
     // Start server
     let listener = TcpListener::bind(&config.bind_address).await?;
     let addr = listener.local_addr()?;
     info!("KairosDB Query Service listening on {}", addr);
-    
+
     axum::serve(listener, app).await?;
-    
+
     Ok(())
 }
