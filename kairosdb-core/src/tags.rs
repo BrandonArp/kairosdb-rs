@@ -233,7 +233,7 @@ impl TagSet {
         
         let mut tags = HashMap::new();
         
-        for pair in s.split(':') {
+        for pair in s.split(':').filter(|p| !p.is_empty()) {
             let parts: Vec<&str> = pair.split('=').collect();
             if parts.len() != 2 {
                 return Err(KairosError::parse(format!("Invalid tag pair: {}", pair)));
@@ -405,7 +405,7 @@ mod tests {
         
         let formatted = tags.to_cassandra_format();
         // Should be sorted by key
-        assert_eq!(formatted, "host=server1:region=us-east-1");
+        assert_eq!(formatted, "host=server1:region=us-east-1:");
         
         let parsed = TagSet::from_cassandra_format(&formatted).unwrap();
         assert_eq!(parsed, tags);
