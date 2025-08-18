@@ -19,8 +19,8 @@ use tower::ServiceExt;
 /// Create a test app instance with mock dependencies
 async fn create_test_app() -> axum::Router {
     let mut config = IngestConfig::default();
-    // Set high memory limit to avoid backpressure in tests
-    config.performance.max_memory_mb = 32768;
+    // Set high queue size limit for tests to avoid backpressure
+    config.ingestion.max_queue_size = 100000;
     let config = Arc::new(config);
     
     let ingestion_service = IngestionService::new(config.clone()).await
@@ -273,7 +273,7 @@ mod service_integration_tests {
     #[tokio::test]
     async fn test_ingestion_service_integration() {
         let mut config = IngestConfig::default();
-        config.performance.max_memory_mb = 32768; // High limit for tests
+        config.ingestion.max_queue_size = 100000; // High queue limit for tests
         let config = Arc::new(config);
         
         let service = IngestionService::new(config).await.unwrap();

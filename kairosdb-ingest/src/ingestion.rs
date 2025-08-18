@@ -210,14 +210,17 @@ impl IngestionService {
     pub async fn ingest_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
         let start = Instant::now();
         
-        // Check memory usage and activate backpressure if needed
-        let current_memory = self.get_current_memory_usage();
-        let max_memory = self.config.max_memory_bytes();
+        // Check queue size and activate backpressure if needed
+        let current_queue_size = self.metrics.queue_size.load(Ordering::Relaxed);
+        let max_queue_size = self.config.ingestion.max_queue_size;
         
-        if current_memory > max_memory as u64 {
+        debug!("Queue size check: current={}, limit={}", current_queue_size, max_queue_size);
+        
+        if current_queue_size > max_queue_size {
             self.backpressure_active.store(1, Ordering::Relaxed);
-            warn!("Memory limit exceeded: {} > {}, activating backpressure", current_memory, max_memory);
-            return Err(KairosError::rate_limit("Memory limit exceeded".to_string()));
+            warn!("Queue size limit exceeded: {} > {}, activating backpressure", 
+                  current_queue_size, max_queue_size);
+            return Err(KairosError::rate_limit("Queue size limit exceeded".to_string()));
         }
         
         // Validate batch if validation is enabled
@@ -285,24 +288,6 @@ impl IngestionService {
         Ok(status)
     }
     
-    /// Get current memory usage for this process
-    fn get_current_memory_usage(&self) -> u64 {
-        use sysinfo::{Pid, System};
-        
-        // Get current process memory usage, not system-wide
-        let mut system = System::new();
-        system.refresh_processes();
-        
-        let current_pid = Pid::from(std::process::id() as usize);
-        
-        if let Some(process) = system.process(current_pid) {
-            // Return RSS (Resident Set Size) in bytes
-            process.memory() * 1024 // sysinfo returns KB, convert to bytes
-        } else {
-            // Fallback: assume minimal memory usage if we can't get process info
-            1024 * 1024 // 1MB
-        }
-    }
 }
 
 impl PrometheusMetrics {
@@ -429,8 +414,8 @@ mod tests {
     #[tokio::test]
     async fn test_batch_ingestion() {
         let mut config = IngestConfig::default();
-        // Set a very high memory limit for testing to avoid triggering backpressure
-        config.performance.max_memory_mb = 32768; // 32 GB
+        // Set high queue size limit for testing to avoid triggering backpressure
+        config.ingestion.max_queue_size = 100000;
         let config = Arc::new(config);
         let service = IngestionService::new(config).await.unwrap();
         
