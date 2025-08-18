@@ -1,0 +1,17 @@
+[package]
+name = "kairosdb-e2e-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "End-to-end integration tests for KairosDB"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+
+# Local dependencies
+kairosdb-core = { path = "../kairosdb-core" }
