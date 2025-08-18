@@ -1,10 +1,7 @@
 //! Data point types and operations
 
-use chrono::{DateTime, Utc};
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use validator::Validate;
 
 use crate::error::{KairosError, KairosResult};
 use crate::histogram_key_utility::HistogramKeyUtility;

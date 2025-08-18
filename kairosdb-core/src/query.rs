@@ -7,7 +7,6 @@ use validator::Validate;
 use crate::datapoint::{DataPoint, DataPointValue};
 use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
-use crate::tags::TagSet;
 use crate::time::{RelativeTime, TimeRange, Timestamp};
 
 /// Query request for time series data

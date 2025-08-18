@@ -90,7 +90,7 @@ impl KairosError {
     }
 
     /// Create a new timeout error
-    pub fn timeout<S: Into<String>>(message: S) -> Self {
+    pub fn timeout<S: Into<String>>(_message: S) -> Self {
         Self::Timeout { timeout_ms: 5000 } // Default timeout
     }
 

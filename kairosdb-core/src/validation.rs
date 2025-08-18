@@ -5,7 +5,7 @@ use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
 use crate::query::{Aggregator, MetricQuery, QueryRequest};
 use crate::tags::{TagKey, TagSet, TagValue};
-use crate::time::{RelativeTime, TimeRange, Timestamp};
+use crate::time::{TimeRange, Timestamp};
 
 /// Validation limits and constants
 pub struct ValidationLimits {

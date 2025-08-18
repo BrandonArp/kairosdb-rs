@@ -7,7 +7,6 @@
 //! - Metrics collection and monitoring
 
 use anyhow::{Context, Result};
-use futures::stream::StreamExt;
 use kairosdb_core::{
     datapoint::DataPointBatch,
     error::{KairosError, KairosResult},

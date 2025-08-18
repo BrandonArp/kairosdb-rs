@@ -4,7 +4,7 @@ use kairosdb_core::{
     datapoint::{DataPoint, DataPointValue},
     error::{KairosError, KairosResult},
     query::Aggregator,
-    time::{TimeRange, Timestamp},
+    time::Timestamp,
 };
 use ordered_float::OrderedFloat;
 use std::collections::HashMap;

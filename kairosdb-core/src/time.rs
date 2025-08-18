@@ -1,6 +1,6 @@
 //! Time handling utilities for KairosDB
 
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

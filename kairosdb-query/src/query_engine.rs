@@ -1,6 +1,6 @@
 use anyhow::Result;
 use kairosdb_core::{
-    cassandra::{CassandraValue, ColumnName, RowKey, TableNames},
+    cassandra::{RowKey, TableNames},
     datapoint::DataPoint,
     error::{KairosError, KairosResult},
     query::{
@@ -8,20 +8,18 @@ use kairosdb_core::{
         QueryResponse, QueryResult, TagNamesQuery, TagNamesResponse, TagValuesQuery,
         TagValuesResponse,
     },
-    schema::{IndexType, StringIndexEntry},
     time::{TimeRange, Timestamp},
 };
 use moka::future::Cache;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::{aggregation::AggregationEngine, config::QueryConfig};
 
@@ -43,6 +41,7 @@ pub struct QueryEngine {
     aggregation_engine: AggregationEngine,
     metrics: Arc<RwLock<QueryEngineMetrics>>,
     query_cache: Option<Cache<String, QueryResponse>>,
+    #[allow(dead_code)]
     table_names: TableNames,
 }
 
@@ -131,7 +130,7 @@ impl QueryEngine {
 
         // Cache the response if caching is enabled
         if let Some(ref cache) = self.query_cache {
-            let ttl = request
+            let _ttl = request
                 .cache_time
                 .map(|t| Duration::from_secs(t as u64))
                 .unwrap_or_else(|| Duration::from_secs(self.config.cache.default_ttl_seconds));
@@ -215,8 +214,8 @@ impl QueryEngine {
     async fn find_time_series(
         &self,
         metric_name: &kairosdb_core::metrics::MetricName,
-        tag_filters: &HashMap<String, String>,
-        time_range: &TimeRange,
+        _tag_filters: &HashMap<String, String>,
+        _time_range: &TimeRange,
     ) -> KairosResult<Vec<TimeSeriesInfo>> {
         // In a real implementation, this would:
         // 1. Query the row_key_index table to find matching row keys
@@ -332,7 +331,7 @@ impl QueryEngine {
     }
 
     /// Get tag names
-    pub async fn get_tag_names(&self, query: TagNamesQuery) -> KairosResult<TagNamesResponse> {
+    pub async fn get_tag_names(&self, _query: TagNamesQuery) -> KairosResult<TagNamesResponse> {
         // In a real implementation, this would query the string_index table
         // with IndexType::TagNames, optionally filtered by metric
 
@@ -457,6 +456,7 @@ impl QueryEngine {
 struct TimeSeriesInfo {
     pub metric: kairosdb_core::metrics::MetricName,
     pub tags: HashMap<String, String>,
+    #[allow(dead_code)]
     pub row_keys: Vec<RowKey>,
 }
 

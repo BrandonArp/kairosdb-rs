@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 /// Thread-safe metrics collector for query service
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct QueryMetricsCollector {
     /// Total queries executed
     pub queries_total: AtomicU64,
@@ -46,6 +47,7 @@ impl Default for QueryMetricsCollector {
     }
 }
 
+#[allow(dead_code)]
 impl QueryMetricsCollector {
     /// Create a new metrics collector
     pub fn new() -> Self {
@@ -187,6 +189,7 @@ impl QueryMetricsCollector {
 
 /// Snapshot of query metrics at a point in time
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct QueryMetricsSnapshot {
     pub queries_total: u64,
     pub errors_total: u64,
@@ -202,10 +205,12 @@ pub struct QueryMetricsSnapshot {
 }
 
 /// Helper for timing query operations
+#[allow(dead_code)]
 pub struct QueryTimer {
     start: Instant,
 }
 
+#[allow(dead_code)]
 impl QueryTimer {
     /// Start a new query timer
     pub fn start() -> Self {

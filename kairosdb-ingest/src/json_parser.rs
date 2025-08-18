@@ -441,7 +441,7 @@ impl JsonParser {
         }
 
         // Get total count and sum
-        let total_count = obj
+        let _total_count = obj
             .get("count")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| KairosError::validation("Histogram missing 'count' field"))?;
@@ -612,7 +612,7 @@ impl JsonParser {
         }
 
         // Get total count (can be calculated or explicit)
-        let total_count = obj
+        let _total_count = obj
             .get("total_count")
             .and_then(|v| v.as_u64())
             .unwrap_or_else(|| counts.iter().sum());

@@ -4,7 +4,6 @@ use axum::{
     response::Json,
 };
 use kairosdb_core::{
-    error::KairosError,
     query::{MetricNamesQuery, QueryRequest, TagNamesQuery, TagValuesQuery},
 };
 use serde_json::{json, Value};

@@ -1,21 +1,13 @@
 use anyhow::Result;
 use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
     routing::{get, post},
     Router,
 };
-use kairosdb_core::{
-    error::KairosError,
-    query::{MetricNamesQuery, QueryRequest, QueryResponse, TagNamesQuery, TagValuesQuery},
-};
-use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{error, info, warn};
+use tracing::info;
 
 mod aggregation;
 mod config;

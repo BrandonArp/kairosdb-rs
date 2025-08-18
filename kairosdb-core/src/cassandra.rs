@@ -3,7 +3,6 @@
 use crate::datapoint::{DataPoint, DataPointValue};
 use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
-use crate::tags::TagSet;
 use crate::time::Timestamp;
 
 /// Cassandra table names used by KairosDB
