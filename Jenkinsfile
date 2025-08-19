@@ -65,13 +65,20 @@ pipeline {
         script {
           withCredentials([usernamePassword(credentialsId: 'harbor-user', usernameVariable: 'HARBOR_USERNAME', passwordVariable: 'HARBOR_PASSWORD')]) {
             sh "echo \"\$HARBOR_PASSWORD\" | docker login --password-stdin -u '$HARBOR_USERNAME' harbor.arpnetworking.com"
+            
+            // Setup buildx context
             sh '''
             docker context create multiarch-context --docker "host=$DOCKER_HOST,ca=/certs/client/ca.pem,cert=/certs/client/cert.pem,key=/certs/client/key.pem" || echo "Context exists"
             docker buildx create --name multiarch --driver docker-container --platform linux/amd64,linux/arm64 --use multiarch-context || docker buildx use multiarch
             '''
+            
+            // Determine platform based on whether we're building a tag (release)
+            def platforms = env.TAG_NAME ? "linux/amd64,linux/arm64" : "linux/amd64"
+            echo "Building for platforms: ${platforms} (Tag: ${env.TAG_NAME ?: 'none'})"
+            
             sh """
             docker buildx build -f kairosdb-ingest/Dockerfile -t harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}:${imgTag} \\
-            --platform linux/amd64,linux/arm64 \\
+            --platform ${platforms} \\
             --build-arg BUILDKIT_INLINE_CACHE=1 \\
             --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}-cache:${env.BRANCH_NAME} \\
             --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}-cache:main \\
