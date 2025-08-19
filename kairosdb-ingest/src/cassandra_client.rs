@@ -25,6 +25,7 @@ use scylla::client::session_builder::SessionBuilder;
 use scylla::response::query_result::QueryResult;
 use scylla::serialize::row::SerializeRow;
 use scylla::statement::prepared::PreparedStatement;
+use scylla::value::CqlTimestamp;
 
 use crate::cassandra::{CassandraClient, CassandraStats};
 use crate::config::CassandraConfig;
@@ -38,6 +39,8 @@ pub struct CassandraClientImpl {
     insert_data_point: Option<PreparedStatement>,
     insert_row_key_index: Option<PreparedStatement>,
     insert_string_index: Option<PreparedStatement>,
+    insert_row_keys: Option<PreparedStatement>,
+    insert_row_key_time_index: Option<PreparedStatement>,
 }
 
 /// Internal statistics tracking
@@ -96,6 +99,8 @@ impl CassandraClientImpl {
             insert_data_point: None,
             insert_row_key_index: None,
             insert_string_index: None,
+            insert_row_keys: None,
+            insert_row_key_time_index: None,
         })
     }
 
@@ -137,6 +142,32 @@ impl CassandraClientImpl {
                 .map_err(|e| {
                     KairosError::cassandra(format!(
                         "Failed to prepare string_index statement: {}",
+                        e
+                    ))
+                })?,
+        );
+
+        // Prepare row_keys insertion statement (new format)
+        self.insert_row_keys = Some(
+            self.session
+                .prepare("INSERT INTO row_keys (metric, table_name, row_time, data_type, tags, mtime) VALUES (?, 'data_points', ?, ?, ?, now()) USING TTL ?")
+                .await
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare row_keys statement: {}",
+                        e
+                    ))
+                })?,
+        );
+
+        // Prepare row_key_time_index insertion statement (new format)
+        self.insert_row_key_time_index = Some(
+            self.session
+                .prepare("INSERT INTO row_key_time_index (metric, table_name, row_time) VALUES (?, 'data_points', ?) USING TTL ?")
+                .await
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare row_key_time_index statement: {}",
                         e
                     ))
                 })?,
@@ -204,10 +235,11 @@ impl CassandraClientImpl {
         let value_bytes = &value.bytes;
 
         debug!(
-            "Writing data point: row_key_len={}, column_key_len={}, value_len={}",
+            "Writing data point: row_key_len={}, column_key_len={}, value_len={}, row_key_hex={}",
             row_key_bytes.len(),
             column_key_bytes.len(),
-            value_bytes.len()
+            value_bytes.len(),
+            hex::encode(&row_key_bytes)
         );
 
         if let Some(ref prepared) = self.insert_data_point {
@@ -241,6 +273,83 @@ impl CassandraClientImpl {
         }
 
         debug!("Row key index entry written successfully");
+        Ok(())
+    }
+
+    /// Write an entry to the row_keys table (new format)
+    async fn write_row_keys(&self, row_key: &RowKey, ttl: Option<u32>) -> KairosResult<()> {
+        debug!("Writing row_keys entry");
+
+        if let Some(ref prepared) = self.insert_row_keys {
+            // Convert tags to a map format expected by Cassandra
+            let tags_map: std::collections::HashMap<String, String> = row_key
+                .tags
+                .split(':')
+                .filter_map(|pair| {
+                    if pair.is_empty() {
+                        return None;
+                    }
+                    let mut parts = pair.split('=');
+                    let key = parts.next()?.to_string();
+                    let value = parts.next()?.to_string();
+                    Some((key, value))
+                })
+                .collect();
+
+            // Convert to Cassandra timestamp type
+            let row_time_timestamp = CqlTimestamp(row_key.row_time.timestamp_millis());
+            let ttl_seconds = ttl.unwrap_or(0);
+
+            self.execute_prepared(
+                prepared,
+                (
+                    &row_key.metric.as_str(), // metric
+                    row_time_timestamp,       // row_time as timestamp
+                    &row_key.data_type,       // data_type
+                    tags_map,                 // tags as map
+                    ttl_seconds as i32,       // TTL
+                ),
+            )
+            .await?;
+        } else {
+            return Err(KairosError::cassandra(
+                "Row keys prepared statement not available",
+            ));
+        }
+
+        debug!("Row keys entry written successfully");
+        Ok(())
+    }
+
+    /// Write an entry to the row_key_time_index table (new format)
+    async fn write_row_key_time_index(
+        &self,
+        row_key: &RowKey,
+        ttl: Option<u32>,
+    ) -> KairosResult<()> {
+        debug!("Writing row_key_time_index entry");
+
+        if let Some(ref prepared) = self.insert_row_key_time_index {
+            // Convert to Cassandra timestamp type
+            let row_time_timestamp = CqlTimestamp(row_key.row_time.timestamp_millis());
+            let ttl_seconds = ttl.unwrap_or(0);
+
+            self.execute_prepared(
+                prepared,
+                (
+                    &row_key.metric.as_str(), // metric
+                    row_time_timestamp,       // row_time as timestamp
+                    ttl_seconds as i32,       // TTL
+                ),
+            )
+            .await?;
+        } else {
+            return Err(KairosError::cassandra(
+                "Row key time index prepared statement not available",
+            ));
+        }
+
+        debug!("Row key time index entry written successfully");
         Ok(())
     }
 
@@ -306,11 +415,22 @@ impl CassandraClientImpl {
             self.write_string_index(&entry).await?;
         }
 
-        // Write row key indexes
+        // Write row key indexes (legacy and new format)
         for data_point in &batch.points {
             let row_key = RowKey::from_data_point(data_point);
+
+            // Write to legacy row_key_index for backward compatibility
             let entry = RowKeyIndexEntry::from_row_key(&row_key);
             self.write_row_key_index(&entry).await?;
+
+            // Write to new row_keys and row_key_time_index tables used by Java KairosDB
+            let ttl = if data_point.ttl == 0 {
+                None
+            } else {
+                Some(data_point.ttl)
+            };
+            self.write_row_keys(&row_key, ttl).await?;
+            self.write_row_key_time_index(&row_key, ttl).await?;
         }
 
         debug!("All indexes written successfully");
@@ -400,15 +520,30 @@ impl CassandraClient for CassandraClientImpl {
             ) WITH COMPACT STORAGE AND CLUSTERING ORDER BY (column1 ASC)";
         self.execute_query(create_data_points).await?;
 
-        // Create row_keys table
+        // Create row_keys table (Java KairosDB new format)
         let create_row_keys = "
             CREATE TABLE IF NOT EXISTS row_keys (
-                key blob,
-                column1 blob,
-                value blob,
-                PRIMARY KEY (key, column1)
-            ) WITH COMPACT STORAGE AND CLUSTERING ORDER BY (column1 ASC)";
+                metric text,
+                table_name text,
+                row_time timestamp,
+                data_type text,
+                tags frozen<map<text, text>>,
+                mtime timeuuid static,
+                value text,
+                PRIMARY KEY ((metric, table_name, row_time), data_type, tags)
+            ) WITH CLUSTERING ORDER BY (data_type ASC, tags ASC)";
         self.execute_query(create_row_keys).await?;
+
+        // Create row_key_time_index table (Java KairosDB new format)
+        let create_row_key_time_index = "
+            CREATE TABLE IF NOT EXISTS row_key_time_index (
+                metric text,
+                table_name text,
+                row_time timestamp,
+                value text,
+                PRIMARY KEY (metric, table_name, row_time)
+            ) WITH CLUSTERING ORDER BY (table_name ASC, row_time ASC)";
+        self.execute_query(create_row_key_time_index).await?;
 
         // Create row_key_index table
         let create_row_key_index = "

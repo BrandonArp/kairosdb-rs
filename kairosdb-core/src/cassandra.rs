@@ -49,7 +49,8 @@ impl RowKey {
 
     /// Get the row key as bytes for Cassandra (Java KairosDB compatible)
     pub fn to_bytes(&self) -> Vec<u8> {
-        // Format: [metric_name][0x0][timestamp_long][datatype_marker][datatype_length][datatype][tag_string]
+        // Format: [metric_name][0x0][timestamp_long][data_type_section][tag_string]
+        // Java KairosDB includes data type section for non-legacy data types
         let mut bytes = Vec::new();
 
         // Add metric name (UTF-8 encoded)
@@ -62,13 +63,13 @@ impl RowKey {
         // Add row time timestamp (8-byte big-endian long)
         bytes.extend_from_slice(&self.row_time.timestamp_millis().to_be_bytes());
 
-        // Add data type section
-        if !self.data_type.is_empty() {
+        // Add data type section for compatibility with Java KairosDB
+        // Only skip data type section if using legacy data type
+        if self.data_type != "kairos_legacy" {
             bytes.push(0x0); // Data type marker
-
-            let type_bytes = self.data_type.as_bytes();
-            bytes.push(type_bytes.len() as u8); // Length byte
-            bytes.extend_from_slice(type_bytes); // Data type
+            let data_type_bytes = self.data_type.as_bytes();
+            bytes.push(data_type_bytes.len() as u8); // Data type length
+            bytes.extend_from_slice(data_type_bytes); // Data type
         }
 
         // Add tags string (already in KairosDB format)
@@ -110,30 +111,28 @@ impl RowKey {
         let row_time = Timestamp::from_millis(row_time_millis)?;
         offset += 8;
 
-        // Check for data type section (optional)
-        let mut data_type = String::new();
-        if offset < bytes.len() && bytes[offset] == 0x0 {
-            // Data type marker found
-            offset += 1;
-
+        // Check for data type section
+        let data_type = if offset < bytes.len() && bytes[offset] == 0x0 {
+            // Data type section exists
+            offset += 1; // Skip data type marker
             if offset >= bytes.len() {
                 return Err(KairosError::parse(
                     "Invalid row key: missing data type length",
                 ));
             }
-
-            let type_len = bytes[offset] as usize;
+            let data_type_len = bytes[offset] as usize;
             offset += 1;
-
-            if bytes.len() < offset + type_len {
-                return Err(KairosError::parse(
-                    "Invalid row key: too short for data type",
-                ));
+            if offset + data_type_len > bytes.len() {
+                return Err(KairosError::parse("Invalid row key: data type too long"));
             }
-
-            data_type = String::from_utf8_lossy(&bytes[offset..offset + type_len]).to_string();
-            offset += type_len;
-        }
+            let data_type =
+                String::from_utf8_lossy(&bytes[offset..offset + data_type_len]).to_string();
+            offset += data_type_len;
+            data_type
+        } else {
+            // No data type section, use legacy type
+            "kairos_legacy".to_string()
+        };
 
         // Read remaining bytes as tags string
         let tags = if offset < bytes.len() {
@@ -221,12 +220,13 @@ impl CassandraValue {
     pub fn from_data_point_value(value: &DataPointValue, ttl: Option<u32>) -> Self {
         let bytes = match value {
             DataPointValue::Long(v) => {
-                // Java KairosDB variable-length encoding: strip leading zero bytes
-                Self::encode_long(*v)
+                // Java KairosDB kairos_long format: variable-length encoded long (no type byte)
+                let mut bytes = Vec::new();
+                Self::pack_long(*v, &mut bytes);
+                bytes
             }
             DataPointValue::Double(v) => {
-                // Java KairosDB: raw 8-byte double (big-endian), no type flag
-                // Type is determined from row key data_type field
+                // Java KairosDB kairos_double format: 8-byte double (no type byte)
                 v.to_be_bytes().to_vec()
             }
             DataPointValue::Complex { real, imaginary } => {
@@ -254,45 +254,91 @@ impl CassandraValue {
         Self { bytes, ttl }
     }
 
-    /// Java KairosDB variable-length long encoding
-    fn encode_long(value: i64) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut write_rest = false;
+    /// Java KairosDB variable-length long encoding using zig-zag and varint encoding
+    fn pack_long(value: i64, buffer: &mut Vec<u8>) {
+        // Java's packLong: packUnsignedLong((value << 1) ^ (value >> 63), buffer);
+        let zigzag_value = ((value << 1) ^ (value >> 63)) as u64;
+        Self::pack_unsigned_long(zigzag_value, buffer);
+    }
 
-        // Process 8 bytes from most significant to least significant
-        for i in 1..=8 {
-            let byte = ((value >> (64 - (8 * i))) & 0xFF) as u8;
-            if write_rest || byte != 0 {
-                bytes.push(byte);
-                write_rest = true;
+    /// Java KairosDB variable-length unsigned long encoding (varint encoding)
+    fn pack_unsigned_long(mut value: u64, buffer: &mut Vec<u8>) {
+        // Encodes a value using the variable-length encoding from Google Protocol Buffers
+        while (value & !0x7F) != 0 {
+            buffer.push(((value & 0x7F) | 0x80) as u8);
+            value >>= 7;
+        }
+        buffer.push(value as u8);
+    }
+
+    /// Java KairosDB variable-length long decoding (zig-zag + varint decoding)
+    fn unpack_long(data: &[u8]) -> KairosResult<i64> {
+        let unsigned_value = Self::unpack_unsigned_long(data)?;
+        // Java's unpackLong: ((value >>> 1) ^ -(value & 1))
+        let value = ((unsigned_value >> 1) as i64) ^ (-((unsigned_value & 1) as i64));
+        Ok(value)
+    }
+
+    /// Java KairosDB variable-length unsigned long decoding (varint decoding)
+    fn unpack_unsigned_long(data: &[u8]) -> KairosResult<u64> {
+        let mut shift = 0;
+        let mut result = 0u64;
+        let mut i = 0;
+
+        while shift < 64 && i < data.len() {
+            let b = data[i];
+            result |= ((b & 0x7F) as u64) << shift;
+            if (b & 0x80) == 0 {
+                return Ok(result);
             }
+            shift += 7;
+            i += 1;
         }
 
-        // Ensure at least one byte is written
-        if bytes.is_empty() {
-            bytes.push(0);
+        if shift >= 64 {
+            Err(KairosError::parse("Variable length quantity is too long"))
+        } else {
+            Err(KairosError::parse("Unexpected end of data"))
         }
-
-        bytes
     }
 
     /// Decode a Cassandra value back to a data point value
     pub fn to_data_point_value(&self, data_type: &str) -> KairosResult<DataPointValue> {
         match data_type {
-            "kairos_long" => {
-                // Java KairosDB uses variable-length encoding for longs
-                if self.bytes.is_empty() || self.bytes.len() > 8 {
-                    return Err(KairosError::parse("Invalid long value length"));
+            "kairos_legacy" => {
+                // Java KairosDB legacy format: first byte is type (0=long, 1=double)
+                if self.bytes.is_empty() {
+                    return Err(KairosError::parse("Empty legacy value"));
                 }
 
-                // Pad with leading zeros to make 8 bytes
-                let mut padded = vec![0u8; 8 - self.bytes.len()];
-                padded.extend_from_slice(&self.bytes);
+                let type_flag = self.bytes[0];
+                let data = &self.bytes[1..];
 
-                let value = i64::from_be_bytes([
-                    padded[0], padded[1], padded[2], padded[3], padded[4], padded[5], padded[6],
-                    padded[7],
-                ]);
+                match type_flag {
+                    0 => {
+                        // LONG_VALUE: variable-length encoded long
+                        let value = Self::unpack_long(data)?;
+                        Ok(DataPointValue::Long(value))
+                    }
+                    1 => {
+                        // DOUBLE_VALUE: 8-byte double
+                        if data.len() != 8 {
+                            return Err(KairosError::parse("Invalid double value length"));
+                        }
+                        let value = f64::from_be_bytes([
+                            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+                        ]);
+                        Ok(DataPointValue::Double(value.into()))
+                    }
+                    _ => Err(KairosError::parse(format!(
+                        "Unknown legacy type flag: {}",
+                        type_flag
+                    ))),
+                }
+            }
+            "kairos_long" => {
+                // Java KairosDB kairos_long format: variable-length encoded long
+                let value = Self::unpack_long(&self.bytes)?;
                 Ok(DataPointValue::Long(value))
             }
             "kairos_double" => {

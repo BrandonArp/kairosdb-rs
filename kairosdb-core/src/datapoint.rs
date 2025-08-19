@@ -176,6 +176,8 @@ impl DataPoint {
 
     /// Get the data type identifier for Cassandra storage
     pub fn data_type(&self) -> &'static str {
+        // Use standard KairosDB data types for compatibility with Java KairosDB
+        // Java KairosDB uses specific data types and includes them in row keys
         match self.value {
             DataPointValue::Long(_) => "kairos_long",
             DataPointValue::Double(_) => "kairos_double",
