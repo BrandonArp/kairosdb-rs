@@ -83,19 +83,6 @@ pipeline {
       }
     }
     
-    stage('Deploy via ArgoCD') {
-      when { expression { env.BRANCH_IS_PRIMARY == 'true' } }
-      environment {
-        ARGOCD_SERVER = "argocd.arpnetworking.com"
-      }
-      steps {
-        withCredentials([string(credentialsId: 'argocd-token', variable: 'ARGOCD_AUTH_TOKEN')]) {
-          sh "argocd app set kairosdb --parameter ingest.image.tag=${imgTag}"
-          sh "argocd app sync kairosdb"
-          sh "argocd app wait kairosdb --timeout 600"
-        }
-      }
-    }
   }
   
   post {
