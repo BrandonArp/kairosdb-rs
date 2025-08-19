@@ -22,7 +22,7 @@ COPY tests ./tests
 RUN cargo build --release --package kairosdb-ingest --bin kairosdb-ingest
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
