@@ -1,31 +1,45 @@
 FROM ubuntu:24.04
+
+# Set environment variables
+ENV RUST_LOG=debug
+
+# Install dependencies, create user, and setup in single layer
 RUN <<EOF
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends ca-certificates libssl3 python3 python3-pip -y
-pip3 install cqlsh
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    python3 \
+    python3-pip \
+    tini \
+    curl
+pip3 install --no-cache-dir --break-system-packages cqlsh
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
 apt-get clean
-rm -rf /var/lib/apt/lists/*
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache
+useradd -m -u 1001 kairosdb
+mkdir -p /app/config
+chown -R kairosdb:kairosdb /app
 EOF
 
-# Create non-root user
-RUN useradd -m kairosdb
-
+# Set working directory
 WORKDIR /app
 
 # Copy configuration
-ADD config/development.yaml /app/config/development.yaml
-
-# Environment variables
-ENV RUST_LOG=debug
+COPY --chown=kairosdb:kairosdb config/development.yaml /app/config/development.yaml
 
 # Copy binary (will be built locally and synced by Tilt)
-ADD target/debug/kairosdb-ingest /app/
+COPY --chown=kairosdb:kairosdb target/debug/kairosdb-ingest /app/kairosdb-ingest
 
-# Change ownership to non-root user
-RUN chown -R kairosdb:kairosdb /app
-
+# Switch to non-root user
 USER kairosdb
 
-ENTRYPOINT ["/app/kairosdb-ingest"]
+# Add metadata labels
+LABEL org.opencontainers.image.title="KairosDB Ingest Service (Development)" \
+      org.opencontainers.image.description="Development image for KairosDB ingest service with hot reload support" \
+      org.opencontainers.image.vendor="KairosDB" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/kairosdb-ingest"]

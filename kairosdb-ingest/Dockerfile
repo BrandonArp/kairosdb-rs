@@ -3,51 +3,73 @@
 FROM rust:1.89-slim AS builder
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN <<EOF
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+    ca-certificates
+apt-get clean
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+EOF
 
 WORKDIR /app
 
-# Copy workspace files
+# Copy workspace files for better layer caching
 COPY Cargo.toml Cargo.lock ./
 COPY kairosdb-core ./kairosdb-core
 COPY kairosdb-ingest ./kairosdb-ingest
 COPY kairosdb-query ./kairosdb-query
 COPY tests ./tests
 
-# Build the application (specify package to avoid workspace dependency issues)
-RUN cargo build --release --package kairosdb-ingest --bin kairosdb-ingest
+# Build the application and strip the binary
+RUN <<EOF
+cargo build --release --package kairosdb-ingest --bin kairosdb-ingest
+strip target/release/kairosdb-ingest
+EOF
 
 # Runtime stage
 FROM debian:trixie-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# Install runtime dependencies and create user in single layer
+RUN <<EOF
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app user
-RUN useradd -r -s /bin/false kairosdb
+    tini
+apt-get clean
+rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+useradd -r -s /bin/false -u 1001 kairosdb
+mkdir -p /app/config
+chown -R kairosdb:kairosdb /app
+EOF
 
 # Copy binary from builder stage
-COPY --from=builder /app/target/release/kairosdb-ingest /usr/local/bin/
-
-# Change ownership
-RUN chown kairosdb:kairosdb /usr/local/bin/kairosdb-ingest
+COPY --from=builder --chown=kairosdb:kairosdb /app/target/release/kairosdb-ingest /usr/local/bin/kairosdb-ingest
 
 # Switch to app user
 USER kairosdb
 
+# Set working directory
+WORKDIR /app
+
 # Expose port
 EXPOSE 8080
+
+# Add metadata labels
+LABEL org.opencontainers.image.title="KairosDB Ingest Service" \
+      org.opencontainers.image.description="High-performance Rust implementation of KairosDB ingestion service" \
+      org.opencontainers.image.vendor="KairosDB" \
+      org.opencontainers.image.licenses="Apache-2.0"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
+
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 # Run the application
 CMD ["kairosdb-ingest"]
