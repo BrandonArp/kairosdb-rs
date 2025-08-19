@@ -6,6 +6,7 @@ FROM rust:1.89-slim AS builder
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -14,9 +15,11 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY kairosdb-core ./kairosdb-core
 COPY kairosdb-ingest ./kairosdb-ingest
+COPY kairosdb-query ./kairosdb-query
+COPY tests ./tests
 
-# Build the application
-RUN cargo build --release --bin kairosdb-ingest
+# Build the application (specify package to avoid workspace dependency issues)
+RUN cargo build --release --package kairosdb-ingest --bin kairosdb-ingest
 
 # Runtime stage
 FROM debian:bookworm-slim
