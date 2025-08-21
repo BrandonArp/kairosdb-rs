@@ -3,6 +3,8 @@ def short_sha = "000000"
 def imgTag = ""
 def projectGroup = "kairosdb"
 def ingestProjectName = "ingest"
+def queryProjectName = "query"
+def sharedCacheName = "kairosdb-cache"
 
 pipeline {
   agent {
@@ -40,8 +42,10 @@ pipeline {
 
     stage('Unit Tests') {
       steps {
-        sh "cargo test --workspace --lib -- --test-threads=1"
-        sh "cargo clippy --all-targets --all-features --message-format json > target/clippy-report.json || true"
+        sh "mkdir -p target/debug/"
+        sh "cargo check --message-format json > target/debug/check.json"
+        sh "cargo llvm-cov nextest --profile ci --workspace --lib"
+        sh "cargo clippy --all-targets --all-features --message-format json > target/debug/clippy.json || true"
         sh "cargo fmt --check"
       }
     }
@@ -49,7 +53,8 @@ pipeline {
     stage('Integration Tests') {
       steps {
         sh "tilt wait --for=condition=Ready 'uiresource/cassandra' --timeout 600s"
-        sh "cargo test --workspace --test '*' -- --ignored --test-threads=1"
+        sh "cargo llvm-cov nextest --profile ci --workspace --test '*' -- --ignored"
+        sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
       }
     }
 
@@ -60,7 +65,7 @@ pipeline {
       }
     }
     
-    stage('Publish Ingest Docker Image') {
+    stage('Publish Docker Images') {
       steps {
         script {
           withCredentials([usernamePassword(credentialsId: 'harbor-user', usernameVariable: 'HARBOR_USERNAME', passwordVariable: 'HARBOR_PASSWORD')]) {
@@ -76,13 +81,24 @@ pipeline {
             def platforms = env.TAG_NAME ? "linux/amd64,linux/arm64" : "linux/amd64"
             echo "Building for platforms: ${platforms} (Tag: ${env.TAG_NAME ?: 'none'})"
             
+            // Build ingest service using multi-target Dockerfile with shared cache
             sh """
-            docker buildx build -f kairosdb-ingest/Dockerfile -t harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}:${imgTag} \\
+            docker buildx build -f Dockerfile --target ingest -t harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}:${imgTag} \\
             --platform ${platforms} \\
             --build-arg BUILDKIT_INLINE_CACHE=1 \\
-            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}-cache:${env.BRANCH_NAME} \\
-            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}-cache:main \\
-            --cache-to type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${ingestProjectName}-cache:${env.BRANCH_NAME},image-manifest=true,mode=max \\
+            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${sharedCacheName}:${env.BRANCH_NAME} \\
+            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${sharedCacheName}:main \\
+            --cache-to type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${sharedCacheName}:${env.BRANCH_NAME},image-manifest=true,mode=max \\
+            --push .
+            """
+            
+            // Build query service using multi-target Dockerfile with shared cache
+            sh """
+            docker buildx build -f Dockerfile --target query -t harbor.arpnetworking.com/${projectGroup}/${queryProjectName}:${imgTag} \\
+            --platform ${platforms} \\
+            --build-arg BUILDKIT_INLINE_CACHE=1 \\
+            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${sharedCacheName}:${env.BRANCH_NAME} \\
+            --cache-from type=registry,ref=harbor.arpnetworking.com/${projectGroup}/${sharedCacheName}:main \\
             --push .
             """
           }
@@ -95,12 +111,20 @@ pipeline {
   post {
     always {
       // Archive artifacts
-      archiveArtifacts artifacts: 'target/clippy-report.json, target/doc/**', fingerprint: true, allowEmptyArchive: true
+      archiveArtifacts artifacts: 'target/debug/*.json, target/doc/**', fingerprint: true, allowEmptyArchive: true
       
+      // JUnit test results
+      junit 'target/nextest/ci/junit.xml'
+      
+      // Coverage reporting
+      recordCoverage(ignoreParsingErrors: true, tools: [[parser: 'COBERTURA', pattern: '**/target/llvm-cov-target/cobertura.xml']])
+      
+      // Code analysis
       recordIssues(
-        enabledForFailure: false, aggregatingResults: true,
+        enabledForFailure: true, aggregatingResults: true,
         tools: [
-          cargo(pattern: 'target/clippy-report.json')
+          junitParser(pattern: '**/target/nextest/ci/junit.xml'), 
+          cargo(pattern: '**/target/debug/*.json')
         ]
       )
       
