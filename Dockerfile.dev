@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS base
 
 # Set environment variables
 ENV RUST_LOG=debug
@@ -29,11 +29,14 @@ WORKDIR /app
 # Copy configuration
 COPY --chown=kairosdb:kairosdb config/development.yaml /app/config/development.yaml
 
-# Copy binary (will be built locally and synced by Tilt)
-COPY --chown=kairosdb:kairosdb target/debug/kairosdb-ingest /app/kairosdb-ingest
-
 # Switch to non-root user
 USER kairosdb
+
+# Ingest service target
+FROM base AS ingest
+
+# Copy binary (will be built locally and synced by Tilt)
+COPY --chown=kairosdb:kairosdb target/debug/kairosdb-ingest /app/kairosdb-ingest
 
 # Add metadata labels
 LABEL org.opencontainers.image.title="KairosDB Ingest Service (Development)" \
@@ -43,3 +46,18 @@ LABEL org.opencontainers.image.title="KairosDB Ingest Service (Development)" \
 
 # Use tini as init system for proper signal handling
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/kairosdb-ingest"]
+
+# Query service target
+FROM base AS query
+
+# Copy binary (will be built locally and synced by Tilt)
+COPY --chown=kairosdb:kairosdb target/debug/kairosdb-query /app/kairosdb-query
+
+# Add metadata labels
+LABEL org.opencontainers.image.title="KairosDB Query Service (Development)" \
+      org.opencontainers.image.description="Development image for KairosDB query service with hot reload support" \
+      org.opencontainers.image.vendor="KairosDB" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Use tini as init system for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/kairosdb-query"]
