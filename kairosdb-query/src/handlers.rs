@@ -34,7 +34,8 @@ pub async fn health_handler() -> Result<Json<Value>, StatusCode> {
 /// Metrics endpoint (Prometheus format)
 pub async fn metrics_handler(State(_state): State<AppState>) -> Result<String, StatusCode> {
     // For now, return basic metrics - in a real implementation, we'd track these
-    Ok("# HELP kairosdb_queries_total Total number of queries executed\n\
+    Ok(
+        "# HELP kairosdb_queries_total Total number of queries executed\n\
          # TYPE kairosdb_queries_total counter\n\
          kairosdb_queries_total 0\n\
          # HELP kairosdb_query_errors_total Total number of query errors\n\
@@ -45,7 +46,9 @@ pub async fn metrics_handler(State(_state): State<AppState>) -> Result<String, S
          kairosdb_datapoints_returned_total 0\n\
          # HELP kairosdb_avg_query_time_ms Average query execution time in milliseconds\n\
          # TYPE kairosdb_avg_query_time_ms gauge\n\
-         kairosdb_avg_query_time_ms 0.0\n".to_string())
+         kairosdb_avg_query_time_ms 0.0\n"
+            .to_string(),
+    )
 }
 
 /// Main query endpoint

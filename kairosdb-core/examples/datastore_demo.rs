@@ -55,11 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let query_result = store
-        .query_points(
-            &MetricName::from("cpu.usage"),
-            &TagFilter::All,
-            time_range,
-        )
+        .query_points(&MetricName::from("cpu.usage"), &TagFilter::All, time_range)
         .await?;
 
     println!("✓ Found {} data points", query_result.len());
