@@ -272,6 +272,298 @@ mod api_tests {
         // Should either succeed or fail gracefully, but not crash
         assert!(response.status().is_client_error() || response.status().is_success());
     }
+
+    #[tokio::test]
+    async fn test_histogram_datapoint_direct_format() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "response_time_histogram",
+            "datapoints": [[1634567890000i64, {
+                "boundaries": [0.1, 0.5, 1.0, 5.0],
+                "counts": [100, 50, 30, 5],
+                "total_count": 185,
+                "sum": 89.5,
+                "min": 0.01,
+                "max": 4.8
+            }]],
+            "tags": {"service": "api", "endpoint": "/users"}
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_histogram_datapoint_prometheus_format() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "request_latency",
+            "datapoints": [[1634567890000i64, {
+                "buckets": [
+                    {"le": 0.1, "count": 100},
+                    {"le": 0.5, "count": 150},
+                    {"le": 1.0, "count": 180},
+                    {"le": 5.0, "count": 185}
+                ],
+                "count": 185,
+                "sum": 89.5
+            }]],
+            "tags": {"service": "payment", "method": "POST"}
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_datapoint_with_ttl() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "session.count",
+            "datapoints": [[1634567890000i64, 42]],
+            "tags": {"user": "test123"},
+            "ttl": 3600
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_complex_datapoint() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "signal.fft",
+            "datapoints": [[1634567890000i64, {"real": 3.14, "imaginary": 2.71}]],
+            "tags": {"channel": "1", "frequency": "440hz"}
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_text_datapoint() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "log.message",
+            "datapoints": [[1634567890000i64, "ERROR: Database connection failed"]],
+            "tags": {"level": "error", "service": "auth"}
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_gzip_compressed_ingestion() {
+        use std::io::Write;
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "compressed.metric",
+            "datapoints": [[1634567890000i64, 123.45]],
+            "tags": {"test": "compression"}
+        });
+
+        // Compress the payload
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload.to_string().as_bytes()).unwrap();
+        let compressed_data = encoder.finish().unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints/gzip")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_ENCODING, "gzip")
+            .body(Body::from(compressed_data))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_mixed_datapoint_types() {
+        let app = create_test_app().await;
+
+        let payload = json!([
+            {
+                "name": "metric.long",
+                "datapoints": [[1634567890000i64, 42]],
+                "tags": {"type": "long"}
+            },
+            {
+                "name": "metric.double",
+                "datapoints": [[1634567890000i64, 3.14159]],
+                "tags": {"type": "double"}
+            },
+            {
+                "name": "metric.text",
+                "datapoints": [[1634567890000i64, "hello world"]],
+                "tags": {"type": "text"}
+            },
+            {
+                "name": "metric.complex",
+                "datapoints": [[1634567890000i64, {"real": 1.0, "imaginary": -1.0}]],
+                "tags": {"type": "complex"}
+            }
+        ]);
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["datapoints_ingested"], 4);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_histogram_format() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "invalid.histogram",
+            "datapoints": [[1634567890000i64, {
+                "boundaries": [0.1, 0.5],
+                "counts": [10, 20, 30] // Mismatched counts vs boundaries
+            }]],
+            "tags": {"test": "invalid"}
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(json.get("errors").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_invalid_tag_name() {
+        let app = create_test_app().await;
+
+        let payload = json!({
+            "name": "test.metric",
+            "datapoints": [[1634567890000i64, 42]],
+            "tags": {"": "empty_key_invalid"}  // Empty tag key
+        });
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/datapoints")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 #[cfg(test)]
