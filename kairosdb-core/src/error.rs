@@ -106,6 +106,16 @@ impl KairosError {
         Self::Internal(message.into())
     }
 
+    /// Create a new not supported error
+    pub fn not_supported<S: Into<String>>(message: S) -> Self {
+        Self::Internal(format!("Not supported: {}", message.into()))
+    }
+
+    /// Create a new connection error
+    pub fn connection<S: Into<String>>(message: S) -> Self {
+        Self::Connection(message.into())
+    }
+
     /// Check if this is a retriable error
     pub fn is_retriable(&self) -> bool {
         matches!(
