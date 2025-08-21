@@ -6,6 +6,7 @@ use std::time::Duration;
 
 pub const INGEST_BASE_URL: &str = "http://localhost:8081";
 pub const JAVA_KAIROSDB_BASE_URL: &str = "http://localhost:8080";
+pub const RUST_QUERY_BASE_URL: &str = "http://localhost:8082";
 
 /// Test configuration and utilities
 pub struct E2ETestConfig {

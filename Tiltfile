@@ -71,3 +71,48 @@ k8s_resource(
   ],
   labels=["kairosdb", "service"],
 )
+
+# Build the Rust query service with hot reload
+docker_build_with_restart(
+  'kairosdb-query',
+  './',
+  entrypoint=['/app/kairosdb-query'],
+  dockerfile='Dockerfile.dev',
+  live_update=[
+    sync('./target/debug/kairosdb-query', '/app/kairosdb-query'),
+    sync('./config/development.yaml', '/app/config/development.yaml'),
+  ],
+)
+
+# Local resource to build the Rust query binary
+local_resource('build-kairosdb-query', 'cargo build --bin kairosdb-query',
+  deps=[
+    'kairosdb-query/src', 
+    'kairosdb-core/src', 
+    'Cargo.toml', 
+    'kairosdb-query/Cargo.toml',
+    'kairosdb-core/Cargo.toml',
+    'config'
+  ],
+  labels=["kairosdb"],
+)
+
+# Deploy Rust Query Service
+k8s_yaml('./tilt/kairosdb-query.yaml')
+
+k8s_resource(
+  workload='kairosdb-query',
+  port_forwards=[
+    port_forward(8082, 8082, name='query-direct')
+  ],
+  resource_deps=[
+    'cassandra',
+    'build-kairosdb-query',
+  ],
+  links=[
+    link('http://localhost:8082/health', 'Query Health'),
+    link('http://localhost:8082/metrics', 'Query Metrics'),
+    link('http://localhost:8082/api/v1/metricnames', 'Query Metric Names'),
+  ],
+  labels=["kairosdb", "service"],
+)
