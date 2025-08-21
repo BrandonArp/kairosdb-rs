@@ -1,5 +1,5 @@
 //! Data store abstraction layer for KairosDB-rs
-//! 
+//!
 //! This module provides a flexible abstraction over different storage backends
 //! (Cassandra, ClickHouse, TimescaleDB, etc.) while maintaining efficient
 //! time series operations with proper indexing.
@@ -17,17 +17,17 @@ use crate::time::TimeRange;
 
 /// Core trait with minimal required functionality for time series storage.
 /// All storage backends MUST implement these 4 operations.
-/// 
+///
 /// # Design Philosophy
-/// 
+///
 /// This trait follows the "minimal core, optional extensions" pattern:
 /// - Only 4 methods are required to implement
 /// - Implementations MUST provide efficient time, metric, and tag indexing
 /// - Advanced features are available through extension traits with default implementations
 /// - Storage backends can override defaults for optimization
-/// 
+///
 /// # Implementation Requirements
-/// 
+///
 /// All implementations MUST:
 /// - Maintain time-based indexing for efficient range queries
 /// - Provide tag-based filtering without full table scans
@@ -36,18 +36,18 @@ use crate::time::TimeRange;
 #[async_trait]
 pub trait TimeSeriesStore: Send + Sync {
     /// Write data points with automatic indexing.
-    /// 
+    ///
     /// Implementation MUST maintain:
     /// - Time-based partitioning for efficient range queries
     /// - Tag-based indexes for filtering without full scans
     /// - Metric name indexes for discovery
-    /// 
+    ///
     /// # Arguments
     /// * `points` - Vector of data points to write
-    /// 
+    ///
     /// # Returns
     /// * `WriteResult` - Information about the write operation
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let points = vec![
@@ -58,22 +58,22 @@ pub trait TimeSeriesStore: Send + Sync {
     /// println!("Wrote {} points", result.points_written);
     /// ```
     async fn write_points(&self, points: Vec<DataPoint>) -> KairosResult<WriteResult>;
-    
+
     /// Query time series data using efficient indexing.
-    /// 
+    ///
     /// Implementation MUST use:
     /// - Time-range filtering to minimize data scanned
     /// - Tag indexes to avoid full metric scans
     /// - Parallel queries when beneficial
-    /// 
+    ///
     /// # Arguments
     /// * `metric` - Metric name to query
     /// * `tags` - Tag filter criteria
     /// * `time_range` - Time range to query
-    /// 
+    ///
     /// # Returns
     /// * Vector of matching data points sorted by timestamp
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let points = store.query_points(
@@ -88,20 +88,20 @@ pub trait TimeSeriesStore: Send + Sync {
         tags: &TagFilter,
         time_range: TimeRange,
     ) -> KairosResult<Vec<DataPoint>>;
-    
+
     /// List available metrics using efficient indexing.
-    /// 
+    ///
     /// Implementation MUST:
     /// - Use metric name indexes, not full data scans
     /// - Support time-range scoping to show only active metrics
     /// - Handle large metric counts efficiently
-    /// 
+    ///
     /// # Arguments
     /// * `time_range` - Optional time range to scope results
-    /// 
+    ///
     /// # Returns
     /// * Vector of metric names
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// // List all metrics active in the last hour
@@ -110,21 +110,21 @@ pub trait TimeSeriesStore: Send + Sync {
     /// ).await?;
     /// ```
     async fn list_metrics(&self, time_range: Option<TimeRange>) -> KairosResult<Vec<MetricName>>;
-    
+
     /// List tags for a metric using efficient indexing.
-    /// 
+    ///
     /// Implementation MUST:
     /// - Use tag indexes scoped by metric and time
     /// - Return both tag keys and possible values
     /// - Handle high cardinality tags efficiently
-    /// 
+    ///
     /// # Arguments
     /// * `metric` - Metric to get tags for
     /// * `time_range` - Optional time range to scope results
-    /// 
+    ///
     /// # Returns
     /// * `TagSet` containing available tags
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// let tags = store.list_tags(
@@ -133,9 +133,9 @@ pub trait TimeSeriesStore: Send + Sync {
     /// ).await?;
     /// ```
     async fn list_tags(
-        &self, 
-        metric: &MetricName, 
-        time_range: Option<TimeRange>
+        &self,
+        metric: &MetricName,
+        time_range: Option<TimeRange>,
     ) -> KairosResult<TagSet>;
 }
 
@@ -187,13 +187,14 @@ pub enum TagFilter {
 
 impl TagFilter {
     /// Create an exact tag filter from key-value pairs
-    pub fn exact<I, K, V>(tags: I) -> Self 
+    pub fn exact<I, K, V>(tags: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<String>,
         V: Into<String>,
     {
-        let tag_map = tags.into_iter()
+        let tag_map = tags
+            .into_iter()
             .map(|(k, v)| (k.into(), v.into()))
             .collect();
         TagFilter::Exact(tag_map)
@@ -211,18 +212,14 @@ impl TagFilter {
     pub fn matches(&self, tags: &BTreeMap<String, String>) -> bool {
         match self {
             TagFilter::All => true,
-            TagFilter::Exact(required) => {
-                required.iter().all(|(key, value)| {
-                    tags.get(key).map(|v| v == value).unwrap_or(false)
-                })
-            }
-            TagFilter::Any(tag_sets) => {
-                tag_sets.iter().any(|required| {
-                    required.iter().all(|(key, value)| {
-                        tags.get(key).map(|v| v == value).unwrap_or(false)
-                    })
-                })
-            }
+            TagFilter::Exact(required) => required
+                .iter()
+                .all(|(key, value)| tags.get(key).map(|v| v == value).unwrap_or(false)),
+            TagFilter::Any(tag_sets) => tag_sets.iter().any(|required| {
+                required
+                    .iter()
+                    .all(|(key, value)| tags.get(key).map(|v| v == value).unwrap_or(false))
+            }),
             TagFilter::Advanced(filter) => filter.matches(tags),
         }
     }
@@ -277,9 +274,10 @@ impl TagFilterCriterion {
                     false
                 }
             }
-            TagFilterCriterion::Prefix(key, prefix) => {
-                tags.get(key).map(|v| v.starts_with(prefix)).unwrap_or(false)
-            }
+            TagFilterCriterion::Prefix(key, prefix) => tags
+                .get(key)
+                .map(|v| v.starts_with(prefix))
+                .unwrap_or(false),
             TagFilterCriterion::In(key, values) => {
                 tags.get(key).map(|v| values.contains(v)).unwrap_or(false)
             }
@@ -356,17 +354,17 @@ impl TagValue {
 // Optional extension traits with default implementations
 
 /// Optional: Advanced write operations
-/// 
+///
 /// Storage backends can implement this for optimized batch writing.
 /// Default implementations use the core `write_points` method.
 #[async_trait]
 pub trait BatchedTimeSeriesStore: TimeSeriesStore {
     /// Write a batch of data points with batch-specific options
     async fn write_batch(&self, batch: WriteBatch) -> KairosResult<WriteResult>;
-    
+
     /// Write multiple series in an optimized batch
     async fn write_multi_series(&self, batch: MultiSeriesBatch) -> KairosResult<WriteResult>;
-    
+
     /// Stream write for real-time ingestion
     async fn write_stream(&self, stream: DataPointStream) -> KairosResult<WriteResult>;
 }
@@ -378,13 +376,13 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
         // Simple implementation: just call write_points
         self.write_points(batch.points).await
     }
-    
+
     async fn write_multi_series(&self, batch: MultiSeriesBatch) -> KairosResult<WriteResult> {
         // Naive implementation: write each series sequentially
         let mut total_written = 0;
         let mut total_rejected = 0;
         let mut all_errors = Vec::new();
-        
+
         for series_batch in batch.series_batches {
             match self.write_points(series_batch.points).await {
                 Ok(result) => {
@@ -397,7 +395,7 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
                 }
             }
         }
-        
+
         Ok(WriteResult {
             points_written: total_written,
             points_rejected: total_rejected,
@@ -406,16 +404,16 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
             compression_ratio: 1.0,
         })
     }
-    
+
     async fn write_stream(&self, mut stream: DataPointStream) -> KairosResult<WriteResult> {
         use futures::StreamExt;
-        
+
         let mut batch = Vec::new();
         let mut total_result = WriteResult::success(0);
-        
+
         while let Some(point) = stream.next().await {
             batch.push(point);
-            
+
             // Simple batching: flush every 1000 points
             if batch.len() >= 1000 {
                 let result = self.write_points(std::mem::take(&mut batch)).await?;
@@ -424,7 +422,7 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
                 total_result.errors.extend(result.errors);
             }
         }
-        
+
         // Flush remaining points
         if !batch.is_empty() {
             let result = self.write_points(batch).await?;
@@ -432,7 +430,7 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
             total_result.points_rejected += result.points_rejected;
             total_result.errors.extend(result.errors);
         }
-        
+
         Ok(total_result)
     }
 }
@@ -442,10 +440,10 @@ impl<T: TimeSeriesStore> BatchedTimeSeriesStore for T {
 pub trait AdvancedTimeSeriesStore: TimeSeriesStore {
     /// Query multiple metrics in parallel
     async fn query_multi_series(&self, query: MultiSeriesQuery) -> KairosResult<MultiSeriesResult>;
-    
+
     /// Advanced query with aggregation and downsampling
     async fn query_aggregated(&self, query: AggregatedQuery) -> KairosResult<AggregatedResult>;
-    
+
     /// Scan partitions for large-scale analytics
     async fn scan_partitions(&self, scan: PartitionScan) -> KairosResult<ScanResult>;
 }
@@ -457,16 +455,18 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
         // Naive implementation: query each metric separately
         let mut all_series = Vec::new();
         let mut total_points = 0;
-        
+
         for metric_query in &query.metrics {
-            let points = self.query_points(
-                &metric_query.metric,
-                &metric_query.tag_filter,
-                query.time_range.clone(),
-            ).await?;
-            
+            let points = self
+                .query_points(
+                    &metric_query.metric,
+                    &metric_query.tag_filter,
+                    query.time_range.clone(),
+                )
+                .await?;
+
             total_points += points.len();
-            
+
             // Group points by series (simplified)
             let series = TimeSeries {
                 metric: metric_query.metric.clone(),
@@ -475,7 +475,7 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
             };
             all_series.push(series);
         }
-        
+
         let series_count = all_series.len();
         Ok(MultiSeriesResult {
             series: all_series,
@@ -487,16 +487,16 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
             },
         })
     }
-    
+
     async fn query_aggregated(&self, query: AggregatedQuery) -> KairosResult<AggregatedResult> {
         // Simple implementation: get raw data and aggregate in memory
-        let points = self.query_points(&query.metric, &query.tag_filter, query.time_range.clone()).await?;
-        
+        let points = self
+            .query_points(&query.metric, &query.tag_filter, query.time_range.clone())
+            .await?;
+
         // Basic aggregation (sum as example)
-        let sum = points.iter()
-            .filter_map(|p| p.value.as_f64())
-            .sum::<f64>();
-            
+        let sum = points.iter().filter_map(|p| p.value.as_f64()).sum::<f64>();
+
         Ok(AggregatedResult {
             aggregated_points: vec![DataPoint::new_double(
                 query.metric,
@@ -510,10 +510,10 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
             },
         })
     }
-    
+
     async fn scan_partitions(&self, _scan: PartitionScan) -> KairosResult<ScanResult> {
         Err(KairosError::not_supported(
-            "Partition scanning not supported by this backend"
+            "Partition scanning not supported by this backend",
         ))
     }
 }
@@ -523,13 +523,13 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
 pub trait MaintainableTimeSeriesStore: TimeSeriesStore {
     /// Compact old data for better performance
     async fn compact_data(&self, time_range: TimeRange) -> KairosResult<CompactionResult>;
-    
+
     /// Delete data matching criteria
     async fn delete_data(&self, criteria: DeleteCriteria) -> KairosResult<DeleteResult>;
-    
+
     /// Estimate storage requirements
     async fn estimate_storage(&self, query: StorageQuery) -> KairosResult<StorageEstimate>;
-    
+
     /// Get health and statistics
     async fn get_health(&self) -> KairosResult<HealthStatus>;
 }
@@ -857,49 +857,57 @@ mod tests {
     #[test]
     fn test_tag_filter_exact() {
         let filter = TagFilter::exact([("host", "server1"), ("env", "prod")]);
-        
+
         let matching_tags: BTreeMap<String, String> = [
             ("host".into(), "server1".into()),
             ("env".into(), "prod".into()),
             ("region".into(), "us-east".into()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         let non_matching_tags: BTreeMap<String, String> = [
             ("host".into(), "server2".into()),
             ("env".into(), "prod".into()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         assert!(filter.matches(&matching_tags));
         assert!(!filter.matches(&non_matching_tags));
     }
 
     #[test]
     fn test_tag_filter_any() {
-        let tag_set1: BTreeMap<String, String> = [
-            ("host".into(), "server1".into()),
-        ].into_iter().collect();
-        
-        let tag_set2: BTreeMap<String, String> = [
-            ("host".into(), "server2".into()),
-        ].into_iter().collect();
-        
+        let tag_set1: BTreeMap<String, String> =
+            [("host".into(), "server1".into())].into_iter().collect();
+
+        let tag_set2: BTreeMap<String, String> =
+            [("host".into(), "server2".into())].into_iter().collect();
+
         let filter = TagFilter::any([tag_set1, tag_set2]);
-        
+
         let matching_tags1: BTreeMap<String, String> = [
             ("host".into(), "server1".into()),
             ("env".into(), "prod".into()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         let matching_tags2: BTreeMap<String, String> = [
             ("host".into(), "server2".into()),
             ("env".into(), "dev".into()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         let non_matching_tags: BTreeMap<String, String> = [
             ("host".into(), "server3".into()),
             ("env".into(), "prod".into()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         assert!(filter.matches(&matching_tags1));
         assert!(filter.matches(&matching_tags2));
         assert!(!filter.matches(&non_matching_tags));
@@ -907,9 +915,8 @@ mod tests {
 
     #[test]
     fn test_write_result() {
-        let result = WriteResult::success(100)
-            .with_errors(vec!["Invalid metric name".to_string()]);
-        
+        let result = WriteResult::success(100).with_errors(vec!["Invalid metric name".to_string()]);
+
         assert_eq!(result.points_written, 100);
         assert_eq!(result.points_rejected, 1);
         assert_eq!(result.errors.len(), 1);
@@ -918,11 +925,14 @@ mod tests {
     #[test]
     fn test_tag_set() {
         let mut tag_set = TagSet::new();
-        tag_set.insert("host".to_string(), vec![
-            TagValue::new("server1".to_string()).with_count(5),
-            TagValue::new("server2".to_string()).with_count(3),
-        ]);
-        
+        tag_set.insert(
+            "host".to_string(),
+            vec![
+                TagValue::new("server1".to_string()).with_count(5),
+                TagValue::new("server2".to_string()).with_count(3),
+            ],
+        );
+
         let hosts = tag_set.get("host").unwrap();
         assert_eq!(hosts.len(), 2);
         assert_eq!(hosts[0].value, "server1");

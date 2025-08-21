@@ -8,7 +8,7 @@ use axum::{
     http::{header, Method, Request, StatusCode},
 };
 use kairosdb_core::{
-    datastore::{TimeSeriesStore, cassandra_legacy::CassandraLegacyStore},
+    datastore::{cassandra_legacy::CassandraLegacyStore, TimeSeriesStore},
     time::Timestamp,
 };
 use kairosdb_query::{config::QueryConfig, AppState};
@@ -29,7 +29,7 @@ async fn create_test_app() -> axum::Router {
     let datastore: Arc<dyn TimeSeriesStore> = Arc::new(
         CassandraLegacyStore::new("kairosdb_test".to_string())
             .await
-            .expect("Failed to create mock datastore")
+            .expect("Failed to create mock datastore"),
     );
 
     let state = AppState {
@@ -112,7 +112,7 @@ mod api_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -136,7 +136,7 @@ mod api_tests {
 
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        
+
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -153,7 +153,7 @@ mod api_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -265,7 +265,7 @@ mod api_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -424,7 +424,7 @@ mod api_tests {
 
         let request = Request::builder()
             .method(Method::GET)
-            .uri("/api/v1/tagnames?metric=")  // Empty metric name
+            .uri("/api/v1/tagnames?metric=") // Empty metric name
             .body(Body::empty())
             .unwrap();
 
@@ -467,7 +467,7 @@ mod api_tests {
 
         let request = Request::builder()
             .method(Method::GET)
-            .uri("/api/v1/tagvalues?tag=host")  // Missing metric parameter
+            .uri("/api/v1/tagvalues?tag=host") // Missing metric parameter
             .body(Body::empty())
             .unwrap();
 
@@ -488,7 +488,7 @@ mod api_tests {
 
         let request = Request::builder()
             .method(Method::GET)
-            .uri("/api/v1/tagvalues?metric=cpu.usage")  // Missing tag parameter
+            .uri("/api/v1/tagvalues?metric=cpu.usage") // Missing tag parameter
             .body(Body::empty())
             .unwrap();
 
@@ -575,7 +575,7 @@ mod query_format_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -620,7 +620,7 @@ mod query_format_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -662,7 +662,7 @@ mod query_format_tests {
         let app = create_test_app().await;
 
         let now = Timestamp::now();
-        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3600_000).unwrap();
+        let hour_ago = Timestamp::from_millis(now.timestamp_millis() - 3_600_000).unwrap();
 
         let payload = json!({
             "start_absolute": hour_ago,
@@ -704,7 +704,7 @@ mod service_integration_tests {
     #[tokio::test]
     async fn test_datastore_integration() {
         let config = Arc::new(QueryConfig::default());
-        
+
         // Test datastore initialization
         let datastore = CassandraLegacyStore::new("kairosdb_test".to_string())
             .await
@@ -713,7 +713,7 @@ mod service_integration_tests {
         // Test basic datastore operations work
         let metrics = datastore.list_metrics(None).await;
         assert!(metrics.is_ok());
-        
+
         // Test the service state creation
         let state = AppState {
             datastore: Arc::new(datastore),

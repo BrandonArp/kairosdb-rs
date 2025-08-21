@@ -77,7 +77,7 @@ async fn test_all_services_health() {
     // Check Rust query service health
     let rust_query_health = config
         .client
-        .get(&format!("{}/health", RUST_QUERY_BASE_URL))
+        .get(format!("{}/health", RUST_QUERY_BASE_URL))
         .send()
         .await
         .expect("Failed to call Rust query health endpoint");
@@ -98,7 +98,7 @@ async fn test_rust_query_service_health() {
 
     let response = config
         .client
-        .get(&format!("{}/health", RUST_QUERY_BASE_URL))
+        .get(format!("{}/health", RUST_QUERY_BASE_URL))
         .send()
         .await
         .expect("Failed to call Rust query health endpoint");

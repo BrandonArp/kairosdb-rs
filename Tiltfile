@@ -5,7 +5,7 @@ docker_build_with_restart(
   'kairosdb-ingest',
   './',
   entrypoint=['/app/kairosdb-ingest'],
-  dockerfile='Dockerfile.multi.dev',
+  dockerfile='Dockerfile.dev',
   target='ingest',
   live_update=[
     sync('./target/debug/kairosdb-ingest', '/app/kairosdb-ingest'),
@@ -78,7 +78,7 @@ docker_build_with_restart(
   'kairosdb-query',
   './',
   entrypoint=['/app/kairosdb-query'],
-  dockerfile='Dockerfile.multi.dev',
+  dockerfile='Dockerfile.dev',
   target='query',
   live_update=[
     sync('./target/debug/kairosdb-query', '/app/kairosdb-query'),

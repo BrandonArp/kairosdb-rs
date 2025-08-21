@@ -1,10 +1,10 @@
 //! Cassandra implementation using the legacy KairosDB schema
-//! 
+//!
 //! This implementation works with the existing KairosDB tables:
 //! - data_points (COMPACT STORAGE with blob keys)
 //! - row_key_index (legacy blob-based index)
 //! - string_index (metric/tag discovery)
-//! 
+//!
 //! This allows us to validate the datastore abstraction with production data
 //! before migrating to a new schema.
 
@@ -15,13 +15,13 @@ use std::sync::Arc;
 use crate::cassandra::CassandraValue;
 use crate::datapoint::{DataPoint, DataPointValue};
 use crate::datastore::{
-    TimeSeriesStore, WriteResult, TagFilter, TagSet as DataStoreTagSet, 
-    TagValue as DataStoreTagValue
+    TagFilter, TagSet as DataStoreTagSet, TagValue as DataStoreTagValue, TimeSeriesStore,
+    WriteResult,
 };
 use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
-use crate::time::{TimeRange, Timestamp};
 use crate::tags::TagSet;
+use crate::time::{TimeRange, Timestamp};
 
 /// Simple data structure to represent a data points row key
 /// This matches the legacy KairosDB row key format
@@ -38,26 +38,26 @@ impl DataPointsRowKey {
     /// Convert to bytes using the legacy format
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        
+
         // Add metric name
         bytes.extend_from_slice(self.metric_name.as_bytes());
         bytes.push(0x00); // null separator
-        
+
         // Add timestamp (8 bytes, big endian)
         bytes.extend_from_slice(&self.timestamp.to_be_bytes());
-        
+
         // Add data type
         bytes.push(0x00); // separator
         bytes.push(self.data_type.len() as u8);
         bytes.extend_from_slice(self.data_type.as_bytes());
-        
+
         // Add tags (simplified format for now)
         let tags_str = format_tags(&self.tags);
         bytes.extend_from_slice(tags_str.as_bytes());
-        
+
         bytes
     }
-    
+
     /// Parse from bytes (simplified version)
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         // This is a simplified parser - in reality this would need to match
@@ -65,12 +65,12 @@ impl DataPointsRowKey {
         if bytes.len() < 16 {
             return None;
         }
-        
+
         // For now, return a dummy parsed result
         // In a real implementation, this would parse the exact format
         Some(Self {
             metric_name: "parsed_metric".to_string(),
-            cluster_name: "default".to_string(), 
+            cluster_name: "default".to_string(),
             timestamp: 0,
             data_type: "kairos_long".to_string(),
             tags: BTreeMap::new(),
@@ -114,7 +114,7 @@ pub fn parse_tags(tags_str: &str) -> BTreeMap<String, String> {
     if tags_str.is_empty() {
         return tags;
     }
-    
+
     for part in tags_str.split(',') {
         if let Some((key, value)) = part.split_once('=') {
             tags.insert(key.to_string(), value.to_string());
@@ -124,6 +124,7 @@ pub fn parse_tags(tags_str: &str) -> BTreeMap<String, String> {
 }
 
 /// Mock session for demonstration - in reality this would be a ScyllaDB session
+#[allow(dead_code)]
 pub struct MockSession {
     keyspace: String,
 }
@@ -132,12 +133,16 @@ impl MockSession {
     pub fn new(keyspace: String) -> Self {
         Self { keyspace }
     }
-    
-    pub async fn execute(&self, _query: &str, _params: &[&dyn std::fmt::Debug]) -> KairosResult<MockResultSet> {
+
+    pub async fn execute(
+        &self,
+        _query: &str,
+        _params: &[&dyn std::fmt::Debug],
+    ) -> KairosResult<MockResultSet> {
         // Mock implementation - would execute real CQL
         Ok(MockResultSet { rows: Vec::new() })
     }
-    
+
     pub async fn execute_batch(&self, _statements: &[String]) -> KairosResult<()> {
         // Mock batch execution
         Ok(())
@@ -163,13 +168,14 @@ impl MockRow {
     pub fn get_bytes(&self, _index: usize) -> Result<Vec<u8>, KairosError> {
         Ok(Vec::new())
     }
-    
+
     pub fn get_string(&self, _index: usize) -> Result<String, KairosError> {
         Ok(String::new())
     }
 }
 
 /// Cassandra implementation using legacy KairosDB schema
+#[allow(dead_code)]
 pub struct CassandraLegacyStore {
     session: Arc<MockSession>,
     keyspace: String,
@@ -179,13 +185,10 @@ impl CassandraLegacyStore {
     /// Create a new legacy store instance  
     pub async fn new(keyspace: String) -> KairosResult<Self> {
         let session = Arc::new(MockSession::new(keyspace.clone()));
-        
-        Ok(Self {
-            session,
-            keyspace,
-        })
+
+        Ok(Self { session, keyspace })
     }
-    
+
     /// Calculate the row time for a timestamp (3-week boundaries)
     fn calculate_row_time(timestamp: Timestamp) -> Timestamp {
         // KairosDB uses 3-week row boundaries
@@ -194,19 +197,19 @@ impl CassandraLegacyStore {
         let row_time_millis = (millis / THREE_WEEKS_MS) * THREE_WEEKS_MS;
         Timestamp::from_millis(row_time_millis).unwrap_or(timestamp)
     }
-    
+
     /// Get data type string for a value
     fn get_data_type(value: &DataPointValue) -> &'static str {
         match value {
             DataPointValue::Long(_) => "kairos_long",
-            DataPointValue::Double(_) => "kairos_double", 
+            DataPointValue::Double(_) => "kairos_double",
             DataPointValue::Text(_) => "kairos_string",
             DataPointValue::Histogram(_) => "kairos_histogram",
             DataPointValue::Binary(_) => "kairos_bytes",
             _ => "kairos_mixed",
         }
     }
-    
+
     /// Encode column name for data_points table (timestamp + offset)
     fn encode_column_name(timestamp: Timestamp) -> Vec<u8> {
         // Column format: 8 bytes timestamp + 2 bytes offset (always 0 for single value)
@@ -215,7 +218,7 @@ impl CassandraLegacyStore {
         column.extend_from_slice(&0u16.to_be_bytes()); // offset = 0
         column
     }
-    
+
     /// Mock query for row key index
     async fn query_row_key_index(
         &self,
@@ -224,18 +227,16 @@ impl CassandraLegacyStore {
     ) -> KairosResult<Vec<DataPointsRowKey>> {
         // In a real implementation, this would query the row_key_index table
         // For now, return mock data
-        Ok(vec![
-            DataPointsRowKey {
-                metric_name: metric.as_str().to_string(),
-                cluster_name: "default".to_string(),
-                timestamp: time_range.start.timestamp_millis(),
-                data_type: "kairos_long".to_string(),
-                tags: BTreeMap::from([
-                    ("host".to_string(), "server1".to_string()),
-                    ("env".to_string(), "prod".to_string()),
-                ]),
-            }
-        ])
+        Ok(vec![DataPointsRowKey {
+            metric_name: metric.as_str().to_string(),
+            cluster_name: "default".to_string(),
+            timestamp: time_range.start.timestamp_millis(),
+            data_type: "kairos_long".to_string(),
+            tags: BTreeMap::from([
+                ("host".to_string(), "server1".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]),
+        }])
     }
 }
 
@@ -245,10 +246,10 @@ impl TimeSeriesStore for CassandraLegacyStore {
         if points.is_empty() {
             return Ok(WriteResult::success(0));
         }
-        
+
         // Group points by series (metric + tags + data type)
         let mut series_map: HashMap<(String, String, String), Vec<DataPoint>> = HashMap::new();
-        
+
         for point in points {
             let data_type = Self::get_data_type(&point.value);
             let tags_string = format_tagset(&point.tags);
@@ -259,25 +260,24 @@ impl TimeSeriesStore for CassandraLegacyStore {
             );
             series_map.entry(key).or_default().push(point);
         }
-        
+
         let mut total_written = 0;
         let errors = Vec::new();
-        
+
         // Process each series
         for ((metric_str, tags_str, data_type), series_points) in series_map {
-            let metric = MetricName::try_from(metric_str.as_str())
-                .map_err(|e| KairosError::validation(e.to_string()))?;
-            
+            let metric = MetricName::from(metric_str.as_str());
+
             // Parse tags back from string format
             let tags = parse_tags(&tags_str);
-            
+
             // Group by row time (3-week boundaries)
             let mut row_groups: HashMap<Timestamp, Vec<&DataPoint>> = HashMap::new();
             for point in &series_points {
                 let row_time = Self::calculate_row_time(point.timestamp);
                 row_groups.entry(row_time).or_default().push(point);
             }
-            
+
             // Write each row group (mock implementation)
             for (row_time, row_points) in row_groups {
                 let _row_key = DataPointsRowKey {
@@ -287,25 +287,25 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     data_type: data_type.clone(),
                     tags: tags.clone(),
                 };
-                
+
                 // Mock write operations
                 for point in row_points {
                     let _column = Self::encode_column_name(point.timestamp);
                     let _value = CassandraValue::from_data_point_value(&point.value, None);
-                    
+
                     // In real implementation, would execute:
                     // INSERT INTO data_points (key, column1, value) VALUES (?, ?, ?)
                     total_written += 1;
                 }
-                
+
                 // Mock index updates
                 // In real implementation would update row_key_index and string_index tables
             }
         }
-        
+
         Ok(WriteResult::success(total_written).with_errors(errors))
     }
-    
+
     async fn query_points(
         &self,
         metric: &MetricName,
@@ -314,46 +314,48 @@ impl TimeSeriesStore for CassandraLegacyStore {
     ) -> KairosResult<Vec<DataPoint>> {
         // Phase 1: Query row_key_index to find all series for this metric
         let row_keys = self.query_row_key_index(metric, time_range.clone()).await?;
-        
+
         // Phase 2: Filter row keys by tag criteria
-        let filtered_keys: Vec<_> = row_keys.into_iter()
+        let filtered_keys: Vec<_> = row_keys
+            .into_iter()
             .filter(|key| tags.matches(&key.tags))
             .collect();
-        
+
         if filtered_keys.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Phase 3: Query data points for each matching row key (mock implementation)
         let mut all_points = Vec::new();
-        
+
         for row_key in filtered_keys {
             // Mock data point creation
             let point = DataPoint {
                 metric: metric.clone(),
-                timestamp: Timestamp::from_millis(row_key.timestamp + 1000).unwrap_or(time_range.start),
+                timestamp: Timestamp::from_millis(row_key.timestamp + 1000)
+                    .unwrap_or(time_range.start),
                 value: DataPointValue::Long(42), // Mock value
                 tags: btreemap_to_tagset(&row_key.tags),
                 ttl: 0,
             };
             all_points.push(point);
         }
-        
+
         // Sort by timestamp
         all_points.sort_by_key(|p| p.timestamp);
-        
+
         Ok(all_points)
     }
-    
+
     async fn list_metrics(&self, _time_range: Option<TimeRange>) -> KairosResult<Vec<MetricName>> {
         // Mock implementation - would query string_index for all metric names
         Ok(vec![
-            MetricName::try_from("cpu.usage").unwrap(),
-            MetricName::try_from("memory.used").unwrap(),
-            MetricName::try_from("disk.free").unwrap(),
+            MetricName::from("cpu.usage"),
+            MetricName::from("memory.used"),
+            MetricName::from("disk.free"),
         ])
     }
-    
+
     async fn list_tags(
         &self,
         _metric: &MetricName,
@@ -361,17 +363,23 @@ impl TimeSeriesStore for CassandraLegacyStore {
     ) -> KairosResult<DataStoreTagSet> {
         // Mock implementation - would query string_index and actual data
         let mut tag_set = DataStoreTagSet::new();
-        
-        tag_set.insert("host".to_string(), vec![
-            DataStoreTagValue::new("server1".to_string()).with_count(10),
-            DataStoreTagValue::new("server2".to_string()).with_count(8),
-        ]);
-        
-        tag_set.insert("env".to_string(), vec![
-            DataStoreTagValue::new("prod".to_string()).with_count(15),
-            DataStoreTagValue::new("dev".to_string()).with_count(3),
-        ]);
-        
+
+        tag_set.insert(
+            "host".to_string(),
+            vec![
+                DataStoreTagValue::new("server1".to_string()).with_count(10),
+                DataStoreTagValue::new("server2".to_string()).with_count(8),
+            ],
+        );
+
+        tag_set.insert(
+            "env".to_string(),
+            vec![
+                DataStoreTagValue::new("prod".to_string()).with_count(15),
+                DataStoreTagValue::new("dev".to_string()).with_count(3),
+            ],
+        );
+
         Ok(tag_set)
     }
 }
@@ -379,84 +387,93 @@ impl TimeSeriesStore for CassandraLegacyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_calculate_row_time() {
         // Test 3-week boundary calculation
         let timestamp = Timestamp::from_millis(1234567890000).unwrap();
         let row_time = CassandraLegacyStore::calculate_row_time(timestamp);
-        
+
         // Should align to 3-week boundary
         let three_weeks_ms = 3 * 7 * 24 * 60 * 60 * 1000;
         assert_eq!(row_time.timestamp_millis() % three_weeks_ms, 0);
         assert!(row_time.timestamp_millis() <= timestamp.timestamp_millis());
     }
-    
+
     #[test]
     fn test_format_parse_tags() {
         let tags: BTreeMap<String, String> = [
             ("host".to_string(), "server1".to_string()),
             ("env".to_string(), "prod".to_string()),
-        ].into_iter().collect();
-        
+        ]
+        .into_iter()
+        .collect();
+
         let formatted = format_tags(&tags);
         let parsed = parse_tags(&formatted);
-        
+
         assert_eq!(tags, parsed);
     }
-    
+
     #[test]
     fn test_encode_column_name() {
         let timestamp = Timestamp::from_millis(1234567890000).unwrap();
         let encoded = CassandraLegacyStore::encode_column_name(timestamp);
-        
+
         // Should be 10 bytes: 8 for timestamp + 2 for offset
         assert_eq!(encoded.len(), 10);
-        
+
         // First 8 bytes should be timestamp
         let timestamp_bytes = &encoded[0..8];
         let decoded_timestamp = i64::from_be_bytes(timestamp_bytes.try_into().unwrap());
         assert_eq!(decoded_timestamp, 1234567890000);
-        
+
         // Last 2 bytes should be zero (offset)
         assert_eq!(&encoded[8..10], &[0u8, 0u8]);
     }
-    
+
     #[tokio::test]
     async fn test_basic_operations() {
-        let store = CassandraLegacyStore::new("kairosdb".to_string()).await.unwrap();
-        
+        let store = CassandraLegacyStore::new("kairosdb".to_string())
+            .await
+            .unwrap();
+
         // Test write
-        let points = vec![
-            DataPoint {
-                metric: MetricName::try_from("test.metric").unwrap(),
-                timestamp: Timestamp::from_millis(1234567890000).unwrap(),
-                value: DataPointValue::Long(42),
-                tags: TagSet::new(),
-                ttl: 0,
-            }
-        ];
-        
+        let points = vec![DataPoint {
+            metric: MetricName::from("test.metric"),
+            timestamp: Timestamp::from_millis(1234567890000).unwrap(),
+            value: DataPointValue::Long(42),
+            tags: TagSet::new(),
+            ttl: 0,
+        }];
+
         let result = store.write_points(points).await.unwrap();
         assert_eq!(result.points_written, 1);
-        
+
         // Test query
-        let query_result = store.query_points(
-            &MetricName::try_from("test.metric").unwrap(),
-            &TagFilter::All,
-            TimeRange::new(
-                Timestamp::from_millis(1234567890000).unwrap(),
-                Timestamp::from_millis(1234567900000).unwrap(),
-            ).unwrap(),
-        ).await.unwrap();
-        
+        let query_result = store
+            .query_points(
+                &MetricName::from("test.metric"),
+                &TagFilter::All,
+                TimeRange::new(
+                    Timestamp::from_millis(1234567890000).unwrap(),
+                    Timestamp::from_millis(1234567900000).unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
         assert!(!query_result.is_empty());
-        
+
         // Test list operations
         let metrics = store.list_metrics(None).await.unwrap();
         assert!(!metrics.is_empty());
-        
-        let tags = store.list_tags(&MetricName::try_from("test.metric").unwrap(), None).await.unwrap();
+
+        let tags = store
+            .list_tags(&MetricName::from("test.metric"), None)
+            .await
+            .unwrap();
         assert!(!tags.tags.is_empty());
     }
 }

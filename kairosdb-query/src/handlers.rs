@@ -4,13 +4,20 @@ use axum::{
     response::Json,
 };
 use kairosdb_core::{
-    query::{MetricNamesQuery, QueryRequest, TagNamesQuery, TagValuesQuery, QueryResponse, MetricNamesResponse, TagNamesResponse, TagValuesResponse, MetricQueryResult, QueryResult, DataPointResult},
     datastore::{TagFilter, TimeSeriesStore},
-    time::{TimeRange, Timestamp},
     metrics::MetricName,
+    query::{
+        DataPointResult, MetricNamesQuery, MetricNamesResponse, MetricQueryResult, QueryRequest,
+        QueryResponse, QueryResult, TagNamesQuery, TagNamesResponse, TagValuesQuery,
+        TagValuesResponse,
+    },
+    time::{TimeRange, Timestamp},
 };
 use serde_json::{json, Value};
-use std::{collections::{HashMap, BTreeMap}, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tracing::{debug, error, info, warn};
 
 use crate::AppState;
@@ -27,8 +34,7 @@ pub async fn health_handler() -> Result<Json<Value>, StatusCode> {
 /// Metrics endpoint (Prometheus format)
 pub async fn metrics_handler(State(_state): State<AppState>) -> Result<String, StatusCode> {
     // For now, return basic metrics - in a real implementation, we'd track these
-    Ok(format!(
-        "# HELP kairosdb_queries_total Total number of queries executed\n\
+    Ok("# HELP kairosdb_queries_total Total number of queries executed\n\
          # TYPE kairosdb_queries_total counter\n\
          kairosdb_queries_total 0\n\
          # HELP kairosdb_query_errors_total Total number of query errors\n\
@@ -39,8 +45,7 @@ pub async fn metrics_handler(State(_state): State<AppState>) -> Result<String, S
          kairosdb_datapoints_returned_total 0\n\
          # HELP kairosdb_avg_query_time_ms Average query execution time in milliseconds\n\
          # TYPE kairosdb_avg_query_time_ms gauge\n\
-         kairosdb_avg_query_time_ms 0.0\n"
-    ))
+         kairosdb_avg_query_time_ms 0.0\n".to_string())
 }
 
 /// Main query endpoint
@@ -99,12 +104,14 @@ async fn execute_query_with_datastore(
 ) -> Result<QueryResponse, Box<dyn std::error::Error + Send + Sync>> {
     let mut metric_query_results = Vec::new();
     let mut total_sample_size = 0;
-    
+
     for metric_query in query_request.metrics {
-        let metric = MetricName::try_from(metric_query.name.as_str())?;
-        
+        let metric = MetricName::from(metric_query.name.as_str());
+
         // Convert KairosDB time range to our TimeRange
-        let time_range = if let (Some(start), Some(end)) = (query_request.start_absolute, query_request.end_absolute) {
+        let time_range = if let (Some(start), Some(end)) =
+            (query_request.start_absolute, query_request.end_absolute)
+        {
             TimeRange::new(start, end)?
         } else {
             // Default to last hour if no time range specified
@@ -112,7 +119,7 @@ async fn execute_query_with_datastore(
             let hour_ago = now.sub_millis(3600 * 1000)?;
             TimeRange::new(hour_ago, now)?
         };
-        
+
         // Convert tags to TagFilter
         let tag_filter = if metric_query.tags.is_empty() {
             TagFilter::All
@@ -120,10 +127,12 @@ async fn execute_query_with_datastore(
             let tag_map: BTreeMap<String, String> = metric_query.tags.into_iter().collect();
             TagFilter::Exact(tag_map)
         };
-        
+
         // Query the datastore
-        let data_points = datastore.query_points(&metric, &tag_filter, time_range).await?;
-        
+        let data_points = datastore
+            .query_points(&metric, &tag_filter, time_range)
+            .await?;
+
         // Convert data points to KairosDB format
         let mut data_point_results = Vec::new();
         for point in &data_points {
@@ -132,31 +141,31 @@ async fn execute_query_with_datastore(
                 value: point.value.clone(),
             });
         }
-        
+
         // Create tag map for response
-        let mut tags = HashMap::new();
+        let tags = HashMap::new();
         if !data_points.is_empty() {
             // Use tags from first data point (simplified)
             // For now just leave tags empty since TagSet access is private
             // In a real implementation we'd extract the tags properly
         }
-        
+
         let query_result = QueryResult {
             name: metric.clone(),
             tags,
             group_by: Vec::new(), // Simplified - no grouping for now
             values: data_point_results,
         };
-        
+
         let sample_size = query_result.values.len();
         total_sample_size += sample_size;
-        
+
         metric_query_results.push(MetricQueryResult {
             sample_size,
             results: vec![query_result],
         });
     }
-    
+
     Ok(QueryResponse {
         queries: metric_query_results,
         sample_size: total_sample_size,
@@ -180,17 +189,17 @@ pub async fn metric_names_handler(
         Ok(metrics) => {
             // Convert to KairosDB response format
             let mut results: Vec<String> = metrics.iter().map(|m| m.as_str().to_string()).collect();
-            
+
             // Apply prefix filter if specified
             if let Some(prefix) = &_query.prefix {
                 results.retain(|name| name.starts_with(prefix));
             }
-            
+
             // Apply limit if specified
             if let Some(limit) = _query.limit {
                 results.truncate(limit);
             }
-            
+
             let response = MetricNamesResponse { results };
             info!("Returned {} metric names", response.results.len());
             Ok(Json(serde_json::to_value(response).unwrap()))
@@ -248,12 +257,12 @@ pub async fn tag_names_handler(
         Ok(tag_set) => {
             // Convert to KairosDB response format
             let mut results: Vec<String> = tag_set.keys().cloned().collect();
-            
+
             // Apply limit if specified
             if let Some(limit) = query.limit {
                 results.truncate(limit);
             }
-            
+
             let response = TagNamesResponse { results };
             info!("Returned {} tag names", response.results.len());
             Ok(Json(serde_json::to_value(response).unwrap()))
@@ -322,17 +331,17 @@ pub async fn tag_values_handler(
             } else {
                 vec![]
             };
-            
+
             // Apply prefix filter if specified
             if let Some(prefix) = query.prefix {
                 results.retain(|value| value.starts_with(&prefix));
             }
-            
+
             // Apply limit if specified
             if let Some(limit) = query.limit {
                 results.truncate(limit);
             }
-            
+
             let response = TagValuesResponse { results };
             info!(
                 "Returned {} tag values for tag '{}'",

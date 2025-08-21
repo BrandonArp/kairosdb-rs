@@ -10,7 +10,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
 // Import the new datastore abstraction
-use kairosdb_core::datastore::{TimeSeriesStore, cassandra_legacy::CassandraLegacyStore};
+use kairosdb_core::datastore::{cassandra_legacy::CassandraLegacyStore, TimeSeriesStore};
 
 mod aggregation;
 mod config;
@@ -42,8 +42,9 @@ async fn main() -> Result<()> {
 
     // Initialize datastore (legacy Cassandra implementation)
     let datastore: Arc<dyn TimeSeriesStore> = Arc::new(
-        CassandraLegacyStore::new("kairosdb".to_string()).await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize datastore: {}", e))?
+        CassandraLegacyStore::new("kairosdb".to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize datastore: {}", e))?,
     );
     info!("Initialized legacy Cassandra datastore");
 

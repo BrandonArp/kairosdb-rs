@@ -380,7 +380,7 @@ mod api_tests {
 
         let payload = json!({
             "name": "signal.fft",
-            "datapoints": [[1634567890000i64, {"real": 3.14, "imaginary": 2.71}]],
+            "datapoints": [[1634567890000i64, {"real": std::f64::consts::PI, "imaginary": 2.71}]],
             "tags": {"channel": "1", "frequency": "440hz"}
         });
 
@@ -432,10 +432,10 @@ mod api_tests {
 
     #[tokio::test]
     async fn test_gzip_compressed_ingestion() {
-        use std::io::Write;
         use flate2::write::GzEncoder;
         use flate2::Compression;
-        
+        use std::io::Write;
+
         let app = create_test_app().await;
 
         let payload = json!({
@@ -480,7 +480,7 @@ mod api_tests {
             },
             {
                 "name": "metric.double",
-                "datapoints": [[1634567890000i64, 3.14159]],
+                "datapoints": [[1634567890000i64, std::f64::consts::PI]],
                 "tags": {"type": "double"}
             },
             {

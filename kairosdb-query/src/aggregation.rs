@@ -11,8 +11,10 @@ use std::collections::HashMap;
 use tracing::debug;
 
 /// Aggregation engine that applies various aggregation functions to time series data
+#[allow(dead_code)]
 pub struct AggregationEngine;
 
+#[allow(dead_code)]
 impl AggregationEngine {
     /// Create a new aggregation engine
     pub fn new() -> Self {

@@ -23,6 +23,7 @@ use crate::{aggregation::AggregationEngine, config::QueryConfig};
 
 /// Metrics for monitoring query engine performance
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct QueryEngineMetrics {
     pub queries_executed: u64,
     pub query_errors: u64,
@@ -34,6 +35,7 @@ pub struct QueryEngineMetrics {
 }
 
 /// Main query engine that handles all query operations
+#[allow(dead_code)]
 pub struct QueryEngine {
     config: Arc<QueryConfig>,
     aggregation_engine: AggregationEngine,
@@ -43,6 +45,7 @@ pub struct QueryEngine {
     table_names: TableNames,
 }
 
+#[allow(dead_code)]
 impl QueryEngine {
     /// Create a new query engine
     pub async fn new(config: Arc<QueryConfig>) -> Result<Self> {
@@ -451,6 +454,7 @@ impl QueryEngine {
 
 /// Information about a time series
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TimeSeriesInfo {
     pub metric: kairosdb_core::metrics::MetricName,
     pub tags: HashMap<String, String>,

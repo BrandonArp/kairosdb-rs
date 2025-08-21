@@ -21,7 +21,7 @@ async fn test_rust_query_service_health() {
 
     let response = config
         .client
-        .get(&format!("{}/health", RUST_QUERY_BASE_URL))
+        .get(format!("{}/health", RUST_QUERY_BASE_URL))
         .send()
         .await
         .expect("Failed to call Rust query health endpoint");
@@ -48,7 +48,10 @@ async fn test_rust_query_basic_data_flow() {
     let metric_name = config.test_metric_name("rust_query_basic");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing Rust query basic data flow with metric: {}", metric_name);
+    println!(
+        "🧪 Testing Rust query basic data flow with metric: {}",
+        metric_name
+    );
 
     // Step 1: Send data to Rust ingest service
     let ingest_payload = json!([{
@@ -64,7 +67,7 @@ async fn test_rust_query_basic_data_flow() {
 
     let ingest_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints", INGEST_BASE_URL))
+        .post(format!("{}/api/v1/datapoints", INGEST_BASE_URL))
         .header("Content-Type", "application/json")
         .json(&ingest_payload)
         .send()
@@ -102,7 +105,7 @@ async fn test_rust_query_basic_data_flow() {
 
     let query_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
+        .post(format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
         .header("Content-Type", "application/json")
         .json(&query_payload)
         .send()
@@ -167,7 +170,9 @@ async fn test_rust_query_basic_data_flow() {
         "Should find our test data point in the Rust query response"
     );
 
-    println!("✅ Rust query end-to-end test passed: Data successfully flowed from ingest to Rust query");
+    println!(
+        "✅ Rust query end-to-end test passed: Data successfully flowed from ingest to Rust query"
+    );
 }
 
 #[tokio::test]
@@ -188,7 +193,7 @@ async fn test_rust_query_metric_names_discovery() {
 
     let ingest_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints", INGEST_BASE_URL))
+        .post(format!("{}/api/v1/datapoints", INGEST_BASE_URL))
         .json(&ingest_payload)
         .send()
         .await
@@ -202,7 +207,7 @@ async fn test_rust_query_metric_names_discovery() {
     // Step 2: Test metric names endpoint
     let response = config
         .client
-        .get(&format!("{}/api/v1/metricnames", RUST_QUERY_BASE_URL))
+        .get(format!("{}/api/v1/metricnames", RUST_QUERY_BASE_URL))
         .send()
         .await
         .expect("Failed to get metric names");
@@ -218,7 +223,7 @@ async fn test_rust_query_metric_names_discovery() {
         .await
         .expect("Metric names response should be JSON");
 
-    let results = result["results"]
+    let _results = result["results"]
         .as_array()
         .expect("Should contain results array");
 
@@ -236,7 +241,10 @@ async fn test_rust_query_tag_names_discovery() {
     // Test tag names endpoint
     let response = config
         .client
-        .get(&format!("{}/api/v1/tagnames?metric=test.metric", RUST_QUERY_BASE_URL))
+        .get(format!(
+            "{}/api/v1/tagnames?metric=test.metric",
+            RUST_QUERY_BASE_URL
+        ))
         .send()
         .await
         .expect("Failed to get tag names");
@@ -252,7 +260,7 @@ async fn test_rust_query_tag_names_discovery() {
         .await
         .expect("Tag names response should be JSON");
 
-    let results = result["results"]
+    let _results = result["results"]
         .as_array()
         .expect("Should contain results array");
 
@@ -269,7 +277,10 @@ async fn test_rust_query_tag_values_discovery() {
     // Test tag values endpoint
     let response = config
         .client
-        .get(&format!("{}/api/v1/tagvalues?metric=test.metric&tag=host", RUST_QUERY_BASE_URL))
+        .get(format!(
+            "{}/api/v1/tagvalues?metric=test.metric&tag=host",
+            RUST_QUERY_BASE_URL
+        ))
         .send()
         .await
         .expect("Failed to get tag values");
@@ -285,7 +296,7 @@ async fn test_rust_query_tag_values_discovery() {
         .await
         .expect("Tag values response should be JSON");
 
-    let results = result["results"]
+    let _results = result["results"]
         .as_array()
         .expect("Should contain results array");
 
@@ -317,7 +328,7 @@ async fn test_rust_query_histogram_data_flow() {
 
     let ingest_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints", INGEST_BASE_URL))
+        .post(format!("{}/api/v1/datapoints", INGEST_BASE_URL))
         .json(&histogram_payload)
         .send()
         .await
@@ -344,7 +355,7 @@ async fn test_rust_query_histogram_data_flow() {
 
     let query_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
+        .post(format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
         .json(&query_payload)
         .send()
         .await
@@ -395,7 +406,7 @@ async fn test_rust_query_vs_java_query_consistency() {
 
     let ingest_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints", INGEST_BASE_URL))
+        .post(format!("{}/api/v1/datapoints", INGEST_BASE_URL))
         .json(&ingest_payload)
         .send()
         .await
@@ -422,16 +433,19 @@ async fn test_rust_query_vs_java_query_consistency() {
     // Step 2: Query from Rust service
     let rust_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
+        .post(format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
         .json(&query_payload)
         .send()
         .await
         .expect("Failed to query from Rust service");
 
-    // Step 3: Query from Java service  
+    // Step 3: Query from Java service
     let java_response = config
         .client
-        .post(&format!("{}/api/v1/datapoints/query", crate::common::JAVA_KAIROSDB_BASE_URL))
+        .post(format!(
+            "{}/api/v1/datapoints/query",
+            crate::common::JAVA_KAIROSDB_BASE_URL
+        ))
         .json(&query_payload)
         .send()
         .await
@@ -441,12 +455,22 @@ async fn test_rust_query_vs_java_query_consistency() {
     assert!(rust_response.status().is_success());
     assert!(java_response.status().is_success());
 
-    let rust_result: Value = rust_response.json().await.expect("Rust response should be JSON");
-    let java_result: Value = java_response.json().await.expect("Java response should be JSON");
+    let rust_result: Value = rust_response
+        .json()
+        .await
+        .expect("Rust response should be JSON");
+    let java_result: Value = java_response
+        .json()
+        .await
+        .expect("Java response should be JSON");
 
     // Both should return data for our metric
-    let rust_queries = rust_result["queries"].as_array().expect("Rust should have queries");
-    let java_queries = java_result["queries"].as_array().expect("Java should have queries");
+    let rust_queries = rust_result["queries"]
+        .as_array()
+        .expect("Rust should have queries");
+    let java_queries = java_result["queries"]
+        .as_array()
+        .expect("Java should have queries");
 
     assert!(!rust_queries.is_empty(), "Rust query should return results");
     assert!(!java_queries.is_empty(), "Java query should return results");

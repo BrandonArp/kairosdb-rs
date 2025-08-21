@@ -34,8 +34,12 @@ pub mod validation;
 
 // Re-export commonly used types
 pub use datapoint::{DataPoint, DataPointValue, HistogramBuilder, HistogramData};
-pub use datastore::{TimeSeriesStore, BatchedTimeSeriesStore, AdvancedTimeSeriesStore, MaintainableTimeSeriesStore};
-pub use datastore::{WriteResult, TagFilter, TagSet as DataStoreTagSet, TagValue as DataStoreTagValue};
+pub use datastore::{
+    AdvancedTimeSeriesStore, BatchedTimeSeriesStore, MaintainableTimeSeriesStore, TimeSeriesStore,
+};
+pub use datastore::{
+    TagFilter, TagSet as DataStoreTagSet, TagValue as DataStoreTagValue, WriteResult,
+};
 pub use error::{KairosError, KairosResult};
 pub use metrics::MetricName;
 pub use tags::{TagKey, TagSet, TagValue};
