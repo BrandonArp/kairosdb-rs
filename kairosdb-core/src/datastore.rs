@@ -4,14 +4,16 @@
 //! (Cassandra, ClickHouse, TimescaleDB, etc.) while maintaining efficient
 //! time series operations with proper indexing.
 
+pub mod cassandra_legacy;
+
 use async_trait::async_trait;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::datapoint::DataPoint;
 use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
-use crate::time::{TimeRange, Timestamp};
+use crate::time::TimeRange;
 
 /// Core trait with minimal required functionality for time series storage.
 /// All storage backends MUST implement these 4 operations.
@@ -456,28 +458,29 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
         let mut all_series = Vec::new();
         let mut total_points = 0;
         
-        for metric_query in query.metrics {
+        for metric_query in &query.metrics {
             let points = self.query_points(
                 &metric_query.metric,
                 &metric_query.tag_filter,
-                query.time_range,
+                query.time_range.clone(),
             ).await?;
             
             total_points += points.len();
             
             // Group points by series (simplified)
             let series = TimeSeries {
-                metric: metric_query.metric,
+                metric: metric_query.metric.clone(),
                 tags: BTreeMap::new(), // Simplified
                 data_points: points,
             };
             all_series.push(series);
         }
         
+        let series_count = all_series.len();
         Ok(MultiSeriesResult {
             series: all_series,
             query_stats: QueryStatistics {
-                total_series: all_series.len(),
+                total_series: series_count,
                 total_points,
                 partitions_scanned: 1, // Unknown in default impl
                 query_latency_ms: 0,   // Not tracked in default impl
@@ -487,7 +490,7 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
     
     async fn query_aggregated(&self, query: AggregatedQuery) -> KairosResult<AggregatedResult> {
         // Simple implementation: get raw data and aggregate in memory
-        let points = self.query_points(&query.metric, &query.tag_filter, query.time_range).await?;
+        let points = self.query_points(&query.metric, &query.tag_filter, query.time_range.clone()).await?;
         
         // Basic aggregation (sum as example)
         let sum = points.iter()
@@ -495,11 +498,10 @@ impl<T: TimeSeriesStore> AdvancedTimeSeriesStore for T {
             .sum::<f64>();
             
         Ok(AggregatedResult {
-            aggregated_points: vec![DataPoint::new(
+            aggregated_points: vec![DataPoint::new_double(
                 query.metric,
                 query.time_range.end,
-                sum.into(),
-                BTreeMap::new(),
+                sum,
             )],
             aggregation_info: AggregationInfo {
                 aggregator_type: "sum".to_string(),
