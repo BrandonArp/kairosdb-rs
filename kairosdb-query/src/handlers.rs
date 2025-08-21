@@ -112,16 +112,27 @@ async fn execute_query_with_datastore(
         let metric = MetricName::from(metric_query.name.as_str());
 
         // Convert KairosDB time range to our TimeRange
-        let time_range = if let (Some(start), Some(end)) =
-            (query_request.start_absolute, query_request.end_absolute)
-        {
-            TimeRange::new(start, end)?
+        let now = Timestamp::now();
+        
+        // Calculate start time (prefer absolute, then relative, then default to 1 hour ago)
+        let start = if let Some(start_abs) = query_request.start_absolute {
+            start_abs
+        } else if let Some(start_rel) = &query_request.start_relative {
+            now.sub_millis(start_rel.to_millis())?
         } else {
-            // Default to last hour if no time range specified
-            let now = Timestamp::now();
-            let hour_ago = now.sub_millis(3600 * 1000)?;
-            TimeRange::new(hour_ago, now)?
+            now.sub_millis(3600 * 1000)? // Default to 1 hour ago
         };
+        
+        // Calculate end time (prefer absolute, then relative, then default to now)
+        let end = if let Some(end_abs) = query_request.end_absolute {
+            end_abs
+        } else if let Some(end_rel) = &query_request.end_relative {
+            now.sub_millis(end_rel.to_millis())?
+        } else {
+            now
+        };
+        
+        let time_range = TimeRange::new(start, end)?;
 
         // Convert tags to TagFilter
         let tag_filter = if metric_query.tags.is_empty() {

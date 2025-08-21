@@ -125,6 +125,7 @@ async fn test_rust_query_basic_data_flow() {
         .expect("Failed to parse query response as JSON");
 
     println!("📊 Rust query response received");
+    println!("Query response: {}", serde_json::to_string_pretty(&query_result).unwrap());
 
     // Step 4: Validate the response contains our data
     let queries = query_result["queries"]

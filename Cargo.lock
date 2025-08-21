@@ -1446,6 +1446,7 @@ dependencies = [
  "prost 0.14.1",
  "prost-build",
  "prost-types 0.14.1",
+ "scylla",
  "serde",
  "serde_json",
  "tempfile",
