@@ -9,6 +9,9 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
+// Import the new datastore abstraction
+use kairosdb_core::datastore::{TimeSeriesStore, cassandra_legacy::CassandraLegacyStore};
+
 mod aggregation;
 mod config;
 mod handlers;
@@ -20,12 +23,11 @@ use handlers::{
     health_handler, metric_names_handler, metrics_handler, query_handler, tag_names_handler,
     tag_values_handler,
 };
-use query_engine::QueryEngine;
 
-/// Shared application state
+/// Shared application state with datastore abstraction
 #[derive(Clone)]
 pub struct AppState {
-    pub query_engine: Arc<QueryEngine>,
+    pub datastore: Arc<dyn TimeSeriesStore>,
     pub config: Arc<QueryConfig>,
 }
 
@@ -38,13 +40,16 @@ async fn main() -> Result<()> {
     let config = Arc::new(QueryConfig::load()?);
     info!("Loaded configuration: {:?}", config);
 
-    // Initialize query engine
-    let query_engine = Arc::new(QueryEngine::new(config.clone()).await?);
-    info!("Initialized query engine");
+    // Initialize datastore (legacy Cassandra implementation)
+    let datastore: Arc<dyn TimeSeriesStore> = Arc::new(
+        CassandraLegacyStore::new("kairosdb".to_string()).await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize datastore: {}", e))?
+    );
+    info!("Initialized legacy Cassandra datastore");
 
     // Create shared state
     let state = AppState {
-        query_engine,
+        datastore,
         config: config.clone(),
     };
 
