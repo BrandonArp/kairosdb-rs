@@ -53,7 +53,7 @@ pipeline {
     stage('Integration Tests') {
       steps {
         sh "tilt wait --for=condition=Ready 'uiresource/cassandra' --timeout 600s"
-        sh "cargo llvm-cov nextest --profile ci --workspace --test '*' -- --ignored"
+        sh "cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
         sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
       }
     }
