@@ -35,6 +35,7 @@ async fn create_test_app_with_mock() -> axum::Router {
 }
 
 /// Create a test app instance with real Cassandra dependencies
+#[allow(dead_code)] // Used by ignored integration tests
 async fn create_test_app() -> axum::Router {
     let mut config = IngestConfig::default();
     // Set high queue size limit for tests to avoid backpressure

@@ -450,10 +450,7 @@ mod tests {
             .unwrap();
 
         let result = service.ingest_batch(batch).await;
-        if let Err(ref e) = result {
-            eprintln!("Batch ingestion failed: {}", e);
-        }
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Batch ingestion failed: {:?}", result.err());
 
         let metrics = service.get_metrics_snapshot();
         assert_eq!(metrics.batches_processed, 1);

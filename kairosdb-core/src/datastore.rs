@@ -55,7 +55,7 @@ pub trait TimeSeriesStore: Send + Sync {
     ///     DataPoint::new("memory.used", timestamp, 1024, tags),
     /// ];
     /// let result = store.write_points(points).await?;
-    /// println!("Wrote {} points", result.points_written);
+    /// info!(points_written = result.points_written, "Wrote points");
     /// ```
     async fn write_points(&self, points: Vec<DataPoint>) -> KairosResult<WriteResult>;
 

@@ -11,15 +11,19 @@ use kairosdb_core::{
     time::{TimeRange, Timestamp},
 };
 use ordered_float::OrderedFloat;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("KairosDB-rs Datastore Abstraction Demo");
-    println!("======================================");
+    // Initialize tracing subscriber for examples
+    tracing_subscriber::fmt::init();
+
+    info!("KairosDB-rs Datastore Abstraction Demo");
+    info!("======================================");
 
     // Create a legacy store instance (currently mocked)
     let store = CassandraLegacyStore::new("kairosdb".to_string()).await?;
-    println!("✓ Created CassandraLegacyStore");
+    info!("✓ Created CassandraLegacyStore");
 
     // Create some test data points
     let points = vec![
@@ -40,15 +44,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     // Write points using the abstraction
-    println!("\n📝 Writing data points...");
+    info!("📝 Writing data points...");
     let write_result = store.write_points(points).await?;
-    println!("✓ Wrote {} points", write_result.points_written);
+    info!(
+        points_written = write_result.points_written,
+        "✓ Wrote points"
+    );
     if !write_result.errors.is_empty() {
-        println!("⚠ Errors: {:?}", write_result.errors);
+        warn!(errors = ?write_result.errors, "⚠ Write errors occurred");
     }
 
     // Query points back
-    println!("\n🔍 Querying data points...");
+    info!("🔍 Querying data points...");
     let time_range = TimeRange::new(
         Timestamp::now().sub_millis(3600 * 1000)?, // 1 hour ago
         Timestamp::now().add_millis(60 * 1000)?,   // 1 minute from now
@@ -58,43 +65,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .query_points(&MetricName::from("cpu.usage"), &TagFilter::All, time_range)
         .await?;
 
-    println!("✓ Found {} data points", query_result.len());
+    info!(points_found = query_result.len(), "✓ Found data points");
     for point in &query_result {
-        println!(
-            "  - {}: {:?} at {}",
-            point.metric.as_str(),
-            point.value,
-            point.timestamp.timestamp_millis()
+        info!(
+            metric = %point.metric.as_str(),
+            value = ?point.value,
+            timestamp = point.timestamp.timestamp_millis(),
+            "  Data point"
         );
     }
 
     // List available metrics
-    println!("\n📊 Available metrics:");
+    info!("📊 Available metrics:");
     let metrics = store.list_metrics(None).await?;
     for metric in &metrics {
-        println!("  - {}", metric.as_str());
+        info!(metric = %metric.as_str(), "  Metric");
     }
 
     // List tags for a metric
-    println!("\n🏷️  Tags for cpu.usage:");
+    info!("🏷️  Tags for cpu.usage:");
     let tags = store
         .list_tags(&MetricName::from("cpu.usage"), None)
         .await?;
 
     for (tag_key, tag_values) in &tags.tags {
-        println!("  - {}: {} values", tag_key, tag_values.len());
+        info!(
+            tag_key = %tag_key,
+            value_count = tag_values.len(),
+            "  Tag"
+        );
         for value in tag_values {
-            println!("    - {} (count: {})", value.value, value.series_count);
+            info!(
+                tag_value = %value.value,
+                series_count = value.series_count,
+                "    Tag value"
+            );
         }
     }
 
-    println!("\n✅ Demo completed successfully!");
-    println!("\n🎯 Key Benefits:");
-    println!("  - Clean abstraction over legacy KairosDB schema");
-    println!("  - Same interface will work for new schemas later");
-    println!("  - Proven three-phase query pattern");
-    println!("  - Full compatibility with existing data");
-    println!("  - Ready for production load testing");
+    info!("✅ Demo completed successfully!");
+    info!("🎯 Key Benefits:");
+    info!("  - Clean abstraction over legacy KairosDB schema");
+    info!("  - Same interface will work for new schemas later");
+    info!("  - Proven three-phase query pattern");
+    info!("  - Full compatibility with existing data");
+    info!("  - Ready for production load testing");
 
     Ok(())
 }
