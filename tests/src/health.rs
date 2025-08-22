@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::common::{E2ETestConfig, INGEST_BASE_URL, JAVA_KAIROSDB_BASE_URL, RUST_QUERY_BASE_URL};
+use tracing::info;
 
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
@@ -43,52 +44,68 @@ async fn test_java_kairosdb_health() {
 
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
-async fn test_all_services_health() {
+async fn test_00_all_services_health() {
+    // Renamed with 00_ prefix to ensure this runs first
     let config = E2ETestConfig::new();
 
-    // Check ingest service health
+    info!("🔍 Checking ingest service health at {}", INGEST_BASE_URL);
     let ingest_health = config
         .client
         .get(format!("{}/health", INGEST_BASE_URL))
         .send()
         .await
-        .expect("Failed to call ingest health endpoint");
+        .expect("Failed to connect to ingest service - is Tilt running?");
 
-    assert!(
-        ingest_health.status().is_success(),
-        "Ingest service health check failed: {}",
-        ingest_health.status()
+    if !ingest_health.status().is_success() {
+        let status = ingest_health.status();
+        let error_body = ingest_health.text().await.unwrap_or_default();
+        panic!(
+            "Ingest service health check failed: {} - {}",
+            status, error_body
+        );
+    }
+
+    info!(
+        "🔍 Checking Java KairosDB health at {}",
+        JAVA_KAIROSDB_BASE_URL
     );
-
-    // Check Java KairosDB health
     let java_health = config
         .client
         .get(format!("{}/api/v1/health/check", JAVA_KAIROSDB_BASE_URL))
         .send()
         .await
-        .expect("Failed to call Java KairosDB health endpoint");
+        .expect("Failed to connect to Java KairosDB - is Tilt running?");
 
-    assert!(
-        java_health.status().is_success(),
-        "Java KairosDB health check failed: {}",
-        java_health.status()
+    if !java_health.status().is_success() {
+        let status = java_health.status();
+        let error_body = java_health.text().await.unwrap_or_default();
+        panic!(
+            "Java KairosDB health check failed: {} - {}",
+            status, error_body
+        );
+    }
+
+    info!(
+        "🔍 Checking Rust query service health at {}",
+        RUST_QUERY_BASE_URL
     );
-
-    // Check Rust query service health
     let rust_query_health = config
         .client
         .get(format!("{}/health", RUST_QUERY_BASE_URL))
         .send()
         .await
-        .expect("Failed to call Rust query health endpoint");
+        .expect("Failed to connect to Rust query service - is Tilt running?");
 
-    assert!(
-        rust_query_health.status().is_success(),
-        "Rust query service health check failed: {}",
-        rust_query_health.status()
-    );
+    if !rust_query_health.status().is_success() {
+        let status = rust_query_health.status();
+        let error_body = rust_query_health.text().await.unwrap_or_default();
+        panic!(
+            "Rust query service health check failed: {} - {}",
+            status, error_body
+        );
+    }
 
-    println!("✅ All services are healthy and ready for testing");
+    info!("✅ All services are healthy and ready for testing");
 }
 
 #[tokio::test]

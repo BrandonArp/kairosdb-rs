@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
 
 # Local dependencies
 kairosdb-core = { path = "../kairosdb-core" }

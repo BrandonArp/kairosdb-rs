@@ -11,6 +11,7 @@ use kairosdb_core::{
     tags::{TagKey, TagSet, TagValue},
     time::Timestamp,
 };
+use tracing::debug;
 
 #[test]
 fn test_row_key_binary_format() {
@@ -55,7 +56,7 @@ fn test_row_key_binary_format() {
     // Should have trailing colon after tags
     assert!(row_key_str.ends_with(':'));
 
-    println!("Row key format: {}", row_key_str);
+    debug!(row_key_format = %row_key_str, "Row key format");
 }
 
 #[test]
@@ -83,10 +84,10 @@ fn test_column_key_format() {
         ((timestamp.timestamp_millis() - row_time.timestamp_millis()) << 1) as u32;
     assert_eq!(column_int, expected_offset);
 
-    println!(
-        "Column key: 0x{:08x} (offset: {})",
-        column_int,
-        expected_offset >> 1
+    debug!(
+        column_key = format_args!("0x{:08x}", column_int),
+        offset = expected_offset >> 1,
+        "Column key format"
     );
 }
 
@@ -164,7 +165,12 @@ fn test_tag_format_compatibility() {
             }
         }
 
-        println!("Test case {}: {:?} -> '{}'", i, tag_pairs, cassandra_format);
+        debug!(
+            test_case = i,
+            tag_pairs = ?tag_pairs,
+            cassandra_format = %cassandra_format,
+            "Tag format test case"
+        );
     }
 }
 
@@ -248,7 +254,11 @@ fn test_value_serialization_format() {
             _ => {}
         }
 
-        println!("Value {}: {} bytes", name, cassandra_value.bytes.len());
+        debug!(
+            value_name = name,
+            byte_count = cassandra_value.bytes.len(),
+            "Value serialization size"
+        );
     }
 }
 
@@ -286,10 +296,10 @@ fn test_row_time_bucketing() {
             ts_millis
         );
 
-        println!(
-            "Timestamp {} -> Row time {}",
-            ts_millis,
-            row_time.timestamp_millis()
+        debug!(
+            timestamp_millis = ts_millis,
+            row_time_millis = row_time.timestamp_millis(),
+            "Row time calculation"
         );
 
         // Check monotonicity (row times should be non-decreasing)
@@ -343,7 +353,11 @@ fn test_data_type_assignment() {
             value
         );
 
-        println!("Value type: {:?} -> {}", value, actual_type);
+        debug!(
+            value = ?value,
+            data_type = actual_type,
+            "Data type assignment"
+        );
     }
 }
 
@@ -408,6 +422,9 @@ fn test_round_trip_value_serialization() {
             ),
         }
 
-        println!("Round-trip successful for: {:?}", original_value);
+        debug!(
+            original_value = ?original_value,
+            "Round-trip serialization successful"
+        );
     }
 }

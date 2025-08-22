@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 #[allow(unused_imports)]
 use tokio::time::sleep;
+#[allow(unused_imports)]
+use tracing::{debug, info};
 
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
@@ -48,9 +50,9 @@ async fn test_rust_query_basic_data_flow() {
     let metric_name = config.test_metric_name("rust_query_basic");
     let now = Utc::now().timestamp_millis();
 
-    println!(
-        "🧪 Testing Rust query basic data flow with metric: {}",
-        metric_name
+    info!(
+        metric_name = %metric_name,
+        "🧪 Testing Rust query basic data flow"
     );
 
     // Step 1: Send data to Rust ingest service
@@ -63,7 +65,7 @@ async fn test_rust_query_basic_data_flow() {
         }
     }]);
 
-    println!("📤 Sending data to Rust ingest service...");
+    info!("📤 Sending data to Rust ingest service");
 
     let ingest_response = config
         .client
@@ -81,10 +83,10 @@ async fn test_rust_query_basic_data_flow() {
         ingest_response.text().await.unwrap_or_default()
     );
 
-    println!("✅ Data sent successfully to Rust ingest service");
+    info!("✅ Data sent successfully to Rust ingest service");
 
     // Step 2: Wait for data to propagate to Cassandra
-    println!("⏳ Waiting for data to propagate...");
+    info!("⏳ Waiting for data to propagate");
     sleep(Duration::from_secs(5)).await;
 
     // Step 3: Query data from Rust query service
@@ -101,7 +103,7 @@ async fn test_rust_query_basic_data_flow() {
         }]
     });
 
-    println!("📥 Querying Rust query service...");
+    info!("📥 Querying Rust query service");
 
     let query_response = config
         .client
@@ -124,10 +126,10 @@ async fn test_rust_query_basic_data_flow() {
         .await
         .expect("Failed to parse query response as JSON");
 
-    println!("📊 Rust query response received");
-    println!(
-        "Query response: {}",
-        serde_json::to_string_pretty(&query_result).unwrap()
+    info!("📊 Rust query response received");
+    debug!(
+        query_response = %serde_json::to_string_pretty(&query_result).unwrap(),
+        "Query response details"
     );
 
     // Step 4: Validate the response contains our data
@@ -174,7 +176,7 @@ async fn test_rust_query_basic_data_flow() {
         "Should find our test data point in the Rust query response"
     );
 
-    println!(
+    info!(
         "✅ Rust query end-to-end test passed: Data successfully flowed from ingest to Rust query"
     );
 }
@@ -186,7 +188,7 @@ async fn test_rust_query_metric_names_discovery() {
     let metric_name = config.test_metric_name("metric_discovery");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing Rust query metric names discovery");
+    info!("🧪 Testing Rust query metric names discovery");
 
     // Step 1: Ingest test data
     let ingest_payload = json!([{
@@ -232,7 +234,7 @@ async fn test_rust_query_metric_names_discovery() {
         .expect("Should contain results array");
 
     // The response should contain our metric (mock implementation returns default metrics)
-    println!("✅ Metric names discovery test passed");
+    info!("✅ Metric names discovery test passed");
 }
 
 #[tokio::test]
@@ -240,7 +242,7 @@ async fn test_rust_query_metric_names_discovery() {
 async fn test_rust_query_tag_names_discovery() {
     let config = E2ETestConfig::new();
 
-    println!("🧪 Testing Rust query tag names discovery");
+    info!("🧪 Testing Rust query tag names discovery");
 
     // Test tag names endpoint
     let response = config
@@ -268,7 +270,7 @@ async fn test_rust_query_tag_names_discovery() {
         .as_array()
         .expect("Should contain results array");
 
-    println!("✅ Tag names discovery test passed");
+    info!("✅ Tag names discovery test passed");
 }
 
 #[tokio::test]
@@ -276,7 +278,7 @@ async fn test_rust_query_tag_names_discovery() {
 async fn test_rust_query_tag_values_discovery() {
     let config = E2ETestConfig::new();
 
-    println!("🧪 Testing Rust query tag values discovery");
+    info!("🧪 Testing Rust query tag values discovery");
 
     // Test tag values endpoint
     let response = config
@@ -304,7 +306,7 @@ async fn test_rust_query_tag_values_discovery() {
         .as_array()
         .expect("Should contain results array");
 
-    println!("✅ Tag values discovery test passed");
+    info!("✅ Tag values discovery test passed");
 }
 
 #[tokio::test]
@@ -314,7 +316,7 @@ async fn test_rust_query_histogram_data_flow() {
     let metric_name = config.test_metric_name("rust_histogram");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing Rust query histogram data flow");
+    info!("🧪 Testing Rust query histogram data flow");
 
     // Step 1: Send histogram data to ingest service
     let histogram_payload = json!([{
@@ -382,7 +384,7 @@ async fn test_rust_query_histogram_data_flow() {
 
     assert!(!queries.is_empty(), "Histogram query should return results");
 
-    println!("✅ Rust query histogram test passed");
+    info!("✅ Rust query histogram test passed");
 }
 
 #[tokio::test]
@@ -392,7 +394,7 @@ async fn test_rust_query_vs_java_query_consistency() {
     let metric_name = config.test_metric_name("consistency_test");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing consistency between Rust and Java query services");
+    info!("🧪 Testing consistency between Rust and Java query services");
 
     // Step 1: Ingest test data
     let ingest_payload = json!([{
@@ -479,5 +481,5 @@ async fn test_rust_query_vs_java_query_consistency() {
     assert!(!rust_queries.is_empty(), "Rust query should return results");
     assert!(!java_queries.is_empty(), "Java query should return results");
 
-    println!("✅ Consistency test passed: Both Rust and Java query services returned data");
+    info!("✅ Consistency test passed: Both Rust and Java query services returned data");
 }

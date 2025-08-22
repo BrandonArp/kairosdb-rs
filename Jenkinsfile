@@ -36,7 +36,9 @@ pipeline {
     stage('Setup Tilt') {
       steps {
         sh "k3d cluster create k3d --registry-create k3d-repository"
-        sh "tilt up --namespace default -- cassandra < /dev/null > /dev/null &"
+        sh "tilt up --namespace default < /dev/null > tilt.log 2>&1 &"
+        sh "echo 'Tilt started, waiting for services to come up...'"
+        sh "sleep 10"  // Give Tilt a moment to start
       }
     }
 
@@ -52,9 +54,25 @@ pipeline {
 
     stage('Integration Tests') {
       steps {
-        sh "tilt wait --for=condition=Ready 'uiresource/cassandra' --timeout 600s"
-        sh "cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
-        sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
+        script {
+          echo "Checking Tilt status..."
+          sh "tilt get all || true"
+          
+          echo "Waiting for all services to be ready..."
+          sh "tilt wait --for=condition=Ready 'uiresource/cassandra' --timeout 300s"
+          sh "tilt wait --for=condition=Ready 'uiresource/kairosdb' --timeout 300s" 
+          sh "tilt wait --for=condition=Ready 'uiresource/kairosdb-ingest' --timeout 300s"
+          sh "tilt wait --for=condition=Ready 'uiresource/kairosdb-query' --timeout 300s"
+          
+          echo "Verifying service health endpoints..."
+          sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8080/api/v1/health/check || (echo 'Java KairosDB health check failed' && exit 1)"
+          sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8081/health || (echo 'Rust Ingest health check failed' && exit 1)"
+          sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8082/health || (echo 'Rust Query health check failed' && exit 1)"
+          
+          echo "All services are healthy, running E2E tests..."
+          sh "cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
+          sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
+        }
       }
     }
 
@@ -111,7 +129,7 @@ pipeline {
   post {
     always {
       // Archive artifacts
-      archiveArtifacts artifacts: 'target/debug/*.json, target/doc/**', fingerprint: true, allowEmptyArchive: true
+      archiveArtifacts artifacts: 'target/debug/*.json, target/doc/**, tilt.log', fingerprint: true, allowEmptyArchive: true
       
       // JUnit test results
       junit 'target/nextest/ci/junit.xml'

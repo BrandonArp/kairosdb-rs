@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 #[allow(unused_imports)]
 use tokio::time::sleep;
+use tracing::info;
 
 #[tokio::test]
 #[ignore] // Run with --ignored flag, requires Tilt environment
@@ -18,7 +19,7 @@ async fn test_basic_data_flow() {
     let metric_name = config.test_metric_name("basic_flow");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing basic data flow with metric: {}", metric_name);
+    info!(metric_name = %metric_name, "🧪 Testing basic data flow");
 
     // Step 1: Send data to Rust ingest service
     let ingest_payload = json!([{
@@ -30,7 +31,7 @@ async fn test_basic_data_flow() {
         }
     }]);
 
-    println!("📤 Sending data to ingest service...");
+    info!("📤 Sending data to ingest service");
 
     let ingest_response = config
         .client
@@ -48,10 +49,10 @@ async fn test_basic_data_flow() {
         ingest_response.text().await.unwrap_or_default()
     );
 
-    println!("✅ Data sent successfully to ingest service");
+    info!("✅ Data sent successfully to ingest service");
 
     // Step 2: Wait for data to propagate to Cassandra
-    println!("⏳ Waiting for data to propagate...");
+    info!("⏳ Waiting for data to propagate");
     sleep(Duration::from_secs(5)).await;
 
     // Step 3: Query data from Java KairosDB
@@ -68,7 +69,7 @@ async fn test_basic_data_flow() {
         }]
     });
 
-    println!("📥 Querying Java KairosDB...");
+    info!("📥 Querying Java KairosDB");
 
     let query_response = config
         .client
@@ -94,7 +95,7 @@ async fn test_basic_data_flow() {
         .await
         .expect("Failed to parse query response as JSON");
 
-    println!("📊 Query response received");
+    info!("📊 Query response received");
 
     // Step 4: Validate the response contains our data
     let queries = query_result["queries"]
@@ -137,7 +138,7 @@ async fn test_basic_data_flow() {
         "Should find our test data point in the response"
     );
 
-    println!("✅ End-to-end test passed: Data successfully flowed from ingest to query");
+    info!("✅ End-to-end test passed: Data successfully flowed from ingest to query");
 }
 
 #[tokio::test]
@@ -147,9 +148,9 @@ async fn test_histogram_data_flow() {
     let metric_name = config.test_metric_name("histogram_flow");
     let now = Utc::now().timestamp_millis();
 
-    println!(
-        "🧪 Testing histogram data flow with metric: {}",
-        metric_name
+    info!(
+        metric_name = %metric_name,
+        "🧪 Testing histogram data flow"
     );
 
     // Step 1: Send histogram data to Rust ingest service
@@ -169,7 +170,7 @@ async fn test_histogram_data_flow() {
         }
     }]);
 
-    println!("📤 Sending histogram data to ingest service...");
+    info!("📤 Sending histogram data to ingest service");
 
     let ingest_response = config
         .client
@@ -187,10 +188,10 @@ async fn test_histogram_data_flow() {
         ingest_response.text().await.unwrap_or_default()
     );
 
-    println!("✅ Histogram data sent successfully to ingest service");
+    info!("✅ Histogram data sent successfully to ingest service");
 
     // Step 2: Wait for data to propagate
-    println!("⏳ Waiting for histogram data to propagate...");
+    info!("⏳ Waiting for histogram data to propagate");
     sleep(Duration::from_secs(5)).await;
 
     // Step 3: Query histogram data from Java KairosDB
@@ -207,7 +208,7 @@ async fn test_histogram_data_flow() {
         }]
     });
 
-    println!("📥 Querying histogram data from Java KairosDB...");
+    info!("📥 Querying histogram data from Java KairosDB");
 
     let query_response = config
         .client
@@ -235,7 +236,7 @@ async fn test_histogram_data_flow() {
         .await
         .expect("Failed to parse histogram query response as JSON");
 
-    println!("📊 Histogram query response received");
+    info!("📊 Histogram query response received");
 
     // Step 4: Validate histogram data in response
     let queries = query_result["queries"]
@@ -273,7 +274,7 @@ async fn test_histogram_data_flow() {
         "Histogram values array should not be empty"
     );
 
-    println!("✅ Histogram end-to-end test passed: Histogram data successfully flowed from ingest to query");
+    info!("✅ Histogram end-to-end test passed: Histogram data successfully flowed from ingest to query");
 }
 
 #[tokio::test]
@@ -282,7 +283,7 @@ async fn test_multiple_metrics_batch() {
     let config = E2ETestConfig::new();
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing batch ingestion of multiple metrics");
+    info!("🧪 Testing batch ingestion of multiple metrics");
 
     // Step 1: Send batch of multiple metrics
     let batch_payload = json!([
@@ -319,7 +320,7 @@ async fn test_multiple_metrics_batch() {
         }
     ]);
 
-    println!("📤 Sending batch of metrics to ingest service...");
+    info!("📤 Sending batch of metrics to ingest service");
 
     let ingest_response = config
         .client
@@ -337,17 +338,17 @@ async fn test_multiple_metrics_batch() {
         ingest_response.text().await.unwrap_or_default()
     );
 
-    println!("✅ Batch sent successfully to ingest service");
+    info!("✅ Batch sent successfully to ingest service");
 
     // Step 2: Wait for data to propagate
-    println!("⏳ Waiting for batch data to propagate...");
+    info!("⏳ Waiting for batch data to propagate");
     sleep(Duration::from_secs(5)).await;
 
     // Step 3: Query each metric and verify data exists
     for metric_suffix in ["cpu_usage", "memory_usage", "disk_io"] {
         let metric_name = config.test_metric_name(metric_suffix);
 
-        println!("📥 Querying metric: {}", metric_name);
+        info!(metric_name = %metric_name, "📥 Querying metric");
 
         let query_payload = json!({
             "start_relative": {
@@ -400,10 +401,10 @@ async fn test_multiple_metrics_batch() {
         let values = results[0]["values"].as_array().unwrap();
         assert!(!values.is_empty(), "Should have values for {}", metric_name);
 
-        println!("✅ Verified metric: {}", metric_name);
+        info!(metric_name = %metric_name, "✅ Verified metric");
     }
 
-    println!("✅ Batch end-to-end test passed: All metrics successfully processed");
+    info!("✅ Batch end-to-end test passed: All metrics successfully processed");
 }
 
 #[tokio::test]
@@ -413,7 +414,7 @@ async fn test_data_flow_with_complex_tags() {
     let metric_name = config.test_metric_name("complex_tags");
     let now = Utc::now().timestamp_millis();
 
-    println!("🧪 Testing data flow with complex tag combinations");
+    info!("🧪 Testing data flow with complex tag combinations");
 
     // Test with multiple tags and special characters
     let ingest_payload = json!([{
@@ -429,7 +430,7 @@ async fn test_data_flow_with_complex_tags() {
         }
     }]);
 
-    println!("📤 Sending data with complex tags...");
+    info!("📤 Sending data with complex tags");
 
     let ingest_response = config
         .client
@@ -445,7 +446,7 @@ async fn test_data_flow_with_complex_tags() {
         "Failed to ingest data with complex tags"
     );
 
-    println!("✅ Data with complex tags sent successfully");
+    info!("✅ Data with complex tags sent successfully");
 
     // Wait for propagation
     sleep(Duration::from_secs(5)).await;
@@ -465,7 +466,7 @@ async fn test_data_flow_with_complex_tags() {
         }]
     });
 
-    println!("📥 Querying with tag filters...");
+    info!("📥 Querying with tag filters");
 
     let query_response = config
         .client
@@ -497,5 +498,5 @@ async fn test_data_flow_with_complex_tags() {
         "Tag filtered query should return results"
     );
 
-    println!("✅ Complex tags test passed: Data found with tag filtering");
+    info!("✅ Complex tags test passed: Data found with tag filtering");
 }

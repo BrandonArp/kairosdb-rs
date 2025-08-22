@@ -1,9 +1,18 @@
 [profile.ci]
 default-filter = "all()"
 retries = { backoff = "exponential", count = 2, delay = "1s", jitter = true, max-delay = "10s" }
-test-threads="num-cpus"
+test-threads = "num-cpus"
 slow-timeout = { period = "60s" }
+fail-fast = true
 
 [profile.ci.junit]
-path = "junit.xml"
+path = "target/nextest/ci/junit.xml"
 report-name = "nextest-run"
+
+# E2E test ordering - single-threaded for stability
+[[profile.ci.overrides]]
+filter = "test(=kairosdb-e2e-tests)"
+test-group = "e2e-tests"
+
+[test-groups]
+e2e-tests = { max-threads = 1 }
