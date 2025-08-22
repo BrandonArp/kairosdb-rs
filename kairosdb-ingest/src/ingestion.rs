@@ -422,11 +422,11 @@ mod tests {
     async fn test_ingestion_service_creation() {
         // Set environment variable to use mock Cassandra client
         std::env::set_var("USE_MOCK_CASSANDRA", "true");
-        
+
         let config = Arc::new(IngestConfig::default());
         let service = IngestionService::new(config).await;
         assert!(service.is_ok());
-        
+
         // Clean up environment variable
         std::env::remove_var("USE_MOCK_CASSANDRA");
     }
@@ -458,7 +458,7 @@ mod tests {
         let metrics = service.get_metrics_snapshot();
         assert_eq!(metrics.batches_processed, 1);
         assert_eq!(metrics.datapoints_ingested, 1);
-        
+
         // Clean up environment variable
         std::env::remove_var("USE_MOCK_CASSANDRA");
     }

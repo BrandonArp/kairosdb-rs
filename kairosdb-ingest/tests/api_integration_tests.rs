@@ -16,7 +16,7 @@ use tower::ServiceExt;
 async fn create_test_app_with_mock() -> axum::Router {
     // Set environment variable to use mock Cassandra client
     std::env::set_var("USE_MOCK_CASSANDRA", "true");
-    
+
     let mut config = IngestConfig::default();
     // Set high queue size limit for tests to avoid backpressure
     config.ingestion.max_queue_size = 100000;
