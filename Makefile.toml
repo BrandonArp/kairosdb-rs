@@ -57,30 +57,35 @@ args = ["build", "--release", "--all"]
 
 [tasks.test]
 description = "Run unit tests only"
-command = "cargo"
-args = ["nextest", "run", "--profile", "ci", "--workspace", "--lib", "--no-fail-fast"]
+script = '''
+cargo nextest run --profile ci --workspace --lib --no-fail-fast
+cargo nextest run --profile ci --workspace --lib --no-fail-fast --junit target/nextest/ci/junit.xml
+'''
 
 [tasks.test-integration]
 description = "Run integration tests (requires Tilt environment)"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
-command = "cargo"
-args = ["nextest", "run", "--profile", "ci", "--workspace", "--run-ignored", "ignored-only", "--no-fail-fast"]
+script = '''
+cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
+cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --junit target/nextest/ci/junit-integration.xml
+'''
 
 [tasks.test-all]
 description = "Run all tests with coverage"
 script = '''
 echo "🧪 Running unit tests..."
-cargo nextest run --profile ci --workspace --lib --no-fail-fast
+cargo nextest run --profile ci --workspace --lib --no-fail-fast --junit target/nextest/ci/junit.xml
 echo "🔍 Running integration tests (requires Tilt)..."
-KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
+KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --junit target/nextest/ci/junit-integration.xml
 '''
 
 [tasks.coverage-report]
 description = "Generate test coverage report"
 script = '''
 echo "📊 Generating coverage report..."
-cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml
+cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml --junit target/nextest/ci/junit.xml
 echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
+echo "JUnit report generated at: target/nextest/ci/junit.xml"
 '''
 
 [tasks.coverage-integration]
@@ -88,8 +93,9 @@ description = "Generate coverage report for integration tests"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 echo "📊 Generating integration test coverage..."
-cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml
+cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml --junit target/nextest/ci/junit-integration.xml
 echo "Integration coverage report generated at: target/llvm-cov-target/integration-cobertura.xml"
+echo "JUnit report generated at: target/nextest/ci/junit-integration.xml"
 '''
 
 # === Quality Assurance Tasks ===
