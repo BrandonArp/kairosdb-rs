@@ -238,6 +238,50 @@ description = "Run ingestion benchmarks"
 command = "cargo"
 args = ["bench", "--bench", "ingestion"]
 
+# === Performance Testing Tasks ===
+
+[tasks.perf-test]
+description = "Run performance tests (requires Tilt environment)"
+script = '''
+echo "🚀 Running performance test suite..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 suite
+'''
+
+[tasks.perf-test-small]
+description = "Run small performance test (quick validation)"
+script = '''
+echo "🏃 Running small performance test..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run small_scale
+'''
+
+[tasks.perf-test-medium]
+description = "Run medium performance test (CI-appropriate)"
+script = '''
+echo "🏃 Running medium performance test..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run medium_scale
+'''
+
+[tasks.perf-test-large]
+description = "Run large performance test (load testing)"
+script = '''
+echo "🚀 Running large performance test..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run large_scale
+'''
+
+[tasks.perf-test-stress]
+description = "Run stress test (find breaking points)"
+script = '''
+echo "💪 Running stress performance test..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run stress_test
+'''
+
+[tasks.perf-monitor]
+description = "Start continuous performance monitoring"
+script = '''
+echo "👁️  Starting performance monitoring..."
+cd tests && cargo run --bin perf_test -- --url http://localhost:8081 monitor --interval 300 --scenario medium_scale
+'''
+
 # === Clean Tasks ===
 
 [tasks.clean]
@@ -300,6 +344,14 @@ echo "📊 Benchmarking:"
 echo "  bench           - Run all benchmarks"
 echo "  bench-ingestion - Run ingestion benchmarks"
 echo ""
+echo "⚡ Performance Testing:"
+echo "  perf-test       - Run complete performance test suite"
+echo "  perf-test-small - Run quick performance validation"
+echo "  perf-test-medium - Run CI-appropriate performance test"
+echo "  perf-test-large - Run load testing scenario"
+echo "  perf-test-stress - Run stress test to find limits"
+echo "  perf-monitor    - Start continuous monitoring"
+echo ""
 echo "🧹 Maintenance:"
 echo "  clean           - Clean build artifacts"
 echo "  clean-all       - Clean everything"
@@ -311,4 +363,5 @@ echo "💡 Most useful commands:"
 echo "  cargo make ci          - Check if your build will pass CI"
 echo "  cargo make pre-commit  - Run before committing"
 echo "  cargo make ci-full     - Full CI with integration tests"
+echo "  cargo make perf-test-small - Quick performance validation"
 '''

@@ -10,3 +10,4 @@ pub mod common;
 pub mod data_flow;
 pub mod health;
 pub mod rust_query;
+pub mod performance;

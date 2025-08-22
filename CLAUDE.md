@@ -58,6 +58,14 @@ cargo make run-datastore-demo # Run datastore demo
 # Benchmarks
 cargo make bench             # Run all benchmarks
 cargo make bench-ingestion   # Run ingestion benchmarks
+
+# Performance Testing
+cargo make perf-test         # Run complete performance test suite
+cargo make perf-test-small   # Run quick performance validation (30s)
+cargo make perf-test-medium  # Run CI-appropriate test (2m)
+cargo make perf-test-large   # Run load testing scenario (5m)
+cargo make perf-test-stress  # Run stress test to find limits (10m)
+cargo make perf-monitor      # Start continuous monitoring
 ```
 
 ### Legacy Commands (still supported)
@@ -237,3 +245,71 @@ hist1.merge(&hist2)?;
 
 ### Monitoring
 Expose Prometheus metrics for all operations. Include counters, histograms for timing, and gauge metrics for system state.
+
+## Performance Testing Framework
+
+KairosDB-rs includes a comprehensive end-to-end performance testing framework designed for histogram-heavy workloads and high-cardinality scenarios.
+
+### Quick Start
+```bash
+# Run quick validation test (30 seconds)
+cargo make perf-test-small
+
+# Run full performance test suite 
+cargo make perf-test
+
+# Run custom scenarios
+cd tests && cargo run --bin perf_test -- run large_scale --duration 600
+```
+
+### Test Scenarios
+- **small_scale**: 50 metrics, 30s (local development)
+- **medium_scale**: 500 metrics, 2m (CI/staging) 
+- **large_scale**: 2k metrics, 5m (production load)
+- **stress_test**: 5k metrics, 10m (find breaking points)
+- **high_cardinality**: 100 metrics with 1000 tag combinations each
+- **high_frequency**: Many small batches for latency testing
+- **large_batch**: Fewer large batches for throughput testing  
+- **memory_pressure**: Large histograms (1k-5k samples each)
+
+### Key Features
+- **Histogram-Focused**: Generates realistic histogram data with configurable sample counts (10s to thousands)
+- **High Cardinality**: Thousands of metrics with consistent tag patterns (service, environment, region, etc.)
+- **Realistic Distributions**: Normal, exponential, and bimodal sample distributions
+- **Comprehensive Reporting**: Latency stats (P95, P99), throughput, success rates, bottleneck analysis
+- **Trending Data**: CSV output for tracking performance over time
+- **Continuous Monitoring**: Long-running tests for stability validation
+
+### Performance Metrics Collected
+- Throughput: datapoints/second, requests/second
+- Latency: mean, median, P95, P99, min, max
+- Success rate and error analysis
+- Efficiency scoring and bottleneck identification
+- Memory and resource utilization estimates
+
+### CLI Usage Examples
+```bash
+# List all available scenarios
+cd tests && cargo run --bin perf_test -- list
+
+# Run with custom parameters
+cd tests && cargo run --bin perf_test -- run medium_scale \
+  --metrics 1000 --duration 300 --batch-size 200
+
+# Run test suite excluding stress tests
+cd tests && cargo run --bin perf_test -- suite --skip stress_test
+
+# Start continuous monitoring (every 5 minutes)
+cd tests && cargo run --bin perf_test -- monitor \
+  --interval 300 --scenario medium_scale
+
+# Generate sample config file
+cd tests && cargo run --bin perf_test -- config
+```
+
+### Integration with CI/CD
+Performance tests are designed to integrate with CI pipelines:
+- **perf-test-small**: Quick validation suitable for PR checks
+- **perf-test-medium**: More comprehensive testing for staging deployments
+- Reports saved as JSON and CSV for trending analysis
+- Configurable failure thresholds and performance regression detection
