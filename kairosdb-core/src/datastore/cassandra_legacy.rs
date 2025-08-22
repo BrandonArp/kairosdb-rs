@@ -378,7 +378,7 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     .query_unpaged(
                         metric_index_query,
                         (
-                            "metric_names",
+                            "metric_names".as_bytes(),
                             metric.as_str(),
                             vec![0u8], // Empty value
                         ),

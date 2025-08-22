@@ -70,7 +70,7 @@ pipeline {
           sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8082/health || (echo 'Rust Query health check failed' && exit 1)"
           
           echo "All services are healthy, running E2E tests..."
-          sh "cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
+          sh "KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
           sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
         }
       }
