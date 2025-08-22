@@ -434,24 +434,6 @@ impl TimeSeriesStore for CassandraLegacyStore {
 
             let query = "SELECT column1, value FROM data_points WHERE key = ? AND column1 >= ? AND column1 <= ?";
 
-            println!("DEBUG: Scylla query: {}", query);
-            println!("DEBUG: Parameters:");
-            println!(
-                "  key_bytes (len={}): {}",
-                key_bytes.len(),
-                hex::encode(&key_bytes)
-            );
-            println!(
-                "  start_column (len={}): {}",
-                start_column.len(),
-                hex::encode(&start_column)
-            );
-            println!(
-                "  end_column (len={}): {}",
-                end_column.len(),
-                hex::encode(&end_column)
-            );
-
             let query_result = self
                 .session
                 .query_unpaged(
@@ -471,10 +453,7 @@ impl TimeSeriesStore for CassandraLegacyStore {
                 KairosError::Cassandra(format!("Failed to deserialize data_points rows: {:?}", e))
             })?;
 
-            let mut row_count = 0;
-            println!("DEBUG: Processing rows from scylla query result...");
             for row_result in rows_iter {
-                row_count += 1;
                 let (column_bytes, value_bytes) = row_result.map_err(|e| {
                     KairosError::Cassandra(format!(
                         "Failed to deserialize data_points row: {:?}",
@@ -482,34 +461,14 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     ))
                 })?;
 
-                println!(
-                    "DEBUG: Processing row {}: column_bytes.len()={}, value_bytes.len()={}",
-                    row_count,
-                    column_bytes.len(),
-                    value_bytes.len()
-                );
-
                 // Decode timestamp from 4-byte column name (Java KairosDB format)
                 if column_bytes.len() >= 4 {
-                    println!(
-                        "DEBUG: Decoding timestamp from column_bytes: {}",
-                        hex::encode(&column_bytes)
-                    );
-
                     // Use existing ColumnName::from_bytes method for consistency
                     let column_name = crate::cassandra::ColumnName::from_bytes(&column_bytes)?;
                     let offset = column_name.offset;
 
-                    println!(
-                        "DEBUG: row_key.timestamp={}, offset={}",
-                        row_key.timestamp, offset
-                    );
                     // Reconstruct full timestamp = row_time + offset
                     let timestamp_millis = row_key.timestamp + offset;
-                    println!(
-                        "DEBUG: reconstructed timestamp_millis = {} + {} = {}",
-                        row_key.timestamp, offset, timestamp_millis
-                    );
                     let timestamp = Timestamp::from_millis(timestamp_millis)?;
 
                     // Decode value based on data type
@@ -523,22 +482,8 @@ impl TimeSeriesStore for CassandraLegacyStore {
                         ttl: 0,
                     };
                     all_points.push(point);
-                    println!(
-                        "DEBUG: Successfully decoded data point with timestamp {}",
-                        timestamp_millis
-                    );
-                } else {
-                    println!(
-                        "DEBUG: Skipping row due to insufficient column_bytes length: {} < 4",
-                        column_bytes.len()
-                    );
                 }
             }
-            println!(
-                "DEBUG: Scylla query returned {} rows, converted to {} data points",
-                row_count,
-                all_points.len()
-            );
         }
 
         // Sort by timestamp
