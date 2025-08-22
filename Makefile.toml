@@ -58,19 +58,19 @@ args = ["build", "--release", "--all"]
 [tasks.test]
 description = "Run unit tests only"
 command = "cargo"
-args = ["nextest", "run", "--profile", "ci", "--workspace", "--lib"]
+args = ["nextest", "run", "--profile", "ci", "--workspace", "--lib", "--no-fail-fast"]
 
 [tasks.test-integration]
 description = "Run integration tests (requires Tilt environment)"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 command = "cargo"
-args = ["nextest", "run", "--profile", "ci", "--workspace", "--run-ignored", "ignored-only"]
+args = ["nextest", "run", "--profile", "ci", "--workspace", "--run-ignored", "ignored-only", "--no-fail-fast"]
 
 [tasks.test-all]
 description = "Run all tests with coverage"
 script = '''
 echo "🧪 Running unit tests..."
-cargo nextest run --profile ci --workspace --lib
+cargo nextest run --profile ci --workspace --lib --no-fail-fast
 echo "🔍 Running integration tests (requires Tilt)..."
 KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
 '''
@@ -79,7 +79,7 @@ KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci 
 description = "Generate test coverage report"
 script = '''
 echo "📊 Generating coverage report..."
-cargo llvm-cov nextest --profile ci --workspace --lib --cobertura --output-path target/llvm-cov-target/cobertura.xml
+cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml
 echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
 '''
 
@@ -88,7 +88,7 @@ description = "Generate coverage report for integration tests"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 echo "📊 Generating integration test coverage..."
-cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml
+cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml
 echo "Integration coverage report generated at: target/llvm-cov-target/integration-cobertura.xml"
 '''
 
@@ -107,19 +107,41 @@ description = "Run complete CI pipeline locally (equivalent to Jenkins)"
 script = '''
 echo "🚀 Running complete CI pipeline..."
 echo ""
+
+# Track exit codes
+FORMAT_EXIT=0
+LINT_EXIT=0  
+BUILD_EXIT=0
+TEST_EXIT=0
+
 echo "📝 Step 1: Format check..."
-cargo make format-check
+cargo make format-check || FORMAT_EXIT=$?
 echo ""
+
 echo "🔍 Step 2: Lint check..."
-cargo make lint
+cargo make lint || LINT_EXIT=$?
 echo ""
+
 echo "🏗️  Step 3: Build..."
-cargo make build
+cargo make build || BUILD_EXIT=$?
 echo ""
+
 echo "🧪 Step 4: Unit tests..."
-cargo make test
+cargo make test || TEST_EXIT=$?
 echo ""
-echo "✅ CI pipeline completed successfully!"
+
+# Report results
+if [ $FORMAT_EXIT -eq 0 ] && [ $LINT_EXIT -eq 0 ] && [ $BUILD_EXIT -eq 0 ] && [ $TEST_EXIT -eq 0 ]; then
+    echo "✅ CI pipeline completed successfully!"
+else
+    echo "❌ CI pipeline failed with issues:"
+    [ $FORMAT_EXIT -ne 0 ] && echo "  - Format check failed"
+    [ $LINT_EXIT -ne 0 ] && echo "  - Lint check failed"  
+    [ $BUILD_EXIT -ne 0 ] && echo "  - Build failed"
+    [ $TEST_EXIT -ne 0 ] && echo "  - Unit tests failed"
+    exit 1
+fi
+
 echo ""
 echo "ℹ️  Note: Integration tests require Tilt environment"
 echo "   Run 'cargo make test-integration' when Tilt is running"
@@ -130,25 +152,52 @@ description = "Run complete CI with integration tests (requires Tilt)"
 script = '''
 echo "🚀 Running complete CI pipeline with integration tests..."
 echo ""
+
+# Track exit codes
+FORMAT_EXIT=0
+LINT_EXIT=0  
+BUILD_EXIT=0
+TEST_EXIT=0
+INTEGRATION_EXIT=0
+COVERAGE_EXIT=0
+
 echo "📝 Step 1: Format check..."
-cargo make format-check
+cargo make format-check || FORMAT_EXIT=$?
 echo ""
+
 echo "🔍 Step 2: Lint check..."
-cargo make lint
+cargo make lint || LINT_EXIT=$?
 echo ""
+
 echo "🏗️  Step 3: Build..."
-cargo make build
+cargo make build || BUILD_EXIT=$?
 echo ""
+
 echo "🧪 Step 4: Unit tests..."
-cargo make test
+cargo make test || TEST_EXIT=$?
 echo ""
+
 echo "🌐 Step 5: Integration tests (requires Tilt)..."
-cargo make test-integration
+cargo make test-integration || INTEGRATION_EXIT=$?
 echo ""
+
 echo "📊 Step 6: Coverage report..."
-cargo make coverage-report
+cargo make coverage-report || COVERAGE_EXIT=$?
 echo ""
-echo "✅ Full CI pipeline completed successfully!"
+
+# Report results
+if [ $FORMAT_EXIT -eq 0 ] && [ $LINT_EXIT -eq 0 ] && [ $BUILD_EXIT -eq 0 ] && [ $TEST_EXIT -eq 0 ] && [ $INTEGRATION_EXIT -eq 0 ] && [ $COVERAGE_EXIT -eq 0 ]; then
+    echo "✅ Full CI pipeline completed successfully!"
+else
+    echo "❌ CI pipeline failed with issues:"
+    [ $FORMAT_EXIT -ne 0 ] && echo "  - Format check failed"
+    [ $LINT_EXIT -ne 0 ] && echo "  - Lint check failed"  
+    [ $BUILD_EXIT -ne 0 ] && echo "  - Build failed"
+    [ $TEST_EXIT -ne 0 ] && echo "  - Unit tests failed"
+    [ $INTEGRATION_EXIT -ne 0 ] && echo "  - Integration tests failed"
+    [ $COVERAGE_EXIT -ne 0 ] && echo "  - Coverage generation failed"
+    exit 1
+fi
 '''
 
 # === Service Tasks ===

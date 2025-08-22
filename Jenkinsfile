@@ -48,7 +48,9 @@ pipeline {
         sh "cargo install cargo-make || echo 'cargo-make already installed'"
         sh "cargo check --message-format json > target/debug/check.json"
         sh "cargo clippy --all-targets --all-features --message-format json > target/debug/clippy.json || true"
-        sh "cargo make ci"  // Uses cargo-make for consistent CI pipeline
+        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+          sh "cargo make ci"  // Uses cargo-make for consistent CI pipeline
+        }
       }
     }
 
@@ -70,8 +72,12 @@ pipeline {
           sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8082/health || (echo 'Rust Query health check failed' && exit 1)"
           
           echo "All services are healthy, running E2E tests..."
-          sh "cargo make test-integration"  // Uses cargo-make for consistent integration tests
-          sh "cargo make coverage-report"   // Uses cargo-make for coverage generation
+          catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+            sh "cargo make test-integration"  // Uses cargo-make for consistent integration tests
+          }
+          catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+            sh "cargo make coverage-report"   // Uses cargo-make for coverage generation
+          }
         }
       }
     }
