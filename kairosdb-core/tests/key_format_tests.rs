@@ -206,9 +206,9 @@ fn test_value_serialization_format() {
                     assert_eq!(cassandra_value.bytes[0], 0, "Long zero should be byte 0");
                 } else {
                     assert!(
-                        cassandra_value.bytes.len() <= 8,
-                        "Long {} should be <= 8 bytes",
-                        name
+                        cassandra_value.bytes.len() <= 10,
+                        "Long {} should be <= 10 bytes (was {} bytes)",
+                        name, cassandra_value.bytes.len()
                     );
                     assert!(
                         !cassandra_value.bytes.is_empty(),

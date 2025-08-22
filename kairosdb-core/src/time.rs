@@ -7,7 +7,7 @@ use std::fmt;
 use crate::error::{KairosError, KairosResult};
 
 /// Timestamp representing a point in time
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp(DateTime<Utc>);
 
 impl std::hash::Hash for Timestamp {
@@ -238,6 +238,27 @@ impl From<DateTime<Utc>> for Timestamp {
 impl From<Timestamp> for DateTime<Utc> {
     fn from(ts: Timestamp) -> Self {
         ts.0
+    }
+}
+
+impl Serialize for Timestamp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Serialize as milliseconds for KairosDB API compatibility
+        serializer.serialize_i64(self.timestamp_millis())
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize from milliseconds
+        let millis = i64::deserialize(deserializer)?;
+        Self::from_millis(millis).map_err(serde::de::Error::custom)
     }
 }
 

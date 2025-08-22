@@ -8,13 +8,6 @@
 //! This allows us to validate the datastore abstraction with production data
 //! before migrating to a new schema.
 
-use async_trait::async_trait;
-use ordered_float::OrderedFloat;
-use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
-use scylla::value::CqlTimestamp;
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use crate::datapoint::{DataPoint, DataPointValue};
 use crate::datastore::{
     TagFilter, TagSet as DataStoreTagSet, TagValue as DataStoreTagValue, TimeSeriesStore,
@@ -24,6 +17,12 @@ use crate::error::{KairosError, KairosResult};
 use crate::metrics::MetricName;
 use crate::tags::TagSet;
 use crate::time::{TimeRange, Timestamp};
+use async_trait::async_trait;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::value::CqlTimestamp;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// Simple data structure to represent a data points row key
 /// This matches the legacy KairosDB row key format
@@ -131,7 +130,6 @@ pub fn parse_tags(tags_str: &str) -> BTreeMap<String, String> {
     tags
 }
 
-
 /// Cassandra implementation using legacy KairosDB schema
 #[allow(dead_code)]
 pub struct CassandraLegacyStore {
@@ -145,30 +143,28 @@ impl CassandraLegacyStore {
         // Get Cassandra contact points from environment
         let contact_points = std::env::var("KAIROSDB_CASSANDRA_CONTACT_POINTS")
             .unwrap_or_else(|_| "cassandra:9042".to_string());
-        
+
         // Build the session
         let mut builder = SessionBuilder::new();
         for contact_point in contact_points.split(',') {
             builder = builder.known_node(contact_point);
         }
         builder = builder.use_keyspace(&keyspace, false);
-        
+
         // Add authentication if provided
         if let (Ok(username), Ok(password)) = (
             std::env::var("KAIROSDB_CASSANDRA_USERNAME"),
-            std::env::var("KAIROSDB_CASSANDRA_PASSWORD")
+            std::env::var("KAIROSDB_CASSANDRA_PASSWORD"),
         ) {
             builder = builder.user(&username, &password);
         }
-        
-        let session = builder.build().await
-            .map_err(|e| KairosError::Connection(format!("Failed to connect to Cassandra: {}", e)))?;
+
+        let session = builder.build().await.map_err(|e| {
+            KairosError::Connection(format!("Failed to connect to Cassandra: {}", e))
+        })?;
         let session = Arc::new(session);
-        
-        Ok(Self { 
-            session, 
-            keyspace,
-        })
+
+        Ok(Self { session, keyspace })
     }
 
     /// Calculate the row time for a timestamp (3-week boundaries)
@@ -192,52 +188,30 @@ impl CassandraLegacyStore {
         }
     }
 
-    /// Encode column name for data_points table (timestamp + offset)
+    /// Encode column name for data_points table (matches ingest service format)
     fn encode_column_name(timestamp: Timestamp) -> Vec<u8> {
-        // Column format: 8 bytes timestamp + 2 bytes offset (always 0 for single value)
-        let mut column = Vec::with_capacity(10);
-        column.extend_from_slice(&timestamp.timestamp_millis().to_be_bytes());
-        column.extend_from_slice(&0u16.to_be_bytes()); // offset = 0
-        column
+        // Use the same encoding as ColumnName::to_bytes() in the ingest service
+        // Java KairosDB format: 4-byte integer with offset left-shifted by 1
+        let offset = timestamp.row_offset();
+        let column_name = (offset as u32) << 1;
+        (column_name as i32).to_be_bytes().to_vec()
     }
-    
+
     /// Decode value bytes to DataPointValue based on data type
     fn decode_value(value_bytes: &[u8], data_type: &str) -> KairosResult<DataPointValue> {
-        match data_type {
-            "kairos_long" => {
-                if value_bytes.len() >= 8 {
-                    let bytes: [u8; 8] = value_bytes[0..8].try_into()
-                        .map_err(|_| KairosError::Cassandra("Invalid long value".to_string()))?;
-                    let value = i64::from_be_bytes(bytes);
-                    Ok(DataPointValue::Long(value))
-                } else {
-                    Err(KairosError::Cassandra("Invalid long value size".to_string()))
-                }
-            }
-            "kairos_double" => {
-                if value_bytes.len() >= 8 {
-                    let bytes: [u8; 8] = value_bytes[0..8].try_into()
-                        .map_err(|_| KairosError::Cassandra("Invalid double value".to_string()))?;
-                    let value = f64::from_be_bytes(bytes);
-                    Ok(DataPointValue::Double(OrderedFloat(value)))
-                } else {
-                    Err(KairosError::Cassandra("Invalid double value size".to_string()))
-                }
-            }
-            _ => {
-                // For other types, return a default value for now
-                Ok(DataPointValue::Long(0))
-            }
-        }
+        // Use the proper CassandraValue implementation for consistency
+        let cassandra_value = crate::cassandra::CassandraValue {
+            bytes: value_bytes.to_vec(),
+            ttl: None,
+        };
+        cassandra_value.to_data_point_value(data_type)
     }
-    
+
     /// Encode DataPointValue to bytes for storage
     fn encode_value(value: &DataPointValue) -> Vec<u8> {
-        match value {
-            DataPointValue::Long(v) => v.to_be_bytes().to_vec(),
-            DataPointValue::Double(v) => v.0.to_be_bytes().to_vec(),
-            _ => vec![0], // Placeholder for other types
-        }
+        // Use the proper CassandraValue implementation for consistency
+        let cassandra_value = crate::cassandra::CassandraValue::from_data_point_value(value, None);
+        cassandra_value.bytes
     }
 
     /// Query the row_keys table to find all series for a metric in the time range
@@ -250,7 +224,7 @@ impl CassandraLegacyStore {
         // The row_keys table schema:
         // CREATE TABLE row_keys (
         //   metric text,
-        //   table_name text, 
+        //   table_name text,
         //   row_time timestamp,
         //   data_type text,
         //   tags frozen<map<text, text>>,
@@ -258,41 +232,46 @@ impl CassandraLegacyStore {
         //   value text,
         //   PRIMARY KEY ((metric, table_name, row_time), data_type, tags)
         // )
-        
+
         // Since row_time is part of the partition key, we need to query each row_time separately
         // For now, let's get all row_times and filter in memory
         let query = "SELECT row_time, data_type, tags FROM row_keys WHERE metric = ? AND table_name = ? ALLOW FILTERING";
-        
-        let query_result = self.session
-            .query_unpaged(query, (
-                metric.as_str(),
-                "data_points", // table_name is always "data_points" for time series data
-            ))
+
+        let query_result = self
+            .session
+            .query_unpaged(
+                query,
+                (
+                    metric.as_str(),
+                    "data_points", // table_name is always "data_points" for time series data
+                ),
+            )
             .await
             .map_err(|e| KairosError::Cassandra(format!("Failed to query row_keys: {}", e)))?;
-        
+
         let rows_result = query_result
             .into_rows_result()
             .map_err(|e| KairosError::Cassandra(format!("Failed to parse rows result: {:?}", e)))?;
-        
+
         let mut row_keys = Vec::new();
-        
-        let mut rows_iter = rows_result
+
+        let rows_iter = rows_result
             .rows::<(CqlTimestamp, String, HashMap<String, String>)>()
             .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize rows: {:?}", e)))?;
-            
-        while let Some(row_result) = rows_iter.next() {
-            let (row_time_ts, data_type, tags_map) = row_result
-                .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize row: {:?}", e)))?;
-            
+
+        for row_result in rows_iter {
+            let (row_time_ts, data_type, tags_map) = row_result.map_err(|e| {
+                KairosError::Cassandra(format!("Failed to deserialize row: {:?}", e))
+            })?;
+
             // Note: We don't filter by time range here because row_time represents
             // the 3-week boundary start time, not the actual data point timestamps.
             // Time filtering happens later when querying actual data points.
             let row_time = row_time_ts.0;
-            
+
             // Convert HashMap to BTreeMap for consistent ordering
             let tags: BTreeMap<String, String> = tags_map.into_iter().collect();
-            
+
             row_keys.push(DataPointsRowKey {
                 metric_name: metric.as_str().to_string(),
                 cluster_name: "default".to_string(),
@@ -301,11 +280,7 @@ impl CassandraLegacyStore {
                 tags,
             });
         }
-        
-        println!("DEBUG: Found {} row keys for metric {}", row_keys.len(), metric.as_str());
-        for rk in &row_keys {
-            println!("DEBUG: Row key tags: {:?}", rk.tags);
-        }
+
         Ok(row_keys)
     }
 }
@@ -357,7 +332,7 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     data_type: data_type.clone(),
                     tags: tags.clone(),
                 };
-                
+
                 let key_bytes = row_key.to_bytes();
 
                 // Write data points
@@ -366,38 +341,52 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     let value = Self::encode_value(&point.value);
 
                     // Insert into data_points table
-                    let insert_query = "INSERT INTO data_points (key, column1, value) VALUES (?, ?, ?)";
+                    let insert_query =
+                        "INSERT INTO data_points (key, column1, value) VALUES (?, ?, ?)";
                     self.session
                         .query_unpaged(insert_query, (key_bytes.clone(), column, value))
                         .await
-                        .map_err(|e| KairosError::Cassandra(format!("Failed to insert data point: {}", e)))?;
-                    
+                        .map_err(|e| {
+                            KairosError::Cassandra(format!("Failed to insert data point: {}", e))
+                        })?;
+
                     total_written += 1;
                 }
 
                 // Update row_keys table
                 let index_query = "INSERT INTO row_keys (metric, table_name, row_time, data_type, tags) VALUES (?, ?, ?, ?, ?)";
                 self.session
-                    .query_unpaged(index_query, (
-                        metric.as_str(),
-                        "data_points",
-                        CqlTimestamp(row_time.timestamp_millis()),
-                        data_type.clone(),
-                        tags.clone(), // Pass as HashMap/Map
-                    ))
+                    .query_unpaged(
+                        index_query,
+                        (
+                            metric.as_str(),
+                            "data_points",
+                            CqlTimestamp(row_time.timestamp_millis()),
+                            data_type.clone(),
+                            tags.clone(), // Pass as HashMap/Map
+                        ),
+                    )
                     .await
-                    .map_err(|e| KairosError::Cassandra(format!("Failed to update row_keys: {}", e)))?;
-                
+                    .map_err(|e| {
+                        KairosError::Cassandra(format!("Failed to update row_keys: {}", e))
+                    })?;
+
                 // Update string_index for metric name
-                let metric_index_query = "INSERT INTO string_index (key, column1, value) VALUES (?, ?, ?)";
+                let metric_index_query =
+                    "INSERT INTO string_index (key, column1, value) VALUES (?, ?, ?)";
                 self.session
-                    .query_unpaged(metric_index_query, (
-                        "metric_names",
-                        metric.as_str(),
-                        vec![0u8], // Empty value
-                    ))
+                    .query_unpaged(
+                        metric_index_query,
+                        (
+                            "metric_names",
+                            metric.as_str(),
+                            vec![0u8], // Empty value
+                        ),
+                    )
                     .await
-                    .map_err(|e| KairosError::Cassandra(format!("Failed to update string_index: {}", e)))?;
+                    .map_err(|e| {
+                        KairosError::Cassandra(format!("Failed to update string_index: {}", e))
+                    })?;
             }
         }
 
@@ -419,20 +408,17 @@ impl TimeSeriesStore for CassandraLegacyStore {
             .filter(|key| tags.matches(&key.tags))
             .collect();
 
-        println!("DEBUG: Found {} row keys after filtering", filtered_keys.len());
         if filtered_keys.is_empty() {
             return Ok(Vec::new());
         }
 
         // Phase 3: Query data points for each matching row key
         let mut all_points = Vec::new();
-        
-        println!("DEBUG: Starting data_points queries for {} row keys", filtered_keys.len());
 
         for row_key in filtered_keys {
             // Build the row key bytes for the data_points table
             let key_bytes = row_key.to_bytes();
-            
+
             // Query the data_points table
             // The data_points table schema (COMPACT STORAGE):
             // CREATE TABLE data_points (
@@ -441,42 +427,94 @@ impl TimeSeriesStore for CassandraLegacyStore {
             //   value blob,
             //   PRIMARY KEY (key, column1)
             // )
-            
+
             // Build column range for the time range
             let start_column = Self::encode_column_name(time_range.start);
             let end_column = Self::encode_column_name(time_range.end);
-            
+
             let query = "SELECT column1, value FROM data_points WHERE key = ? AND column1 >= ? AND column1 <= ?";
-            
-            println!("DEBUG: Querying data_points with key: {}", hex::encode(&key_bytes));
-            
-            let query_result = self.session
-                .query_unpaged(query, (key_bytes.clone(), start_column, end_column))
+
+            println!("DEBUG: Scylla query: {}", query);
+            println!("DEBUG: Parameters:");
+            println!(
+                "  key_bytes (len={}): {}",
+                key_bytes.len(),
+                hex::encode(&key_bytes)
+            );
+            println!(
+                "  start_column (len={}): {}",
+                start_column.len(),
+                hex::encode(&start_column)
+            );
+            println!(
+                "  end_column (len={}): {}",
+                end_column.len(),
+                hex::encode(&end_column)
+            );
+
+            let query_result = self
+                .session
+                .query_unpaged(
+                    query,
+                    (key_bytes.clone(), start_column.clone(), end_column.clone()),
+                )
                 .await
-                .map_err(|e| KairosError::Cassandra(format!("Failed to query data_points: {}", e)))?;
-            
-            let rows_result = query_result
-                .into_rows_result()
-                .map_err(|e| KairosError::Cassandra(format!("Failed to parse data_points rows result: {:?}", e)))?;
-            
-            let mut rows_iter = rows_result
-                .rows::<(Vec<u8>, Vec<u8>)>()
-                .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize data_points rows: {:?}", e)))?;
-            
-            while let Some(row_result) = rows_iter.next() {
-                let (column_bytes, value_bytes) = row_result
-                    .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize data_points row: {:?}", e)))?;
-                
-                // Decode timestamp from column name (first 8 bytes)
-                if column_bytes.len() >= 8 {
-                    let timestamp_bytes: [u8; 8] = column_bytes[0..8].try_into()
-                        .map_err(|_| KairosError::Cassandra("Invalid column format".to_string()))?;
-                    let timestamp_millis = i64::from_be_bytes(timestamp_bytes);
+                .map_err(|e| {
+                    KairosError::Cassandra(format!("Failed to query data_points: {}", e))
+                })?;
+
+            let rows_result = query_result.into_rows_result().map_err(|e| {
+                KairosError::Cassandra(format!("Failed to parse data_points rows result: {:?}", e))
+            })?;
+
+            let rows_iter = rows_result.rows::<(Vec<u8>, Vec<u8>)>().map_err(|e| {
+                KairosError::Cassandra(format!("Failed to deserialize data_points rows: {:?}", e))
+            })?;
+
+            let mut row_count = 0;
+            println!("DEBUG: Processing rows from scylla query result...");
+            for row_result in rows_iter {
+                row_count += 1;
+                let (column_bytes, value_bytes) = row_result.map_err(|e| {
+                    KairosError::Cassandra(format!(
+                        "Failed to deserialize data_points row: {:?}",
+                        e
+                    ))
+                })?;
+
+                println!(
+                    "DEBUG: Processing row {}: column_bytes.len()={}, value_bytes.len()={}",
+                    row_count,
+                    column_bytes.len(),
+                    value_bytes.len()
+                );
+
+                // Decode timestamp from 4-byte column name (Java KairosDB format)
+                if column_bytes.len() >= 4 {
+                    println!(
+                        "DEBUG: Decoding timestamp from column_bytes: {}",
+                        hex::encode(&column_bytes)
+                    );
+
+                    // Use existing ColumnName::from_bytes method for consistency
+                    let column_name = crate::cassandra::ColumnName::from_bytes(&column_bytes)?;
+                    let offset = column_name.offset;
+
+                    println!(
+                        "DEBUG: row_key.timestamp={}, offset={}",
+                        row_key.timestamp, offset
+                    );
+                    // Reconstruct full timestamp = row_time + offset
+                    let timestamp_millis = row_key.timestamp + offset;
+                    println!(
+                        "DEBUG: reconstructed timestamp_millis = {} + {} = {}",
+                        row_key.timestamp, offset, timestamp_millis
+                    );
                     let timestamp = Timestamp::from_millis(timestamp_millis)?;
-                    
+
                     // Decode value based on data type
                     let value = Self::decode_value(&value_bytes, &row_key.data_type)?;
-                    
+
                     let point = DataPoint {
                         metric: metric.clone(),
                         timestamp,
@@ -485,9 +523,22 @@ impl TimeSeriesStore for CassandraLegacyStore {
                         ttl: 0,
                     };
                     all_points.push(point);
+                    println!(
+                        "DEBUG: Successfully decoded data point with timestamp {}",
+                        timestamp_millis
+                    );
+                } else {
+                    println!(
+                        "DEBUG: Skipping row due to insufficient column_bytes length: {} < 4",
+                        column_bytes.len()
+                    );
                 }
             }
-            println!("DEBUG: Found {} data points for this row key", all_points.len());
+            println!(
+                "DEBUG: Scylla query returned {} rows, converted to {} data points",
+                row_count,
+                all_points.len()
+            );
         }
 
         // Sort by timestamp
@@ -569,19 +620,17 @@ mod tests {
         let timestamp = Timestamp::from_millis(1234567890000).unwrap();
         let encoded = CassandraLegacyStore::encode_column_name(timestamp);
 
-        // Should be 10 bytes: 8 for timestamp + 2 for offset
-        assert_eq!(encoded.len(), 10);
+        // Should be 4 bytes: Java KairosDB format
+        assert_eq!(encoded.len(), 4);
 
-        // First 8 bytes should be timestamp
-        let timestamp_bytes = &encoded[0..8];
-        let decoded_timestamp = i64::from_be_bytes(timestamp_bytes.try_into().unwrap());
-        assert_eq!(decoded_timestamp, 1234567890000);
-
-        // Last 2 bytes should be zero (offset)
-        assert_eq!(&encoded[8..10], &[0u8, 0u8]);
+        // Test that we can decode it back using ColumnName::from_bytes
+        let column_name = crate::cassandra::ColumnName::from_bytes(&encoded).unwrap();
+        let expected_offset = timestamp.row_offset();
+        assert_eq!(column_name.offset, expected_offset);
     }
 
     #[tokio::test]
+    #[ignore] // Requires Cassandra instance
     async fn test_basic_operations() {
         let store = CassandraLegacyStore::new("kairosdb".to_string())
             .await

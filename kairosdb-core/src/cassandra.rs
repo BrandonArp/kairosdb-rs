@@ -180,7 +180,7 @@ impl ColumnName {
     pub fn to_bytes(&self) -> Vec<u8> {
         // Java KairosDB format: 4-byte integer with offset left-shifted by 1
         let column_name = (self.offset as u32) << 1;
-        (column_name as i32).to_be_bytes().to_vec()
+        column_name.to_be_bytes().to_vec()
     }
 
     /// Parse column name from bytes (Java KairosDB compatible format)
@@ -192,9 +192,10 @@ impl ColumnName {
         }
 
         // Java KairosDB format: 4-byte integer with offset left-shifted by 1
-        let column_name = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        // Use unsigned to avoid sign extension issues
+        let column_name = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
-        // Extract offset by right-shifting by 1 (preserving sign)
+        // Extract offset by right-shifting by 1 (unsigned operation)
         let offset = (column_name >> 1) as i64;
 
         // For now, we don't support qualifiers in round-trip serialization

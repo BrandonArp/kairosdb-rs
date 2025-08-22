@@ -113,7 +113,7 @@ async fn execute_query_with_datastore(
 
         // Convert KairosDB time range to our TimeRange
         let now = Timestamp::now();
-        
+
         // Calculate start time (prefer absolute, then relative, then default to 1 hour ago)
         let start = if let Some(start_abs) = query_request.start_absolute {
             start_abs
@@ -122,7 +122,7 @@ async fn execute_query_with_datastore(
         } else {
             now.sub_millis(3600 * 1000)? // Default to 1 hour ago
         };
-        
+
         // Calculate end time (prefer absolute, then relative, then default to now)
         let end = if let Some(end_abs) = query_request.end_absolute {
             end_abs
@@ -131,7 +131,7 @@ async fn execute_query_with_datastore(
         } else {
             now
         };
-        
+
         let time_range = TimeRange::new(start, end)?;
 
         // Convert tags to TagFilter
