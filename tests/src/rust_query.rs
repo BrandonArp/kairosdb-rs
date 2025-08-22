@@ -341,9 +341,15 @@ async fn test_rust_query_histogram_data_flow() {
         .expect("Failed to send histogram data");
 
     assert!(ingest_response.status().is_success());
+    debug!(
+        "Successfully ingested histogram data for metric: {}",
+        metric_name
+    );
 
-    // Step 2: Wait for propagation
-    sleep(Duration::from_secs(5)).await;
+    // Step 2: Wait for propagation (longer in CI environments)
+    let wait_time = std::env::var("CI").map(|_| 10).unwrap_or(5);
+    debug!("Waiting {} seconds for data propagation", wait_time);
+    sleep(Duration::from_secs(wait_time)).await;
 
     // Step 3: Query histogram data from Rust query service
     let query_payload = json!({
@@ -359,6 +365,10 @@ async fn test_rust_query_histogram_data_flow() {
         }]
     });
 
+    debug!(
+        "Sending histogram query: {}",
+        serde_json::to_string_pretty(&query_payload).unwrap()
+    );
     let query_response = config
         .client
         .post(format!("{}/api/v1/datapoints/query", RUST_QUERY_BASE_URL))
@@ -367,11 +377,17 @@ async fn test_rust_query_histogram_data_flow() {
         .await
         .expect("Failed to query histogram data");
 
-    assert!(
-        query_response.status().is_success(),
-        "Failed to query histogram from Rust service: {}",
-        query_response.status()
-    );
+    let status = query_response.status();
+    if !status.is_success() {
+        let error_text = query_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Failed to read error response".to_string());
+        panic!(
+            "Failed to query histogram from Rust service: {} - Error: {}",
+            status, error_text
+        );
+    }
 
     let query_result: Value = query_response
         .json()
