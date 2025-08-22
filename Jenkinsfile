@@ -45,10 +45,10 @@ pipeline {
     stage('Unit Tests') {
       steps {
         sh "mkdir -p target/debug/"
+        sh "cargo install cargo-make || echo 'cargo-make already installed'"
         sh "cargo check --message-format json > target/debug/check.json"
-        sh "cargo llvm-cov nextest --profile ci --workspace --lib"
         sh "cargo clippy --all-targets --all-features --message-format json > target/debug/clippy.json || true"
-        sh "cargo fmt --check"
+        sh "cargo make ci"  // Uses cargo-make for consistent CI pipeline
       }
     }
 
@@ -70,8 +70,8 @@ pipeline {
           sh "curl --retry 10 --retry-delay 5 --retry-connrefused --fail http://localhost:8082/health || (echo 'Rust Query health check failed' && exit 1)"
           
           echo "All services are healthy, running E2E tests..."
-          sh "KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only"
-          sh "cargo llvm-cov report --cobertura --output-path target/llvm-cov-target/cobertura.xml"
+          sh "cargo make test-integration"  // Uses cargo-make for consistent integration tests
+          sh "cargo make coverage-report"   // Uses cargo-make for coverage generation
         }
       }
     }

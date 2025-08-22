@@ -1,0 +1,259 @@
+# KairosDB-rs Task Runner Configuration
+# Install cargo-make with: cargo install cargo-make
+# Run tasks with: cargo make <task-name>
+
+[config]
+default_to_workspace = false
+min_version = "0.35.0"
+
+[env]
+# Default environment variables
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+
+[tasks.default]
+alias = "ci"
+
+# === Development Tasks ===
+
+[tasks.dev-setup]
+description = "Set up development environment"
+script = '''
+echo "🔧 Setting up development environment..."
+echo "Installing cargo-make (if not already installed)..."
+cargo install cargo-make --force
+echo "Installing nextest (if not already installed)..."
+cargo install cargo-nextest --force
+echo "Installing llvm-cov (if not already installed)..."
+cargo install cargo-llvm-cov --force
+echo "✅ Development environment ready!"
+'''
+
+[tasks.format]
+description = "Format all code"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.format-check]
+description = "Check code formatting"
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[tasks.lint]
+description = "Run clippy lints"
+command = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+[tasks.build]
+description = "Build all workspace members"
+command = "cargo"
+args = ["build", "--all"]
+
+[tasks.build-release]
+description = "Build all workspace members in release mode"
+command = "cargo"
+args = ["build", "--release", "--all"]
+
+# === Testing Tasks ===
+
+[tasks.test]
+description = "Run unit tests only"
+command = "cargo"
+args = ["nextest", "run", "--profile", "ci", "--workspace", "--lib"]
+
+[tasks.test-integration]
+description = "Run integration tests (requires Tilt environment)"
+env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
+command = "cargo"
+args = ["nextest", "run", "--profile", "ci", "--workspace", "--run-ignored", "ignored-only"]
+
+[tasks.test-all]
+description = "Run all tests with coverage"
+script = '''
+echo "🧪 Running unit tests..."
+cargo nextest run --profile ci --workspace --lib
+echo "🔍 Running integration tests (requires Tilt)..."
+KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
+'''
+
+[tasks.coverage-report]
+description = "Generate test coverage report"
+script = '''
+echo "📊 Generating coverage report..."
+cargo llvm-cov nextest --profile ci --workspace --lib --cobertura --output-path target/llvm-cov-target/cobertura.xml
+echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
+'''
+
+[tasks.coverage-integration]
+description = "Generate coverage report for integration tests"
+env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
+script = '''
+echo "📊 Generating integration test coverage..."
+cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml
+echo "Integration coverage report generated at: target/llvm-cov-target/integration-cobertura.xml"
+'''
+
+# === Quality Assurance Tasks ===
+
+[tasks.check]
+description = "Run all code quality checks (format, lint, build)"
+dependencies = ["format-check", "lint", "build"]
+
+[tasks.pre-commit]
+description = "Run all pre-commit checks"
+dependencies = ["format", "lint", "test"]
+
+[tasks.ci]
+description = "Run complete CI pipeline locally (equivalent to Jenkins)"
+script = '''
+echo "🚀 Running complete CI pipeline..."
+echo ""
+echo "📝 Step 1: Format check..."
+cargo make format-check
+echo ""
+echo "🔍 Step 2: Lint check..."
+cargo make lint
+echo ""
+echo "🏗️  Step 3: Build..."
+cargo make build
+echo ""
+echo "🧪 Step 4: Unit tests..."
+cargo make test
+echo ""
+echo "✅ CI pipeline completed successfully!"
+echo ""
+echo "ℹ️  Note: Integration tests require Tilt environment"
+echo "   Run 'cargo make test-integration' when Tilt is running"
+'''
+
+[tasks.ci-full]
+description = "Run complete CI with integration tests (requires Tilt)"
+script = '''
+echo "🚀 Running complete CI pipeline with integration tests..."
+echo ""
+echo "📝 Step 1: Format check..."
+cargo make format-check
+echo ""
+echo "🔍 Step 2: Lint check..."
+cargo make lint
+echo ""
+echo "🏗️  Step 3: Build..."
+cargo make build
+echo ""
+echo "🧪 Step 4: Unit tests..."
+cargo make test
+echo ""
+echo "🌐 Step 5: Integration tests (requires Tilt)..."
+cargo make test-integration
+echo ""
+echo "📊 Step 6: Coverage report..."
+cargo make coverage-report
+echo ""
+echo "✅ Full CI pipeline completed successfully!"
+'''
+
+# === Service Tasks ===
+
+[tasks.run-ingest]
+description = "Run the ingest service"
+cwd = "kairosdb-ingest"
+command = "cargo"
+args = ["run", "--bin", "kairosdb-ingest"]
+
+[tasks.run-query]
+description = "Run the query service"
+cwd = "kairosdb-query"
+command = "cargo"
+args = ["run", "--bin", "kairosdb-query"]
+
+[tasks.run-datastore-demo]
+description = "Run the datastore demo"
+cwd = "kairosdb-core"
+command = "cargo"
+args = ["run", "--example", "datastore_demo"]
+
+# === Benchmarking Tasks ===
+
+[tasks.bench]
+description = "Run performance benchmarks"
+command = "cargo"
+args = ["bench", "--workspace"]
+
+[tasks.bench-ingestion]
+description = "Run ingestion benchmarks"
+command = "cargo"
+args = ["bench", "--bench", "ingestion"]
+
+# === Clean Tasks ===
+
+[tasks.clean]
+description = "Clean build artifacts"
+command = "cargo"
+args = ["clean"]
+
+[tasks.clean-all]
+description = "Clean everything including cargo cache"
+script = '''
+cargo clean
+rm -rf target/
+echo "🧹 Cleaned all build artifacts"
+'''
+
+# === Docker Tasks ===
+
+[tasks.docker-build]
+description = "Build Docker images"
+script = '''
+echo "🐳 Building Docker images..."
+docker build -t kairosdb-ingest -f docker/Dockerfile.ingest .
+docker build -t kairosdb-query -f docker/Dockerfile.query .
+echo "✅ Docker images built successfully"
+'''
+
+# === Help Task ===
+
+[tasks.help]
+description = "Show available tasks"
+script = '''
+echo "📋 Available KairosDB-rs tasks:"
+echo ""
+echo "🔧 Development:"
+echo "  dev-setup        - Set up development environment"
+echo "  format          - Format all code"
+echo "  format-check    - Check code formatting"
+echo "  lint            - Run clippy lints"
+echo "  build           - Build all workspace members"
+echo "  build-release   - Build in release mode"
+echo ""
+echo "🧪 Testing:"
+echo "  test            - Run unit tests only"
+echo "  test-integration - Run integration tests (requires Tilt)"
+echo "  test-all        - Run all tests"
+echo "  coverage-report - Generate test coverage report"
+echo ""
+echo "✅ Quality Assurance:"
+echo "  check           - Run format, lint, and build checks"
+echo "  pre-commit      - Run pre-commit checks"
+echo "  ci              - Run complete CI pipeline (like Jenkins)"
+echo "  ci-full         - Run CI with integration tests (requires Tilt)"
+echo ""
+echo "🚀 Services:"
+echo "  run-ingest      - Run the ingest service"
+echo "  run-query       - Run the query service"
+echo "  run-datastore-demo - Run the datastore demo"
+echo ""
+echo "📊 Benchmarking:"
+echo "  bench           - Run all benchmarks"
+echo "  bench-ingestion - Run ingestion benchmarks"
+echo ""
+echo "🧹 Maintenance:"
+echo "  clean           - Clean build artifacts"
+echo "  clean-all       - Clean everything"
+echo ""
+echo "🐳 Docker:"
+echo "  docker-build    - Build Docker images"
+echo ""
+echo "💡 Most useful commands:"
+echo "  cargo make ci          - Check if your build will pass CI"
+echo "  cargo make pre-commit  - Run before committing"
+echo "  cargo make ci-full     - Full CI with integration tests"
+'''

@@ -4,51 +4,70 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Essential Commands
 
-### Building
-```bash
-# Build all workspace members
-cargo build
+KairosDB-rs uses [cargo-make](https://github.com/sagiegurari/cargo-make) for task automation, providing npm-like script functionality for Rust projects.
 
-# Build specific service (ingest or query)
+### Quick Setup
+```bash
+# Install cargo-make (one-time setup)
+cargo install cargo-make
+
+# Or use our setup task
+cargo make dev-setup
+```
+
+### Primary Commands (CI Equivalent)
+```bash
+# 🚀 Check if your build will pass CI (most important command)
+cargo make ci
+
+# 🔄 Run before committing changes
+cargo make pre-commit
+
+# 🌐 Full CI pipeline with integration tests (requires Tilt)
+cargo make ci-full
+
+# 📋 See all available commands
+cargo make help
+```
+
+**Note**: The Jenkins CI pipeline uses the same `cargo make` commands, ensuring complete consistency between local development and CI environments.
+
+### Individual Tasks
+```bash
+# Building
+cargo make build              # Build all workspace members
+cargo make build-release      # Release build with optimizations
+
+# Testing
+cargo make test              # Unit tests only
+cargo make test-integration  # Integration tests (requires Tilt)
+cargo make test-all          # All tests
+cargo make coverage-report   # Generate coverage report
+
+# Code Quality
+cargo make format            # Format code
+cargo make format-check      # Check formatting
+cargo make lint              # Run clippy lints
+cargo make check             # Run format, lint, and build checks
+
+# Services
+cargo make run-ingest        # Run ingest service
+cargo make run-query         # Run query service
+cargo make run-datastore-demo # Run datastore demo
+
+# Benchmarks
+cargo make bench             # Run all benchmarks
+cargo make bench-ingestion   # Run ingestion benchmarks
+```
+
+### Legacy Commands (still supported)
+```bash
+# Direct cargo commands (bypass task runner)
 cargo build --bin kairosdb-ingest
 cargo build --bin kairosdb-query
-
-# Release build with optimizations
-cargo build --release
-```
-
-### Testing
-```bash
-# Run all tests
-cargo test
-
-# Run comprehensive test suite including integration tests
-./scripts/test-all.sh
-
-# Run unit tests only
 cargo test --lib --workspace
-
-# Run integration tests (requires Cassandra)
-cargo test --test integration_tests -- --ignored
-
-# Run tests for specific crate
-cargo test -p kairosdb-core
-cargo test -p kairosdb-ingest
-```
-
-### Code Quality
-```bash
-# Format code
-cargo fmt
-
-# Check formatting
-cargo fmt --check
-
-# Run linter
+cargo nextest run --profile ci --workspace --lib
 cargo clippy --all-targets --all-features -- -D warnings
-
-# Run benchmarks
-cargo bench --bench ingestion
 ```
 
 ### Development with Tilt
