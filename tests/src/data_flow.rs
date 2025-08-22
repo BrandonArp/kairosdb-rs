@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 #[allow(unused_imports)]
 use tokio::time::sleep;
+#[allow(unused_imports)]
 use tracing::info;
 
 #[tokio::test]

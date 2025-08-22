@@ -2,6 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::common::{E2ETestConfig, INGEST_BASE_URL, JAVA_KAIROSDB_BASE_URL, RUST_QUERY_BASE_URL};
+#[allow(unused_imports)]
 use tracing::info;
 
 #[tokio::test]
