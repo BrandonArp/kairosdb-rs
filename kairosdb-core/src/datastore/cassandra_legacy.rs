@@ -10,9 +10,9 @@
 
 use async_trait::async_trait;
 use ordered_float::OrderedFloat;
-use parking_lot::RwLock;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::value::CqlTimestamp;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use crate::datapoint::{DataPoint, DataPointValue};
@@ -96,11 +96,16 @@ fn btreemap_to_tagset(_tags: &BTreeMap<String, String>) -> TagSet {
 
 /// Format tags as a string (simplified version of KairosDB format)
 pub fn format_tags(tags: &BTreeMap<String, String>) -> String {
+    // Use Java KairosDB format: key1=value1:key2=value2: (with trailing colon)
     let mut parts: Vec<String> = Vec::new();
     for (key, value) in tags {
         parts.push(format!("{}={}", key, value));
     }
-    parts.join(",")
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}:", parts.join(":"))
+    }
 }
 
 /// Format TagSet as a string
@@ -110,14 +115,15 @@ pub fn format_tagset(tags: &TagSet) -> String {
     format_tags(&btree)
 }
 
-/// Parse tags from string format
+/// Parse tags from string format (Java KairosDB format with colons)
 pub fn parse_tags(tags_str: &str) -> BTreeMap<String, String> {
     let mut tags = BTreeMap::new();
     if tags_str.is_empty() {
         return tags;
     }
 
-    for part in tags_str.split(',') {
+    // Split on colons and filter out empty parts (handles trailing colon)
+    for part in tags_str.split(':').filter(|p| !p.is_empty()) {
         if let Some((key, value)) = part.split_once('=') {
             tags.insert(key.to_string(), value.to_string());
         }
@@ -131,8 +137,6 @@ pub fn parse_tags(tags_str: &str) -> BTreeMap<String, String> {
 pub struct CassandraLegacyStore {
     session: Arc<Session>,
     keyspace: String,
-    // Temporary in-memory storage for testing
-    memory_store: Arc<RwLock<HashMap<String, Vec<DataPoint>>>>,
 }
 
 impl CassandraLegacyStore {
@@ -164,27 +168,10 @@ impl CassandraLegacyStore {
         Ok(Self { 
             session, 
             keyspace,
-            memory_store: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     /// Calculate the row time for a timestamp (3-week boundaries)
-    /// Get stored points from memory (temporary solution)
-    fn get_stored_points(&self, metric: &MetricName) -> Option<Vec<DataPoint>> {
-        let store = self.memory_store.read();
-        store.get(metric.as_str()).cloned()
-    }
-    
-    /// Store points in memory (temporary solution)
-    fn store_points_in_memory(&self, points: &[&DataPoint]) {
-        let mut store = self.memory_store.write();
-        for point in points {
-            store.entry(point.metric.as_str().to_string())
-                .or_insert_with(Vec::new)
-                .push((*point).clone());
-        }
-    }
-    
     fn calculate_row_time(timestamp: Timestamp) -> Timestamp {
         // KairosDB uses 3-week row boundaries
         const THREE_WEEKS_MS: i64 = 3 * 7 * 24 * 60 * 60 * 1000;
@@ -253,21 +240,73 @@ impl CassandraLegacyStore {
         }
     }
 
-    /// Query the row_key_index table to find all series for a metric in the time range
+    /// Query the row_keys table to find all series for a metric in the time range
     async fn query_row_key_index(
         &self,
         metric: &MetricName,
-        time_range: TimeRange,
+        _time_range: TimeRange,
     ) -> KairosResult<Vec<DataPointsRowKey>> {
-        // For now, return a simple mock row key that matches what was written
-        // This allows the test to pass while we work on the full Cassandra integration
-        Ok(vec![DataPointsRowKey {
-            metric_name: metric.as_str().to_string(),
-            cluster_name: "default".to_string(),
-            timestamp: Self::calculate_row_time(time_range.start).timestamp_millis(),
-            data_type: "kairos_double".to_string(),
-            tags: BTreeMap::new(),
-        }])
+        // Query row_keys table to find all row keys for this metric
+        // The row_keys table schema:
+        // CREATE TABLE row_keys (
+        //   metric text,
+        //   table_name text, 
+        //   row_time timestamp,
+        //   data_type text,
+        //   tags frozen<map<text, text>>,
+        //   mtime timeuuid static,
+        //   value text,
+        //   PRIMARY KEY ((metric, table_name, row_time), data_type, tags)
+        // )
+        
+        // Since row_time is part of the partition key, we need to query each row_time separately
+        // For now, let's get all row_times and filter in memory
+        let query = "SELECT row_time, data_type, tags FROM row_keys WHERE metric = ? AND table_name = ? ALLOW FILTERING";
+        
+        let query_result = self.session
+            .query_unpaged(query, (
+                metric.as_str(),
+                "data_points", // table_name is always "data_points" for time series data
+            ))
+            .await
+            .map_err(|e| KairosError::Cassandra(format!("Failed to query row_keys: {}", e)))?;
+        
+        let rows_result = query_result
+            .into_rows_result()
+            .map_err(|e| KairosError::Cassandra(format!("Failed to parse rows result: {:?}", e)))?;
+        
+        let mut row_keys = Vec::new();
+        
+        let mut rows_iter = rows_result
+            .rows::<(CqlTimestamp, String, HashMap<String, String>)>()
+            .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize rows: {:?}", e)))?;
+            
+        while let Some(row_result) = rows_iter.next() {
+            let (row_time_ts, data_type, tags_map) = row_result
+                .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize row: {:?}", e)))?;
+            
+            // Note: We don't filter by time range here because row_time represents
+            // the 3-week boundary start time, not the actual data point timestamps.
+            // Time filtering happens later when querying actual data points.
+            let row_time = row_time_ts.0;
+            
+            // Convert HashMap to BTreeMap for consistent ordering
+            let tags: BTreeMap<String, String> = tags_map.into_iter().collect();
+            
+            row_keys.push(DataPointsRowKey {
+                metric_name: metric.as_str().to_string(),
+                cluster_name: "default".to_string(),
+                timestamp: row_time,
+                data_type,
+                tags,
+            });
+        }
+        
+        println!("DEBUG: Found {} row keys for metric {}", row_keys.len(), metric.as_str());
+        for rk in &row_keys {
+            println!("DEBUG: Row key tags: {:?}", rk.tags);
+        }
+        Ok(row_keys)
     }
 }
 
@@ -336,18 +375,18 @@ impl TimeSeriesStore for CassandraLegacyStore {
                     total_written += 1;
                 }
 
-                // Update row_key_index
-                let index_query = "INSERT INTO row_key_index (metric, row_time, data_type, tags, row_key) VALUES (?, ?, ?, ?, ?)";
+                // Update row_keys table
+                let index_query = "INSERT INTO row_keys (metric, table_name, row_time, data_type, tags) VALUES (?, ?, ?, ?, ?)";
                 self.session
                     .query_unpaged(index_query, (
                         metric.as_str(),
-                        row_time.timestamp_millis(),
+                        "data_points",
+                        CqlTimestamp(row_time.timestamp_millis()),
                         data_type.clone(),
-                        format_tags(&tags),
-                        key_bytes.clone(),
+                        tags.clone(), // Pass as HashMap/Map
                     ))
                     .await
-                    .map_err(|e| KairosError::Cassandra(format!("Failed to update row_key_index: {}", e)))?;
+                    .map_err(|e| KairosError::Cassandra(format!("Failed to update row_keys: {}", e)))?;
                 
                 // Update string_index for metric name
                 let metric_index_query = "INSERT INTO string_index (key, column1, value) VALUES (?, ?, ?)";
@@ -380,23 +419,75 @@ impl TimeSeriesStore for CassandraLegacyStore {
             .filter(|key| tags.matches(&key.tags))
             .collect();
 
+        println!("DEBUG: Found {} row keys after filtering", filtered_keys.len());
         if filtered_keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Phase 3: For now, use an in-memory storage to make tests pass
-        // This is a temporary solution while we work on the full Cassandra integration
+        // Phase 3: Query data points for each matching row key
         let mut all_points = Vec::new();
+        
+        println!("DEBUG: Starting data_points queries for {} row keys", filtered_keys.len());
 
-        // Check if we have data in our temporary in-memory store
-        if let Some(stored_points) = self.get_stored_points(metric) {
-            for point in stored_points {
-                if point.timestamp >= time_range.start && point.timestamp <= time_range.end {
-                    if tags.matches(&tagset_to_btreemap(&point.tags)) {
-                        all_points.push(point.clone());
-                    }
+        for row_key in filtered_keys {
+            // Build the row key bytes for the data_points table
+            let key_bytes = row_key.to_bytes();
+            
+            // Query the data_points table
+            // The data_points table schema (COMPACT STORAGE):
+            // CREATE TABLE data_points (
+            //   key blob,
+            //   column1 blob,
+            //   value blob,
+            //   PRIMARY KEY (key, column1)
+            // )
+            
+            // Build column range for the time range
+            let start_column = Self::encode_column_name(time_range.start);
+            let end_column = Self::encode_column_name(time_range.end);
+            
+            let query = "SELECT column1, value FROM data_points WHERE key = ? AND column1 >= ? AND column1 <= ?";
+            
+            println!("DEBUG: Querying data_points with key: {}", hex::encode(&key_bytes));
+            
+            let query_result = self.session
+                .query_unpaged(query, (key_bytes.clone(), start_column, end_column))
+                .await
+                .map_err(|e| KairosError::Cassandra(format!("Failed to query data_points: {}", e)))?;
+            
+            let rows_result = query_result
+                .into_rows_result()
+                .map_err(|e| KairosError::Cassandra(format!("Failed to parse data_points rows result: {:?}", e)))?;
+            
+            let mut rows_iter = rows_result
+                .rows::<(Vec<u8>, Vec<u8>)>()
+                .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize data_points rows: {:?}", e)))?;
+            
+            while let Some(row_result) = rows_iter.next() {
+                let (column_bytes, value_bytes) = row_result
+                    .map_err(|e| KairosError::Cassandra(format!("Failed to deserialize data_points row: {:?}", e)))?;
+                
+                // Decode timestamp from column name (first 8 bytes)
+                if column_bytes.len() >= 8 {
+                    let timestamp_bytes: [u8; 8] = column_bytes[0..8].try_into()
+                        .map_err(|_| KairosError::Cassandra("Invalid column format".to_string()))?;
+                    let timestamp_millis = i64::from_be_bytes(timestamp_bytes);
+                    let timestamp = Timestamp::from_millis(timestamp_millis)?;
+                    
+                    // Decode value based on data type
+                    let value = Self::decode_value(&value_bytes, &row_key.data_type)?;
+                    
+                    let point = DataPoint {
+                        metric: metric.clone(),
+                        timestamp,
+                        value,
+                        tags: btreemap_to_tagset(&row_key.tags),
+                        ttl: 0,
+                    };
+                    all_points.push(point);
                 }
             }
+            println!("DEBUG: Found {} data points for this row key", all_points.len());
         }
 
         // Sort by timestamp

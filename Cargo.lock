@@ -1441,6 +1441,7 @@ dependencies = [
  "config",
  "dashmap",
  "futures",
+ "hex",
  "ordered-float",
  "parking_lot",
  "prost 0.14.1",

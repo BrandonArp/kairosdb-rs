@@ -54,6 +54,9 @@ validator = { workspace = true }
 # Base64 encoding for binary data
 base64 = { workspace = true }
 
+# Hex encoding for debugging
+hex = "0.4"
+
 # Protocol Buffers for histogram V2 format compatibility
 prost = { workspace = true }
 prost-types = { workspace = true }
