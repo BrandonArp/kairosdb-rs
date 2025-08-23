@@ -76,6 +76,10 @@ hex = "0.4"
 # Bloom filter for index deduplication
 probabilistic-collections = "0.7"
 
+# Persistent queue storage
+fjall = "2.6"
+bincode = "1.3"
+
 # CPU profiling support
 pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"], optional = true }
 

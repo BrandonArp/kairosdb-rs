@@ -19,7 +19,7 @@ use std::{
         Arc,
     },
 };
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 
 // ScyllaDB Rust driver imports
 use scylla::client::session::Session;
@@ -37,6 +37,9 @@ use crate::config::CassandraConfig;
 /// Write command for the single writer task
 #[derive(Debug)]
 enum WriteCommand {
+    DataPoint {
+        data_point: kairosdb_core::datapoint::DataPoint,
+    },
     Batch {
         batch: DataPointBatch,
         response_tx: oneshot::Sender<KairosResult<()>>,
@@ -156,6 +159,15 @@ impl SingleWriterCassandraClient {
 
         while let Some(command) = write_rx.recv().await {
             match command {
+                WriteCommand::DataPoint { data_point } => {
+                    // Process individual data point (for future use)
+                    let mut batch = DataPointBatch::new();
+                    if let Err(e) = batch.add_point(data_point) {
+                        error!("Failed to create batch from single data point: {}", e);
+                        continue;
+                    }
+                    let _ = state.write_batch_internal(&batch).await;
+                }
                 WriteCommand::Batch { batch, response_tx } => {
                     let result = state.write_batch_internal(&batch).await;
                     

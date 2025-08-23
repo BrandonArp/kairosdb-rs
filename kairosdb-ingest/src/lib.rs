@@ -13,6 +13,7 @@ pub mod ingestion;
 pub mod json_parser;
 pub mod metrics;
 pub mod mock_client;
+pub mod persistent_queue;
 pub mod single_writer_client;
 
 // Re-export commonly used types

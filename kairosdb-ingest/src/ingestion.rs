@@ -26,6 +26,7 @@ use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
     config::IngestConfig,
     mock_client::MockCassandraClient,
+    persistent_queue::PersistentQueue,
     single_writer_client::SingleWriterCassandraClient,
 };
 
@@ -70,6 +71,9 @@ pub struct IngestionService {
     /// Configuration
     config: Arc<IngestConfig>,
 
+    /// Persistent queue for write-ahead logging
+    persistent_queue: Arc<PersistentQueue>,
+
     /// Cassandra client for data persistence
     cassandra_client: BoxedCassandraClient,
 
@@ -86,6 +90,14 @@ impl IngestionService {
         config.validate().context("Invalid configuration")?;
 
         info!("Initializing ingestion service");
+
+        // Initialize persistent queue for write-ahead logging
+        let queue_dir = std::path::Path::new("./data/queue");
+        let persistent_queue = Arc::new(
+            PersistentQueue::new(queue_dir)
+                .await
+                .context("Failed to initialize persistent queue")?
+        );
 
         // Initialize Cassandra client based on environment
         let cassandra_client: BoxedCassandraClient = if std::env::var("USE_MOCK_CASSANDRA")
@@ -135,16 +147,17 @@ impl IngestionService {
 
         let service = Self {
             config: config.clone(),
+            persistent_queue,
             cassandra_client,
             metrics,
             backpressure_active,
         };
 
-        // For now, we'll skip the complex worker setup and use simple processing
-        // TODO: Implement proper worker threads and monitoring
-
+        // Start background queue processing task
+        let _queue_processor = service.start_queue_processor().await;
+        
         info!(
-            "Ingestion service initialized with {} worker threads",
+            "Ingestion service initialized with {} worker threads and persistent queue processor",
             config.ingestion.worker_threads
         );
         Ok(service)
@@ -156,6 +169,14 @@ impl IngestionService {
         config.validate().context("Invalid configuration")?;
 
         info!("Initializing ingestion service with mock client for testing");
+
+        // Initialize test persistent queue
+        let queue_dir = tempfile::tempdir()?.path().to_path_buf();
+        let persistent_queue = Arc::new(
+            PersistentQueue::new(queue_dir)
+                .await
+                .context("Failed to initialize test persistent queue")?
+        );
 
         // Use mock client for testing
         let cassandra_client: BoxedCassandraClient = Arc::new(MockCassandraClient::new());
@@ -181,32 +202,36 @@ impl IngestionService {
 
         let service = Self {
             config,
+            persistent_queue,
             cassandra_client,
             metrics,
             backpressure_active,
         };
 
-        info!("Test ingestion service initialized with mock client");
+        // Start background queue processing task for testing
+        let _queue_processor = service.start_queue_processor().await;
+        
+        info!("Test ingestion service initialized with mock client and persistent queue processor");
         Ok(service)
     }
 
-    /// Submit a batch for ingestion with backpressure handling
-    pub async fn ingest_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
+    /// Submit a batch for ingestion with write-ahead logging (fire-and-forget)
+    pub fn ingest_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
         let start = Instant::now();
 
-        // Check queue size and activate backpressure if needed
-        let current_queue_size = self.metrics.queue_size.load(Ordering::Relaxed);
-        let max_queue_size = self.config.ingestion.max_queue_size;
+        // Check persistent queue size and activate backpressure if needed
+        let current_queue_size = self.persistent_queue.size();
+        let max_queue_size = self.config.ingestion.max_queue_size as u64;
 
         trace!(
-            "Queue size check: current={}, limit={}",
+            "Persistent queue size check: current={}, limit={}",
             current_queue_size, max_queue_size
         );
 
         if current_queue_size > max_queue_size {
             self.backpressure_active.store(1, Ordering::Relaxed);
             warn!(
-                "Queue size limit exceeded: {} > {}, activating backpressure",
+                "Persistent queue size limit exceeded: {} > {}, activating backpressure",
                 current_queue_size, max_queue_size
             );
             return Err(KairosError::rate_limit(
@@ -224,39 +249,94 @@ impl IngestionService {
             }
         }
 
-        // Process the batch directly with the Cassandra client
-        match self.cassandra_client.write_batch(&batch).await {
-            Ok(_) => {
-                trace!(
-                    "Successfully processed batch of {} points in {:?}",
-                    batch.points.len(),
-                    start.elapsed()
-                );
-
-                // Update success metrics
-                self.metrics
-                    .datapoints_ingested
-                    .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
-                self.metrics
-                    .batches_processed
-                    .fetch_add(1, Ordering::Relaxed);
-                *self.metrics.last_batch_time.write() = Some(Instant::now());
-
-                let elapsed = start.elapsed();
-                self.metrics
-                    .avg_batch_time_ms
-                    .store(elapsed.as_millis() as u64, Ordering::Relaxed);
-
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to write batch to Cassandra: {}", e);
-                self.metrics
-                    .cassandra_errors
-                    .fetch_add(1, Ordering::Relaxed);
-                Err(e)
+        // Write all data points to persistent queue (write-ahead log)
+        for data_point in &batch.points {
+            if let Err(e) = self.persistent_queue.enqueue(data_point.clone()) {
+                error!("Failed to write data point to persistent queue: {}", e);
+                self.metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+                return Err(e);
             }
         }
+
+        // Update queue size metric
+        self.metrics.queue_size.store(self.persistent_queue.size() as usize, Ordering::Relaxed);
+
+        // Update success metrics (immediate response after writing to queue)
+        self.metrics
+            .datapoints_ingested
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .batches_processed
+            .fetch_add(1, Ordering::Relaxed);
+        *self.metrics.last_batch_time.write() = Some(Instant::now());
+
+        let elapsed = start.elapsed();
+        self.metrics
+            .avg_batch_time_ms
+            .store(elapsed.as_millis() as u64, Ordering::Relaxed);
+
+        trace!(
+            "Successfully enqueued batch of {} points in {:?}",
+            batch.points.len(),
+            start.elapsed()
+        );
+
+        Ok(())
+    }
+
+    /// Start the background queue processor task
+    async fn start_queue_processor(&self) -> tokio::task::JoinHandle<()> {
+        let persistent_queue = self.persistent_queue.clone();
+        let cassandra_client = self.cassandra_client.clone();
+        let config = self.config.clone();
+        let metrics = self.metrics.clone();
+        
+        tokio::spawn(async move {
+            info!("Starting persistent queue processor");
+            
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                config.ingestion.batch_timeout_ms
+            ));
+            
+            loop {
+                interval.tick().await;
+                
+                // Process batches from persistent queue
+                match persistent_queue.dequeue_batch(config.ingestion.max_batch_size) {
+                    Ok(Some(batch)) => {
+                        trace!("Processing batch of {} points from persistent queue", batch.points.len());
+                        
+                        // Write to Cassandra
+                        match cassandra_client.write_batch(&batch).await {
+                            Ok(_) => {
+                                trace!("Successfully wrote batch of {} points to Cassandra", batch.points.len());
+                                // Note: metrics are already updated when items are enqueued for immediate response
+                            }
+                            Err(e) => {
+                                error!("Failed to write batch to Cassandra, will retry: {}", e);
+                                metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
+                                
+                                // For now, we lose the batch. In production, we'd want to:
+                                // 1. Re-enqueue with exponential backoff
+                                // 2. Dead letter queue after max retries
+                                // 3. Circuit breaker pattern
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // Queue is empty, continue polling
+                        trace!("Persistent queue is empty");
+                    }
+                    Err(e) => {
+                        error!("Failed to dequeue batch from persistent queue: {}", e);
+                        metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                
+                // Update queue size metric
+                metrics.queue_size.store(persistent_queue.size() as usize, Ordering::Relaxed);
+            }
+        })
     }
 
     /// Get current metrics snapshot

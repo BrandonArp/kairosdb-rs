@@ -225,7 +225,7 @@ pub async fn ingest_handler(
     }
 
     // Submit batch for ingestion (normal mode)
-    match state.ingestion_service.ingest_batch(batch).await {
+    match state.ingestion_service.ingest_batch(batch) {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
             trace!(
@@ -354,7 +354,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
         return (StatusCode::OK, Json(response)).into_response();
     }
 
-    match state.ingestion_service.ingest_batch(batch).await {
+    match state.ingestion_service.ingest_batch(batch) {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
             trace!(
