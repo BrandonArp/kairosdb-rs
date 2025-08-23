@@ -4,6 +4,7 @@
 //! to eliminate the CPU hotspots identified in the flame graph analysis.
 
 use async_trait::async_trait;
+use futures::future;
 use tokio::sync::{mpsc, oneshot};
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
@@ -226,13 +227,34 @@ impl WriterTaskState {
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
-        // Write all data points sequentially (no async spawning!)
-        for data_point in &batch.points {
+        // Prepare all data point writes concurrently
+        let prepared_stmt = self.insert_data_point.as_ref()
+            .ok_or_else(|| KairosError::cassandra("Data point prepared statement not available"))?;
+        
+        let write_futures: Vec<_> = batch.points.iter().map(|data_point| {
             let row_key = RowKey::from_data_point(data_point);
             let column_name = ColumnName::from_timestamp(data_point.timestamp);
             let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
             
-            self.write_data_point(&row_key, &column_name, &cassandra_value).await?;
+            let row_key_bytes = row_key.to_bytes();
+            let column_key_bytes = column_name.to_bytes();
+            let value_bytes = &cassandra_value.bytes;
+            
+            self.session.execute_unpaged(prepared_stmt, (row_key_bytes, column_key_bytes, value_bytes.clone()))
+        }).collect();
+        
+        // Execute all data point writes concurrently
+        let results = future::try_join_all(write_futures).await;
+        
+        // Update stats based on results
+        match results {
+            Ok(_) => {
+                self.stats.total_queries.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+            }
+            Err(e) => {
+                self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                return Err(KairosError::cassandra(format!("Failed to write data points: {}", e)));
+            }
         }
 
         // Write indexes with bloom filter deduplication (no locking needed!)

@@ -32,7 +32,7 @@ docker_build_with_restart(
 )
 
 # Local resource to build the Rust binary
-local_resource('build-kairosdb-ingest', 'cargo build --release --bin kairosdb-ingest',
+local_resource('build-kairosdb-ingest', 'cargo build --release --bin kairosdb-ingest --features profiling',
   deps=[
     'kairosdb-ingest/src', 
     'kairosdb-core/src', 
