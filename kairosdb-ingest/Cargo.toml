@@ -73,6 +73,9 @@ sysinfo = "0.30"
 # Hex encoding for binary data
 hex = "0.4"
 
+# Bloom filter for index deduplication
+probabilistic-collections = "0.7"
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers = "0.15"

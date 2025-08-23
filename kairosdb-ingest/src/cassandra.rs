@@ -15,6 +15,10 @@ pub struct CassandraStats {
     pub total_datapoints_written: u64,
     pub avg_batch_size: f64,
     pub connection_errors: u64,
+    pub bloom_filter_in_overlap_period: bool,
+    pub bloom_filter_primary_age_seconds: u64,
+    pub bloom_filter_expected_items: u64,
+    pub bloom_filter_false_positive_rate: f64,
 }
 
 /// Trait defining the interface for Cassandra clients

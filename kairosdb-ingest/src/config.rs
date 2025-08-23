@@ -55,6 +55,9 @@ pub struct CassandraConfig {
     /// Maximum number of connections
     pub max_connections: usize,
 
+    /// Maximum concurrent requests per connection
+    pub max_concurrent_requests_per_connection: usize,
+
     /// Username for authentication
     pub username: Option<String>,
 
@@ -176,7 +179,8 @@ impl Default for CassandraConfig {
             keyspace: "kairosdb".to_string(),
             connection_timeout_ms: 5000,
             query_timeout_ms: 10000,
-            max_connections: 10,
+            max_connections: 20, // Increased for better concurrency
+            max_concurrent_requests_per_connection: 100, // High concurrency per connection
             username: None,
             password: None,
             replication_factor: 1,

@@ -191,6 +191,10 @@ impl CassandraClient for MockCassandraClient {
                 0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
+            bloom_filter_in_overlap_period: false,
+            bloom_filter_primary_age_seconds: 0,
+            bloom_filter_expected_items: 0,
+            bloom_filter_false_positive_rate: 0.0,
         }
     }
 

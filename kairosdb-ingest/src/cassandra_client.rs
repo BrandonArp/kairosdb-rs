@@ -4,6 +4,7 @@
 //! with proper error handling, connection management, and KairosDB schema compatibility.
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
     datapoint::DataPointBatch,
@@ -22,19 +23,24 @@ use tracing::{debug, error, info, trace, warn};
 // ScyllaDB Rust driver imports
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::client::PoolSize;
 use scylla::response::query_result::QueryResult;
 use scylla::serialize::row::SerializeRow;
+// Removed batch imports - using async concurrency instead
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlTimestamp;
 
+use crate::bloom_manager::BloomManager;
 use crate::cassandra::{CassandraClient, CassandraStats};
 use crate::config::CassandraConfig;
 
 /// Production Cassandra client implementation using ScyllaDB Rust driver
+#[derive(Clone)]
 pub struct CassandraClientImpl {
-    session: Session,
+    session: Arc<Session>,
     config: Arc<CassandraConfig>,
-    stats: CassandraClientStats,
+    stats: Arc<CassandraClientStats>,
+    bloom_manager: Arc<BloomManager>,
     // Prepared statements for performance
     insert_data_point: Option<PreparedStatement>,
     insert_row_key_index: Option<PreparedStatement>,
@@ -84,6 +90,14 @@ impl CassandraClientImpl {
             session_builder = session_builder.user(username, password);
         }
 
+        // Configure connection pool and concurrency settings
+        session_builder = session_builder
+            .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
+            .pool_size(PoolSize::PerHost(
+                std::num::NonZero::new(config.max_connections)
+                    .unwrap_or_else(|| std::num::NonZero::new(1).unwrap())
+            ));
+
         // Don't set default keyspace here - we'll create it in ensure_schema()
 
         let session = session_builder.build().await.map_err(|e| {
@@ -93,9 +107,10 @@ impl CassandraClientImpl {
         info!("ScyllaDB session established successfully");
 
         Ok(Self {
-            session,
+            session: Arc::new(session),
             config: config.clone(),
-            stats: CassandraClientStats::default(),
+            stats: Arc::new(CassandraClientStats::default()),
+            bloom_manager: Arc::new(BloomManager::new()),
             insert_data_point: None,
             insert_row_key_index: None,
             insert_string_index: None,
@@ -397,40 +412,56 @@ impl CassandraClientImpl {
             tag_values.len()
         );
 
-        // Write metric name indexes
+        // Write metric name indexes (with bloom filter deduplication)
         for metric_name in metric_names {
-            let entry = StringIndexEntry::metric_name(metric_name);
-            self.write_string_index(&entry).await?;
+            let bloom_key = format!("metric_name:{}", metric_name);
+            if self.bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::metric_name(metric_name);
+                self.write_string_index(&entry).await?;
+            }
         }
 
-        // Write tag name indexes
+        // Write tag name indexes (with bloom filter deduplication)
         for tag_name in tag_names {
-            let entry = StringIndexEntry::tag_name(tag_name);
-            self.write_string_index(&entry).await?;
+            let bloom_key = format!("tag_name:{}", tag_name);
+            if self.bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::tag_name(tag_name);
+                self.write_string_index(&entry).await?;
+            }
         }
 
-        // Write tag value indexes
+        // Write tag value indexes (with bloom filter deduplication)
         for tag_value in tag_values {
-            let entry = StringIndexEntry::tag_value(tag_value);
-            self.write_string_index(&entry).await?;
+            let bloom_key = format!("tag_value:{}", tag_value);
+            if self.bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::tag_value(tag_value);
+                self.write_string_index(&entry).await?;
+            }
         }
 
-        // Write row key indexes (legacy and new format)
+        // Write row key indexes (legacy and new format) with bloom filter deduplication
         for data_point in &batch.points {
             let row_key = RowKey::from_data_point(data_point);
+            
+            // Use a composite key that includes metric name and time bucket for row keys
+            // This ensures we don't skip legitimate row key updates for different time periods  
+            let time_bucket = data_point.timestamp.timestamp_millis() / (3600 * 1000); // Hour bucket
+            let row_key_bloom_key = format!("row_key:{}:{}", data_point.metric, time_bucket);
+            
+            if self.bloom_manager.should_write_index(&row_key_bloom_key) {
+                // Write to legacy row_key_index for backward compatibility
+                let entry = RowKeyIndexEntry::from_row_key(&row_key);
+                self.write_row_key_index(&entry).await?;
 
-            // Write to legacy row_key_index for backward compatibility
-            let entry = RowKeyIndexEntry::from_row_key(&row_key);
-            self.write_row_key_index(&entry).await?;
-
-            // Write to new row_keys and row_key_time_index tables used by Java KairosDB
-            let ttl = if data_point.ttl == 0 {
-                None
-            } else {
-                Some(data_point.ttl)
-            };
-            self.write_row_keys(&row_key, ttl).await?;
-            self.write_row_key_time_index(&row_key, ttl).await?;
+                // Write to new row_keys and row_key_time_index tables used by Java KairosDB
+                let ttl = if data_point.ttl == 0 {
+                    None
+                } else {
+                    Some(data_point.ttl)
+                };
+                self.write_row_keys(&row_key, ttl).await?;
+                self.write_row_key_time_index(&row_key, ttl).await?;
+            }
         }
 
         trace!("All indexes written successfully");
@@ -446,25 +477,36 @@ impl CassandraClient for CassandraClientImpl {
             return Ok(());
         }
 
-        trace!("Writing batch of {} data points", batch.points.len());
+        trace!("Writing batch of {} data points with async concurrency", batch.points.len());
         self.stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
-        // Write data points
-        for data_point in &batch.points {
+        // Write all data points concurrently using async writes
+        let data_point_futures: Vec<_> = batch.points.iter().map(|data_point| {
             let row_key = RowKey::from_data_point(data_point);
             let column_name = ColumnName::from_timestamp(data_point.timestamp);
             let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
+            
+            // Clone self and move values into the async block
+            let client = self.clone();
+            async move {
+                client.write_data_point(&row_key, &column_name, &cassandra_value).await
+            }
+        }).collect();
 
-            self.write_data_point(&row_key, &column_name, &cassandra_value)
-                .await?;
+        // Execute all data point writes concurrently
+        let results = join_all(data_point_futures).await;
+        
+        // Check for any errors
+        for result in results {
+            result?;
         }
 
-        // Write indexes
+        // Write indexes with bloom filter deduplication
         self.write_indexes(batch).await?;
 
-        trace!("Batch written successfully");
+        trace!("Async batch written successfully");
         Ok(())
     }
 
@@ -485,12 +527,18 @@ impl CassandraClient for CassandraClientImpl {
     }
 
     fn get_stats(&self) -> CassandraStats {
+        let bloom_stats = self.bloom_manager.get_stats();
+        
         CassandraStats {
             total_queries: self.stats.total_queries.load(Ordering::Relaxed),
             failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
             total_datapoints_written: self.stats.total_datapoints.load(Ordering::Relaxed),
             avg_batch_size: 0.0, // TODO: Calculate actual average batch size
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
+            bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
+            bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
+            bloom_filter_expected_items: bloom_stats.expected_items,
+            bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
         }
     }
 

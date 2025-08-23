@@ -1,0 +1,319 @@
+//! Bloom filter manager for index deduplication
+//!
+//! Manages dual bloom filters with rotation to track which indexes have
+//! already been written, avoiding redundant writes to Cassandra.
+
+use probabilistic_collections::bloom::BloomFilter;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use parking_lot::RwLock;
+use tracing::{debug, trace};
+
+/// Configuration for bloom filter behavior
+#[derive(Debug, Clone)]
+pub struct BloomConfig {
+    /// Expected number of items (metric names, tag names, tag values)
+    pub expected_items: u64,
+    /// Target false positive rate (1/1,000,000 = 0.000001)
+    pub false_positive_rate: f64,
+    /// Filter rotation interval (30 minutes)
+    pub rotation_interval: Duration,
+    /// Overlap period where both filters are active (10 minutes)
+    pub overlap_period: Duration,
+}
+
+impl Default for BloomConfig {
+    fn default() -> Self {
+        Self {
+            expected_items: 1_000_000, // 1M unique index entries
+            false_positive_rate: 0.000001, // 1 in 1 million
+            rotation_interval: Duration::from_secs(30 * 60), // 30 minutes
+            overlap_period: Duration::from_secs(10 * 60), // 10 minutes
+        }
+    }
+}
+
+/// Dual bloom filter state for rotation
+#[derive(Debug)]
+struct BloomState {
+    /// Primary bloom filter (currently active)
+    primary: BloomFilter<String>,
+    /// Secondary bloom filter (used during overlap period)
+    secondary: Option<BloomFilter<String>>,
+    /// When the primary filter was created
+    primary_created: Instant,
+    /// When the secondary filter was created (if any)
+    secondary_created: Option<Instant>,
+    /// Current hash seed for primary filter
+    primary_seed: u64,
+    /// Current hash seed for secondary filter
+    secondary_seed: u64,
+    /// Configuration
+    config: BloomConfig,
+}
+
+impl BloomState {
+    fn new(config: BloomConfig) -> Self {
+        let seed = generate_random_seed();
+        let primary = create_bloom_filter(&config, seed);
+        
+        Self {
+            primary,
+            secondary: None,
+            primary_created: Instant::now(),
+            secondary_created: None,
+            primary_seed: seed,
+            secondary_seed: 0,
+            config,
+        }
+    }
+
+    /// Check if we need to start the overlap period (create secondary filter)
+    fn should_start_overlap(&self) -> bool {
+        let elapsed = self.primary_created.elapsed();
+        let overlap_start = self.config.rotation_interval - self.config.overlap_period;
+        
+        elapsed >= overlap_start && self.secondary.is_none()
+    }
+
+    /// Check if we need to rotate (make secondary primary)
+    fn should_rotate(&self) -> bool {
+        let elapsed = self.primary_created.elapsed();
+        elapsed >= self.config.rotation_interval && self.secondary.is_some()
+    }
+
+    /// Start the overlap period by creating secondary filter
+    fn start_overlap(&mut self) {
+        if self.secondary.is_none() {
+            let seed = generate_random_seed();
+            self.secondary = Some(create_bloom_filter(&self.config, seed));
+            self.secondary_created = Some(Instant::now());
+            self.secondary_seed = seed;
+            
+            debug!(
+                "Started bloom filter overlap period. Primary seed: {}, Secondary seed: {}",
+                self.primary_seed, self.secondary_seed
+            );
+        }
+    }
+
+    /// Rotate filters (secondary becomes primary)
+    fn rotate(&mut self) {
+        if let Some(secondary) = self.secondary.take() {
+            self.primary = secondary;
+            self.primary_created = self.secondary_created.unwrap();
+            self.primary_seed = self.secondary_seed;
+            self.secondary = None;
+            self.secondary_created = None;
+            
+            debug!(
+                "Rotated bloom filters. New primary seed: {}",
+                self.primary_seed
+            );
+        }
+    }
+
+    /// Check if an item exists in any active filter
+    fn contains(&self, item: &str) -> bool {
+        let primary_contains = self.primary.contains(item);
+        
+        // During overlap period, check both filters
+        if let Some(ref secondary) = self.secondary {
+            primary_contains || secondary.contains(item)
+        } else {
+            primary_contains
+        }
+    }
+
+    /// Insert an item into all active filters
+    fn insert(&mut self, item: &str) {
+        self.primary.insert(item);
+        
+        // During overlap period, insert into both filters
+        if let Some(ref mut secondary) = self.secondary {
+            secondary.insert(item);
+        }
+    }
+}
+
+/// Thread-safe bloom filter manager for index deduplication
+pub struct BloomManager {
+    state: Arc<RwLock<BloomState>>,
+}
+
+impl BloomManager {
+    /// Create a new bloom filter manager with default configuration
+    pub fn new() -> Self {
+        Self::with_config(BloomConfig::default())
+    }
+
+    /// Create a new bloom filter manager with custom configuration
+    pub fn with_config(config: BloomConfig) -> Self {
+        let state = BloomState::new(config);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
+    }
+
+    /// Check if an index entry should be written (not in bloom filter)
+    /// Returns true if the item should be written to Cassandra
+    pub fn should_write_index(&self, index_key: &str) -> bool {
+        // First, perform maintenance if needed
+        self.maybe_maintain();
+        
+        // Check if item exists in any active filter
+        let exists = {
+            let state = self.state.read();
+            state.contains(index_key)
+        };
+
+        if exists {
+            trace!("Index entry found in bloom filter, skipping write: {}", index_key);
+            false // Don't write, probably already exists
+        } else {
+            // Insert into active filters and return true to write
+            {
+                let mut state = self.state.write();
+                state.insert(index_key);
+            }
+            trace!("Index entry not in bloom filter, will write: {}", index_key);
+            true // Write to Cassandra
+        }
+    }
+
+    /// Perform maintenance: check for overlap start or rotation
+    fn maybe_maintain(&self) {
+        let mut state = self.state.write();
+        
+        if state.should_start_overlap() {
+            state.start_overlap();
+        } else if state.should_rotate() {
+            state.rotate();
+        }
+    }
+
+    /// Get statistics about the bloom filters
+    pub fn get_stats(&self) -> BloomStats {
+        let state = self.state.read();
+        let primary_age = state.primary_created.elapsed();
+        let secondary_age = state.secondary_created.map(|created| created.elapsed());
+        
+        BloomStats {
+            primary_age_seconds: primary_age.as_secs(),
+            secondary_age_seconds: secondary_age.map(|age| age.as_secs()),
+            in_overlap_period: state.secondary.is_some(),
+            primary_seed: state.primary_seed,
+            secondary_seed: state.secondary_seed,
+            expected_items: state.config.expected_items,
+            false_positive_rate: state.config.false_positive_rate,
+        }
+    }
+}
+
+impl Default for BloomManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Statistics about bloom filter state
+#[derive(Debug, Clone)]
+pub struct BloomStats {
+    pub primary_age_seconds: u64,
+    pub secondary_age_seconds: Option<u64>,
+    pub in_overlap_period: bool,
+    pub primary_seed: u64,
+    pub secondary_seed: u64,
+    pub expected_items: u64,
+    pub false_positive_rate: f64,
+}
+
+/// Create a bloom filter with specific configuration and hash seed
+fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> BloomFilter<String> {
+    // Create bloom filter with calculated optimal size and hash count
+    // Note: Using default hasher, seed is used for future rotation logic
+    BloomFilter::new(
+        config.expected_items as usize,
+        config.false_positive_rate,
+    )
+}
+
+/// Generate a random seed for hash functions
+fn generate_random_seed() -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    
+    let mut hasher = DefaultHasher::new();
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+
+    #[test]
+    fn test_bloom_manager_basic() {
+        let manager = BloomManager::new();
+        
+        // First time should return true (not in filter)
+        assert!(manager.should_write_index("metric.test"));
+        
+        // Second time should return false (now in filter)
+        assert!(!manager.should_write_index("metric.test"));
+    }
+
+    #[test]
+    fn test_bloom_manager_rotation() {
+        let config = BloomConfig {
+            rotation_interval: Duration::from_millis(100),
+            overlap_period: Duration::from_millis(50),
+            ..Default::default()
+        };
+        
+        let manager = BloomManager::with_config(config);
+        
+        // Add item to primary
+        assert!(manager.should_write_index("test.metric"));
+        
+        // Wait for overlap period to start
+        sleep(Duration::from_millis(60));
+        let stats = manager.get_stats();
+        assert!(stats.in_overlap_period);
+        
+        // Wait for full rotation
+        sleep(Duration::from_millis(60));
+        let stats = manager.get_stats();
+        assert!(!stats.in_overlap_period);
+    }
+
+    #[test]
+    fn test_different_seeds() {
+        let config = BloomConfig {
+            rotation_interval: Duration::from_millis(100),
+            overlap_period: Duration::from_millis(50),
+            ..Default::default()
+        };
+        
+        let manager = BloomManager::with_config(config);
+        let initial_stats = manager.get_stats();
+        
+        // Trigger rotation
+        sleep(Duration::from_millis(60));
+        manager.maybe_maintain(); // Start overlap
+        
+        sleep(Duration::from_millis(60));
+        manager.maybe_maintain(); // Complete rotation
+        
+        let final_stats = manager.get_stats();
+        
+        // Seeds should be different after rotation
+        assert_ne!(initial_stats.primary_seed, final_stats.primary_seed);
+    }
+}
