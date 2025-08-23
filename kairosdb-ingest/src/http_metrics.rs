@@ -57,7 +57,7 @@ pub struct HttpEndpointMetrics {
 
 /// Request timing helper for detailed metrics
 pub struct RequestTimer {
-    start_time: Instant,
+    pub start_time: Instant,
     endpoint: &'static str,
     metrics: HttpMetrics,
 }

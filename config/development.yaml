@@ -10,15 +10,15 @@ cassandra:
   keyspace: "kairosdb"
   connection_timeout_ms: 5000
   query_timeout_ms: 10000
-  max_connections: 20
-  max_concurrent_requests_per_connection: 100
+  max_connections: 50    # Increased from 20 to 50 for higher concurrency
+  max_concurrent_requests_per_connection: 200  # Increased from 100 to 200 for more concurrent requests
   replication_factor: 1
   cassandra_health_query: "SELECT now() FROM system.local"
 
 # Ingestion configuration
 ingestion:
   max_batch_size: 10000
-  batch_timeout_ms: 1000
+  batch_timeout_ms: 50  # Check queue every 50ms for continuous processing
   worker_threads: 4
   max_queue_size: 100000000  # 100M items - disk-backed queue with Fjall
   max_queue_disk_bytes: 21474836480  # 20GB maximum disk usage for queue

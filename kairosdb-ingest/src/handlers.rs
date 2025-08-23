@@ -37,6 +37,7 @@ pub struct PerfParams {
 
 /// Health check endpoint compatible with KairosDB format
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let timer = state.http_metrics.start_request_timer("health");
     match state.ingestion_service.health_check().await {
         Ok(status) => {
             let response = match status {
@@ -78,10 +79,12 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
                 HealthStatus::Unhealthy => StatusCode::SERVICE_UNAVAILABLE,
             };
 
+            state.http_metrics.record_status_code(status_code);
             (status_code, Json(response))
         }
         Err(e) => {
             error!("Health check failed: {}", e);
+            state.http_metrics.record_status_code(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -96,7 +99,8 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 /// Metrics endpoint (Prometheus format)
-pub async fn metrics_handler() -> impl IntoResponse {
+pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let timer = state.http_metrics.start_request_timer("metrics");
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
 
@@ -107,10 +111,12 @@ pub async fn metrics_handler() -> impl IntoResponse {
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
             );
+            state.http_metrics.record_status_code(StatusCode::OK);
             (StatusCode::OK, headers, metrics_string)
         }
         Err(e) => {
             error!("Failed to encode metrics: {}", e);
+            state.http_metrics.record_status_code(StatusCode::INTERNAL_SERVER_ERROR);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 HeaderMap::new(),
@@ -133,8 +139,11 @@ pub async fn ingest_handler(
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    let start_time = Instant::now();
-    trace!("Received ingestion request, size: {} bytes", body.len());
+    // Start request timing and metrics
+    let timer = state.http_metrics.start_request_timer("ingest");
+    let request_size = body.len();
+    
+    trace!("Received ingestion request, size: {} bytes", request_size);
 
     // Determine performance mode (query param overrides config)
     let perf_mode = if let Some(mode_str) = &params.perf_mode {
@@ -144,6 +153,7 @@ pub async fn ingest_handler(
             "parse_and_store" => PerformanceMode::ParseAndStoreMode,
             _ => {
                 let error_response = ErrorResponse::from_error(&format!("Invalid perf_mode: {}. Valid options: no_parse, parse_only, parse_and_store", mode_str));
+                state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
                 return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
             }
         }
@@ -155,12 +165,15 @@ pub async fn ingest_handler(
     match perf_mode {
         PerformanceMode::NoParseMode => {
             // Skip all processing - just return success immediately
-            let processing_time = start_time.elapsed().as_millis() as u64;
+            let processing_time = timer.start_time.elapsed().as_millis() as u64;
             let response = IngestResponse {
                 datapoints_ingested: 1, // Fake count since we didn't parse
                 ingest_time: processing_time,
                 warnings: vec!["Performance mode: no_parse - skipped all processing".to_string()],
             };
+            let response_size = serde_json::to_string(&response).unwrap_or_default().len();
+            state.http_metrics.record_sizes(request_size, response_size);
+            state.http_metrics.record_status_code(StatusCode::OK);
             return (StatusCode::OK, Json(response)).into_response();
         }
         _ => {} // Continue with normal processing for other modes
@@ -178,6 +191,7 @@ pub async fn ingest_handler(
             Err(e) => {
                 warn!("Failed to decompress gzip content: {}", e);
                 let error_response = ErrorResponse::from_error("Failed to decompress gzip content");
+                state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
                 return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
             }
         }
@@ -192,11 +206,17 @@ pub async fn ingest_handler(
     );
 
     // Parse JSON into data points
+    let parse_start = Instant::now();
     let (batch, warnings) = match parser.parse_json(&json_str) {
-        Ok(result) => result,
+        Ok(result) => {
+            timer.record_parse_time(parse_start.elapsed());
+            result
+        },
         Err(e) => {
+            timer.record_parse_error();
             warn!("Failed to parse JSON payload: {}", e);
             let error_response = ErrorResponse::from_kairos_error(&e);
+            state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
             return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
     };
@@ -206,7 +226,7 @@ pub async fn ingest_handler(
 
     // Handle parse_only mode - skip Cassandra storage
     if perf_mode == PerformanceMode::ParseOnlyMode {
-        let processing_time = start_time.elapsed().as_millis() as u64;
+        let processing_time = timer.start_time.elapsed().as_millis() as u64;
         trace!(
             "Parse-only mode: Successfully parsed {} data points in {}ms",
             batch_size, processing_time
@@ -221,13 +241,20 @@ pub async fn ingest_handler(
             warnings: response_warnings,
         };
 
+        let response_size = serde_json::to_string(&response).unwrap_or_default().len();
+        state.http_metrics.record_sizes(request_size, response_size);
+        state.http_metrics.record_status_code(StatusCode::OK);
         return (StatusCode::OK, Json(response)).into_response();
     }
 
     // Submit batch for ingestion (normal mode)
+    let queue_start = Instant::now();
     match state.ingestion_service.ingest_batch(batch) {
         Ok(_) => {
-            let processing_time = start_time.elapsed().as_millis() as u64;
+            timer.record_queue_write_time(queue_start.elapsed());
+            state.http_metrics.requests_by_endpoint.ingest_success.inc();
+            
+            let processing_time = queue_start.elapsed().as_millis() as u64;
             trace!(
                 "Successfully ingested {} data points in {}ms",
                 batch_size, processing_time
@@ -239,9 +266,16 @@ pub async fn ingest_handler(
                 warnings,
             };
 
-            (StatusCode::OK, Json(response)).into_response()
+            let response_json = Json(response);
+            let response_size = serde_json::to_string(&response_json.0).unwrap_or_default().len();
+            state.http_metrics.record_sizes(request_size, response_size);
+            state.http_metrics.record_status_code(StatusCode::OK);
+
+            (StatusCode::OK, response_json).into_response()
         }
         Err(e) => {
+            timer.record_queue_error();
+            state.http_metrics.requests_by_endpoint.ingest_errors.inc();
             error!("Failed to ingest batch: {}", e);
 
             let status_code = match &e {
@@ -251,6 +285,9 @@ pub async fn ingest_handler(
             };
 
             let error_response = ErrorResponse::from_kairos_error(&e);
+            let response_size = serde_json::to_string(&error_response).unwrap_or_default().len();
+            state.http_metrics.record_sizes(request_size, response_size);
+            state.http_metrics.record_status_code(status_code);
             (status_code, Json(error_response)).into_response()
         }
     }
@@ -258,7 +295,7 @@ pub async fn ingest_handler(
 
 /// Handle gzipped ingestion requests
 pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Query<PerfParams>, body: Body) -> impl IntoResponse {
-    let start_time = Instant::now();
+    let timer = state.http_metrics.start_request_timer("ingest_gzip");
 
     // Determine performance mode (query param overrides config)
     let perf_mode = if let Some(mode_str) = &params.perf_mode {
@@ -268,6 +305,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
             "parse_and_store" => PerformanceMode::ParseAndStoreMode,
             _ => {
                 let error_response = ErrorResponse::from_error(&format!("Invalid perf_mode: {}. Valid options: no_parse, parse_only, parse_and_store", mode_str));
+                state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
                 return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
             }
         }
@@ -279,12 +317,16 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
     match perf_mode {
         PerformanceMode::NoParseMode => {
             // Skip all processing - just return success immediately
-            let processing_time = start_time.elapsed().as_millis() as u64;
+            let processing_time = timer.start_time.elapsed().as_millis() as u64;
             let response = IngestResponse {
                 datapoints_ingested: 1, // Fake count since we didn't parse
                 ingest_time: processing_time,
                 warnings: vec!["Performance mode: no_parse - skipped all processing (gzip)".to_string()],
             };
+            let response_size = serde_json::to_string(&response).unwrap_or_default().len();
+            // For no_parse mode, we don't have request_size yet, so use 0 or skip size recording
+            state.http_metrics.record_sizes(0, response_size);
+            state.http_metrics.record_status_code(StatusCode::OK);
             return (StatusCode::OK, Json(response)).into_response();
         }
         _ => {} // Continue with normal processing for other modes
@@ -296,9 +338,12 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
         Err(e) => {
             warn!("Failed to read request body: {}", e);
             let error_response = ErrorResponse::from_error("Failed to read request body");
+            state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
             return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
     };
+    
+    let request_size = body_bytes.len();
 
     // Decompress the body
     let json_str = match decompress_gzip_bytes(&body_bytes) {
@@ -306,6 +351,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
         Err(e) => {
             warn!("Failed to decompress gzip content: {}", e);
             let error_response = ErrorResponse::from_error("Failed to decompress gzip content");
+            state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
             return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
     };
@@ -323,11 +369,17 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
     );
 
     // Parse and process the same way as regular ingest handler
+    let parse_start = Instant::now();
     let (batch, warnings) = match parser.parse_json(&json_str) {
-        Ok(result) => result,
+        Ok(result) => {
+            timer.record_parse_time(parse_start.elapsed());
+            result
+        },
         Err(e) => {
+            timer.record_parse_error();
             warn!("Failed to parse JSON payload: {}", e);
             let error_response = ErrorResponse::from_kairos_error(&e);
+            state.http_metrics.record_status_code(StatusCode::BAD_REQUEST);
             return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
         }
     };
@@ -336,7 +388,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
 
     // Handle parse_only mode - skip Cassandra storage
     if perf_mode == PerformanceMode::ParseOnlyMode {
-        let processing_time = start_time.elapsed().as_millis() as u64;
+        let processing_time = timer.start_time.elapsed().as_millis() as u64;
         trace!(
             "Parse-only mode: Successfully parsed {} data points from gzipped request in {}ms",
             batch_size, processing_time
@@ -351,12 +403,19 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
             warnings: response_warnings,
         };
 
+        let response_size = serde_json::to_string(&response).unwrap_or_default().len();
+        state.http_metrics.record_sizes(request_size, response_size);
+        state.http_metrics.record_status_code(StatusCode::OK);
         return (StatusCode::OK, Json(response)).into_response();
     }
 
+    let queue_start = Instant::now();
     match state.ingestion_service.ingest_batch(batch) {
         Ok(_) => {
-            let processing_time = start_time.elapsed().as_millis() as u64;
+            timer.record_queue_write_time(queue_start.elapsed());
+            state.http_metrics.requests_by_endpoint.ingest_success.inc();
+            
+            let processing_time = queue_start.elapsed().as_millis() as u64;
             trace!(
                 "Successfully ingested {} data points from gzipped request in {}ms",
                 batch_size, processing_time
@@ -368,9 +427,16 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
                 warnings,
             };
 
-            (StatusCode::OK, Json(response)).into_response()
+            let response_json = Json(response);
+            let response_size = serde_json::to_string(&response_json.0).unwrap_or_default().len();
+            state.http_metrics.record_sizes(request_size, response_size);
+            state.http_metrics.record_status_code(StatusCode::OK);
+
+            (StatusCode::OK, response_json).into_response()
         }
         Err(e) => {
+            timer.record_queue_error();
+            state.http_metrics.requests_by_endpoint.ingest_errors.inc();
             error!("Failed to ingest gzipped batch: {}", e);
 
             let status_code = match &e {
@@ -380,6 +446,9 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
             };
 
             let error_response = ErrorResponse::from_kairos_error(&e);
+            let response_size = serde_json::to_string(&error_response).unwrap_or_default().len();
+            state.http_metrics.record_sizes(request_size, response_size);
+            state.http_metrics.record_status_code(status_code);
             (status_code, Json(error_response)).into_response()
         }
     }

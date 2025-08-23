@@ -19,6 +19,19 @@ pub struct CassandraStats {
     pub bloom_filter_primary_age_seconds: u64,
     pub bloom_filter_expected_items: u64,
     pub bloom_filter_false_positive_rate: f64,
+    
+    // Detailed Cassandra operation metrics
+    pub datapoint_writes: u64,
+    pub datapoint_write_errors: u64,
+    pub index_writes: u64,
+    pub index_write_errors: u64,
+    pub prepared_statement_cache_hits: u64,
+    pub prepared_statement_cache_misses: u64,
+    
+    // Timing metrics (averaged per operation in milliseconds)
+    pub avg_datapoint_write_time_ms: f64,
+    pub avg_index_write_time_ms: f64,
+    pub avg_batch_write_time_ms: f64,
 }
 
 /// Trait defining the interface for Cassandra clients

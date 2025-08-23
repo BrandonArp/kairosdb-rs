@@ -209,8 +209,8 @@ impl PersistentQueue {
         let entry = QueueEntry::new(data_point);
         let key = entry.queue_key();
         
-        // Serialize the entry
-        let value = bincode::serialize(&entry)
+        // Serialize the entry using MessagePack (supports untagged enums)
+        let value = rmp_serde::to_vec(&entry)
             .map_err(|e| {
                 self.metrics.enqueue_errors.inc();
                 KairosError::internal(format!("Failed to serialize queue entry: {}", e))
@@ -253,12 +253,17 @@ impl PersistentQueue {
                     KairosError::internal(format!("Failed to read from queue: {}", e))
                 })?;
                 
-            // Deserialize the entry
-            let entry: QueueEntry = bincode::deserialize(&value)
-                .map_err(|e| {
+            // Deserialize the entry using MessagePack
+            let entry: QueueEntry = match rmp_serde::from_slice(&value) {
+                Ok(entry) => entry,
+                Err(e) => {
                     self.metrics.dequeue_errors.inc();
-                    KairosError::internal(format!("Failed to deserialize queue entry: {}", e))
-                })?;
+                    // Skip corrupted entries and remove them
+                    debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
+                    keys_to_remove.push(key);
+                    continue;
+                }
+            };
                 
             // Track oldest entry for age metric
             if oldest_timestamp.is_none() {

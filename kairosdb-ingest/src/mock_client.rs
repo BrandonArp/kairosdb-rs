@@ -195,6 +195,19 @@ impl CassandraClient for MockCassandraClient {
             bloom_filter_primary_age_seconds: 0,
             bloom_filter_expected_items: 0,
             bloom_filter_false_positive_rate: 0.0,
+            
+            // Mock detailed metrics (all zeros since mock doesn't track them)
+            datapoint_writes: total_datapoints,
+            datapoint_write_errors: 0,
+            index_writes: 0,
+            index_write_errors: 0,
+            prepared_statement_cache_hits: total_queries,
+            prepared_statement_cache_misses: 0,
+            
+            // Mock timing metrics (all zeros for mock)
+            avg_datapoint_write_time_ms: 0.0,
+            avg_index_write_time_ms: 0.0,
+            avg_batch_write_time_ms: 0.0,
         }
     }
 

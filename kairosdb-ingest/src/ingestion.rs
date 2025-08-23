@@ -154,7 +154,9 @@ impl IngestionService {
         };
 
         // Start background queue processing task
+        info!("About to start queue processor task");
         let _queue_processor = service.start_queue_processor().await;
+        info!("Queue processor task started successfully");
         
         info!(
             "Ingestion service initialized with {} worker threads and persistent queue processor",
@@ -316,44 +318,64 @@ impl IngestionService {
         let metrics = self.metrics.clone();
         
         tokio::spawn(async move {
-            info!("Starting persistent queue processor");
+            info!("Persistent queue processor task spawned successfully");
             
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-                config.ingestion.batch_timeout_ms
-            ));
+            let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
+            info!("Creating interval timer with duration: {:?}", interval_duration);
+            let mut interval = tokio::time::interval(interval_duration);
+            
+            info!("Starting persistent queue processor main loop with {}ms interval", config.ingestion.batch_timeout_ms);
             
             loop {
-                interval.tick().await;
-                
-                // Process batches from persistent queue
-                match persistent_queue.dequeue_batch(config.ingestion.max_batch_size) {
-                    Ok(Some(batch)) => {
-                        trace!("Processing batch of {} points from persistent queue", batch.points.len());
-                        
-                        // Write to Cassandra
-                        match cassandra_client.write_batch(&batch).await {
-                            Ok(_) => {
-                                trace!("Successfully wrote batch of {} points to Cassandra", batch.points.len());
-                                // Note: metrics are already updated when items are enqueued for immediate response
-                            }
-                            Err(e) => {
-                                error!("Failed to write batch to Cassandra, will retry: {}", e);
-                                metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
-                                
-                                // For now, we lose the batch. In production, we'd want to:
-                                // 1. Re-enqueue with exponential backoff
-                                // 2. Dead letter queue after max retries
-                                // 3. Circuit breaker pattern
+                // Continuously drain the queue until empty
+                let mut batches_processed_this_cycle = 0;
+                let current_queue_size = persistent_queue.size();
+                if current_queue_size > 0 {
+                    info!("Starting queue processing cycle, queue size: {}", current_queue_size);
+                } else {
+                    trace!("Starting queue processing cycle, queue size: {}", current_queue_size);
+                }
+                loop {
+                    match persistent_queue.dequeue_batch(config.ingestion.max_batch_size) {
+                        Ok(Some(batch)) => {
+                            trace!("Processing batch of {} points from persistent queue", batch.points.len());
+                            batches_processed_this_cycle += 1;
+                            
+                            // Write to Cassandra with timing
+                            let cassandra_start = std::time::Instant::now();
+                            info!("Writing batch of {} points to Cassandra", batch.points.len());
+                            match cassandra_client.write_batch(&batch).await {
+                                Ok(_) => {
+                                    let cassandra_duration = cassandra_start.elapsed();
+                                    info!("Successfully wrote batch of {} points to Cassandra in {:?}", batch.points.len(), cassandra_duration);
+                                    // Note: metrics are already updated when items are enqueued for immediate response
+                                }
+                                Err(e) => {
+                                    let cassandra_duration = cassandra_start.elapsed();
+                                    error!("Failed to write batch to Cassandra after {:?}, will retry: {}", cassandra_duration, e);
+                                    metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
+                                    
+                                    // For now, we lose the batch. In production, we'd want to:
+                                    // 1. Re-enqueue with exponential backoff
+                                    // 2. Dead letter queue after max retries
+                                    // 3. Circuit breaker pattern
+                                }
                             }
                         }
-                    }
-                    Ok(None) => {
-                        // Queue is empty, continue polling
-                        trace!("Persistent queue is empty");
-                    }
-                    Err(e) => {
-                        error!("Failed to dequeue batch from persistent queue: {}", e);
-                        metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+                        Ok(None) => {
+                            // Queue is empty, break from inner loop
+                            if batches_processed_this_cycle > 0 {
+                                info!("Queue drained: processed {} batches this cycle", batches_processed_this_cycle);
+                            } else {
+                                trace!("Persistent queue is empty");
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Failed to dequeue batch from persistent queue: {}", e);
+                            metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+                            break; // Exit inner loop on error
+                        }
                     }
                 }
                 
@@ -364,7 +386,22 @@ impl IngestionService {
                 if let Ok(disk_usage) = persistent_queue.get_disk_usage_bytes() {
                     persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
                 }
+                
+                // Wait before checking queue again (queue is empty or error occurred)
+                if batches_processed_this_cycle > 0 {
+                    info!("Queue processing cycle complete, waiting for next interval tick");
+                } else {
+                    trace!("Queue processing cycle complete, waiting for next interval tick");
+                }
+                interval.tick().await;
+                if persistent_queue.size() > 0 {
+                    info!("Interval tick received, starting next cycle");
+                } else {
+                    trace!("Interval tick received, starting next cycle");
+                }
             }
+            
+            error!("Queue processor task terminated unexpectedly!");
         })
     }
 
