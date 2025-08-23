@@ -83,6 +83,9 @@ pub struct IngestionConfig {
     /// Maximum queue size for pending batches
     pub max_queue_size: usize,
 
+    /// Maximum disk usage for queue in bytes (default: 10GB)
+    pub max_queue_disk_bytes: u64,
+
     /// Number of worker threads for ingestion
     pub worker_threads: usize,
 
@@ -194,7 +197,8 @@ impl Default for IngestionConfig {
         Self {
             max_batch_size: 10000,
             batch_timeout_ms: 1000,
-            max_queue_size: 100,
+            max_queue_size: 10_000_000, // 10M items default for disk-backed queue
+            max_queue_disk_bytes: 10 * 1024 * 1024 * 1024, // 10GB default
             worker_threads: 4,
             enable_validation: true,
             max_request_size: 100 * 1024 * 1024, // 100MB

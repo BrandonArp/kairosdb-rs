@@ -29,10 +29,15 @@ async fn main() -> Result<()> {
     let ingestion_service = IngestionService::new(config.clone()).await?;
     info!("Ingestion service initialized");
 
+    // Initialize HTTP metrics
+    let http_metrics = Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new()?);
+    info!("HTTP metrics initialized");
+
     // Create shared state
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
         config: config.clone(),
+        http_metrics,
     };
 
     // Build router using the library function

@@ -219,23 +219,47 @@ impl IngestionService {
     pub fn ingest_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
         let start = Instant::now();
 
-        // Check persistent queue size and activate backpressure if needed
+        // Check disk usage for backpressure
+        let disk_usage = self.persistent_queue.get_disk_usage_bytes()
+            .unwrap_or(0); // Fall back to 0 if we can't read disk usage
+        let max_disk_bytes = self.config.ingestion.max_queue_disk_bytes;
+
+        // Also check item count as a secondary limit
         let current_queue_size = self.persistent_queue.size();
         let max_queue_size = self.config.ingestion.max_queue_size as u64;
 
         trace!(
-            "Persistent queue size check: current={}, limit={}",
-            current_queue_size, max_queue_size
+            "Queue check: items={}/{}, disk={:.2}MB/{:.2}MB",
+            current_queue_size, max_queue_size,
+            disk_usage as f64 / 1_048_576.0,
+            max_disk_bytes as f64 / 1_048_576.0
         );
 
+        // Update disk usage metric
+        self.persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
+
+        // Check disk usage limit first (primary limit)
+        if disk_usage > max_disk_bytes {
+            self.backpressure_active.store(1, Ordering::Relaxed);
+            warn!(
+                "Queue disk usage limit exceeded: {:.2}MB > {:.2}MB, activating backpressure",
+                disk_usage as f64 / 1_048_576.0,
+                max_disk_bytes as f64 / 1_048_576.0
+            );
+            return Err(KairosError::rate_limit(
+                format!("Queue disk usage limit exceeded: {:.2}MB", disk_usage as f64 / 1_048_576.0)
+            ));
+        }
+
+        // Check item count limit (secondary limit)
         if current_queue_size > max_queue_size {
             self.backpressure_active.store(1, Ordering::Relaxed);
             warn!(
-                "Persistent queue size limit exceeded: {} > {}, activating backpressure",
+                "Queue item count limit exceeded: {} > {}, activating backpressure",
                 current_queue_size, max_queue_size
             );
             return Err(KairosError::rate_limit(
-                "Queue size limit exceeded".to_string(),
+                format!("Queue size limit exceeded: {} items", current_queue_size)
             ));
         }
 
@@ -333,8 +357,13 @@ impl IngestionService {
                     }
                 }
                 
-                // Update queue size metric
+                // Update queue size and disk usage metrics
                 metrics.queue_size.store(persistent_queue.size() as usize, Ordering::Relaxed);
+                
+                // Update disk usage metric periodically
+                if let Ok(disk_usage) = persistent_queue.get_disk_usage_bytes() {
+                    persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
+                }
             }
         })
     }

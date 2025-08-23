@@ -8,10 +8,12 @@ use anyhow::{Context, Result};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
 use kairosdb_core::datapoint::{DataPoint, DataPointBatch};
 use kairosdb_core::error::{KairosError, KairosResult};
+use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -41,11 +43,122 @@ impl QueueEntry {
     }
 }
 
+/// Queue-specific metrics for monitoring
+#[derive(Debug, Clone)]
+pub struct QueueMetrics {
+    // Counters
+    pub enqueue_total: Counter,
+    pub dequeue_total: Counter,
+    pub enqueue_errors: Counter,
+    pub dequeue_errors: Counter,
+    
+    // Gauges
+    pub current_size: Gauge,
+    pub oldest_entry_age_seconds: Gauge,
+    pub disk_usage_bytes: Gauge,
+    
+    // Histograms
+    pub enqueue_duration: Histogram,
+    pub dequeue_duration: Histogram,
+    pub batch_size: Histogram,
+}
+
+impl QueueMetrics {
+    pub fn new() -> Result<Self> {
+        Self::new_with_prefix("")
+    }
+    
+    pub fn new_with_prefix(prefix: &str) -> Result<Self> {
+        let suffix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("_{}", prefix)
+        };
+
+        let enqueue_total = register_counter!(
+            format!("kairosdb_queue_enqueue_total{}", suffix),
+            "Total number of data points enqueued"
+        ).unwrap_or_else(|_| Counter::new("test_counter", "test").unwrap());
+
+        let dequeue_total = register_counter!(
+            format!("kairosdb_queue_dequeue_total{}", suffix),
+            "Total number of data points dequeued"
+        ).unwrap_or_else(|_| Counter::new("test_counter2", "test").unwrap());
+
+        let enqueue_errors = register_counter!(
+            format!("kairosdb_queue_enqueue_errors{}", suffix),
+            "Total number of enqueue errors"
+        ).unwrap_or_else(|_| Counter::new("test_counter3", "test").unwrap());
+
+        let dequeue_errors = register_counter!(
+            format!("kairosdb_queue_dequeue_errors{}", suffix),
+            "Total number of dequeue errors"
+        ).unwrap_or_else(|_| Counter::new("test_counter4", "test").unwrap());
+
+        let current_size = register_gauge!(
+            format!("kairosdb_queue_size_current{}", suffix),
+            "Current number of items in persistent queue"
+        ).unwrap_or_else(|_| Gauge::new("test_gauge", "test").unwrap());
+
+        let oldest_entry_age_seconds = register_gauge!(
+            format!("kairosdb_queue_oldest_entry_age_seconds{}", suffix),
+            "Age in seconds of the oldest entry in the queue"
+        ).unwrap_or_else(|_| Gauge::new("test_gauge2", "test").unwrap());
+
+        let disk_usage_bytes = register_gauge!(
+            format!("kairosdb_queue_disk_usage_bytes{}", suffix),
+            "Disk space used by persistent queue in bytes"
+        ).unwrap_or_else(|_| Gauge::new("test_gauge3", "test").unwrap());
+
+        let enqueue_duration = register_histogram!(
+            format!("kairosdb_queue_enqueue_duration_seconds{}", suffix),
+            "Time spent enqueuing data points"
+        ).unwrap_or_else(|_| {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                "test_histogram", "test"
+            )).unwrap()
+        });
+
+        let dequeue_duration = register_histogram!(
+            format!("kairosdb_queue_dequeue_duration_seconds{}", suffix),
+            "Time spent dequeuing batches"
+        ).unwrap_or_else(|_| {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                "test_histogram2", "test"
+            )).unwrap()
+        });
+
+        let batch_size = register_histogram!(
+            format!("kairosdb_queue_batch_size{}", suffix),
+            "Size of dequeued batches"
+        ).unwrap_or_else(|_| {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                "test_histogram3", "test"
+            )).unwrap()
+        });
+
+        Ok(Self {
+            enqueue_total,
+            dequeue_total,
+            enqueue_errors,
+            dequeue_errors,
+            current_size,
+            oldest_entry_age_seconds,
+            disk_usage_bytes,
+            enqueue_duration,
+            dequeue_duration,
+            batch_size,
+        })
+    }
+}
+
 /// Persistent queue for data points using Fjall storage
 pub struct PersistentQueue {
     keyspace: Arc<Keyspace>,
     partition: PartitionHandle,
     queue_size: AtomicU64,
+    metrics: QueueMetrics,
+    data_dir: std::path::PathBuf,
 }
 
 impl PersistentQueue {
@@ -69,40 +182,63 @@ impl PersistentQueue {
             .open_partition("datapoint_queue", PartitionCreateOptions::default())
             .context("Failed to open queue partition")?;
             
+        // Initialize metrics
+        let metrics = QueueMetrics::new()
+            .context("Failed to initialize queue metrics")?;
+        
         // Count existing entries for queue size metric
         let queue_size = partition.iter().count() as u64;
         info!("Persistent queue initialized with {} existing entries", queue_size);
+        
+        // Set initial metrics
+        metrics.current_size.set(queue_size as f64);
         
         Ok(Self {
             keyspace: Arc::new(keyspace),
             partition,
             queue_size: AtomicU64::new(queue_size),
+            metrics,
+            data_dir: data_dir.to_path_buf(),
         })
     }
     
     /// Enqueue a data point (write-ahead log)
     pub fn enqueue(&self, data_point: DataPoint) -> KairosResult<()> {
+        let start_time = Instant::now();
+        
         let entry = QueueEntry::new(data_point);
         let key = entry.queue_key();
         
         // Serialize the entry
         let value = bincode::serialize(&entry)
-            .map_err(|e| KairosError::internal(format!("Failed to serialize queue entry: {}", e)))?;
+            .map_err(|e| {
+                self.metrics.enqueue_errors.inc();
+                KairosError::internal(format!("Failed to serialize queue entry: {}", e))
+            })?;
             
         // Write to persistent storage
         self.partition.insert(&key, value)
-            .map_err(|e| KairosError::internal(format!("Failed to write to persistent queue: {}", e)))?;
+            .map_err(|e| {
+                self.metrics.enqueue_errors.inc();
+                KairosError::internal(format!("Failed to write to persistent queue: {}", e))
+            })?;
             
-        self.queue_size.fetch_add(1, Ordering::Relaxed);
-        trace!("Enqueued data point with key: {}", key);
+        // Update metrics
+        let new_size = self.queue_size.fetch_add(1, Ordering::Relaxed) + 1;
+        self.metrics.enqueue_total.inc();
+        self.metrics.current_size.set(new_size as f64);
+        self.metrics.enqueue_duration.observe(start_time.elapsed().as_secs_f64());
         
+        trace!("Enqueued data point with key: {}", key);
         Ok(())
     }
     
     /// Dequeue a batch of data points for processing
     pub fn dequeue_batch(&self, max_size: usize) -> KairosResult<Option<DataPointBatch>> {
+        let start_time = Instant::now();
         let mut batch = DataPointBatch::new();
         let mut keys_to_remove = Vec::new();
+        let mut oldest_timestamp: Option<u64> = None;
         
         // Read entries in order
         let mut count = 0;
@@ -112,29 +248,65 @@ impl PersistentQueue {
             }
             
             let (key, value) = item
-                .map_err(|e| KairosError::internal(format!("Failed to read from queue: {}", e)))?;
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to read from queue: {}", e))
+                })?;
                 
             // Deserialize the entry
             let entry: QueueEntry = bincode::deserialize(&value)
-                .map_err(|e| KairosError::internal(format!("Failed to deserialize queue entry: {}", e)))?;
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to deserialize queue entry: {}", e))
+                })?;
+                
+            // Track oldest entry for age metric
+            if oldest_timestamp.is_none() {
+                oldest_timestamp = Some(entry.timestamp_ns);
+            }
                 
             // Add to batch
             batch.add_point(entry.data_point)
-                .map_err(|e| KairosError::internal(format!("Failed to add point to batch: {}", e)))?;
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to add point to batch: {}", e))
+                })?;
                 
             keys_to_remove.push(key);
             count += 1;
         }
         
         if batch.points.is_empty() {
+            // Update oldest entry age even when queue is empty
+            self.metrics.oldest_entry_age_seconds.set(0.0);
             return Ok(None);
         }
         
         // Remove processed entries
+        let items_removed = keys_to_remove.len();
         for key in keys_to_remove {
             self.partition.remove(key)
-                .map_err(|e| KairosError::internal(format!("Failed to remove processed entry: {}", e)))?;
-            self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to remove processed entry: {}", e))
+                })?;
+        }
+        
+        // Update metrics
+        let new_size = self.queue_size.fetch_sub(items_removed as u64, Ordering::Relaxed) - items_removed as u64;
+        self.metrics.dequeue_total.inc_by(items_removed as f64);
+        self.metrics.current_size.set(new_size as f64);
+        self.metrics.dequeue_duration.observe(start_time.elapsed().as_secs_f64());
+        self.metrics.batch_size.observe(batch.points.len() as f64);
+        
+        // Update oldest entry age if we have one
+        if let Some(oldest_ns) = oldest_timestamp {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let age_seconds = (now_ns.saturating_sub(oldest_ns)) as f64 / 1_000_000_000.0;
+            self.metrics.oldest_entry_age_seconds.set(age_seconds);
         }
         
         debug!("Dequeued batch of {} data points", batch.points.len());
@@ -156,6 +328,49 @@ impl PersistentQueue {
         // Fjall handles this automatically with its LSM structure
         Ok(())
     }
+    
+    /// Get queue metrics reference
+    pub fn metrics(&self) -> &QueueMetrics {
+        &self.metrics
+    }
+    
+    /// Get disk usage in bytes for the queue data directory
+    pub fn get_disk_usage_bytes(&self) -> Result<u64> {
+        let mut total_size = 0u64;
+        
+        // Recursively calculate size of all files in the data directory
+        for entry in std::fs::read_dir(&self.data_dir)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            
+            if metadata.is_file() {
+                total_size += metadata.len();
+            } else if metadata.is_dir() {
+                // Recursively calculate subdirectory sizes
+                total_size += Self::calculate_dir_size(&entry.path())?;
+            }
+        }
+        
+        Ok(total_size)
+    }
+    
+    /// Helper to recursively calculate directory size
+    fn calculate_dir_size(dir: &Path) -> Result<u64> {
+        let mut size = 0u64;
+        
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            
+            if metadata.is_file() {
+                size += metadata.len();
+            } else if metadata.is_dir() {
+                size += Self::calculate_dir_size(&entry.path())?;
+            }
+        }
+        
+        Ok(size)
+    }
 }
 
 #[cfg(test)]
@@ -166,8 +381,12 @@ mod tests {
     
     #[tokio::test]
     async fn test_persistent_queue_basic_operations() {
+        use std::sync::atomic::AtomicU32;
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        
         let temp_dir = TempDir::new().unwrap();
-        let queue = PersistentQueue::new(temp_dir.path()).await.unwrap();
+        let queue = PersistentQueue::new(temp_dir.path().join(format!("test_{}", id))).await.unwrap();
         
         // Test enqueue
         let data_point = DataPoint::new_long("test.metric", Timestamp::now(), 42);
@@ -189,8 +408,12 @@ mod tests {
     
     #[tokio::test]
     async fn test_persistent_queue_ordering() {
+        use std::sync::atomic::AtomicU32;
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        
         let temp_dir = TempDir::new().unwrap();
-        let queue = PersistentQueue::new(temp_dir.path()).await.unwrap();
+        let queue = PersistentQueue::new(temp_dir.path().join(format!("test_order_{}", id))).await.unwrap();
         
         // Enqueue multiple points
         for i in 0..5 {

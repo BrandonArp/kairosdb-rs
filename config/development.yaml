@@ -20,7 +20,8 @@ ingestion:
   max_batch_size: 10000
   batch_timeout_ms: 1000
   worker_threads: 4
-  max_queue_size: 100000
+  max_queue_size: 100000000  # 100M items - disk-backed queue with Fjall
+  max_queue_disk_bytes: 21474836480  # 20GB maximum disk usage for queue
   enable_validation: true
   max_request_size: 16777216  # 16MB
   performance_mode: "parse_and_store_mode"  # Options: no_parse_mode, parse_only_mode, parse_and_store_mode

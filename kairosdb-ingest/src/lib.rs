@@ -9,6 +9,7 @@ pub mod cassandra;
 // pub mod cassandra_client;  // Temporarily disabled - using single_writer_client
 pub mod config;
 pub mod handlers;
+pub mod http_metrics;
 pub mod ingestion;
 pub mod json_parser;
 pub mod metrics;
@@ -26,6 +27,7 @@ pub use json_parser::JsonParser;
 pub struct AppState {
     pub ingestion_service: std::sync::Arc<IngestionService>,
     pub config: std::sync::Arc<IngestConfig>,
+    pub http_metrics: std::sync::Arc<crate::http_metrics::HttpMetrics>,
 }
 
 /// Create the main application router
