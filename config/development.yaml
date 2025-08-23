@@ -10,7 +10,8 @@ cassandra:
   keyspace: "kairosdb"
   connection_timeout_ms: 5000
   query_timeout_ms: 10000
-  max_connections: 10
+  max_connections: 20
+  max_concurrent_requests_per_connection: 100
   replication_factor: 1
   cassandra_health_query: "SELECT now() FROM system.local"
 
