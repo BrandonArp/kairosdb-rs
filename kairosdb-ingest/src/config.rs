@@ -3,6 +3,18 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
 
+/// Performance testing modes for isolating pipeline stages
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceMode {
+    /// Skip all processing - just return success immediately
+    NoParseMode,
+    /// Parse and validate JSON but don't store to Cassandra
+    ParseOnlyMode,
+    /// Full pipeline - parse and store to Cassandra (normal mode)
+    ParseAndStoreMode,
+}
+
 /// Configuration for the ingest service
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestConfig {
@@ -76,6 +88,9 @@ pub struct IngestionConfig {
 
     /// Maximum request size in bytes
     pub max_request_size: usize,
+
+    /// Performance testing mode
+    pub performance_mode: PerformanceMode,
 }
 
 /// Metrics and monitoring configuration
@@ -179,6 +194,7 @@ impl Default for IngestionConfig {
             worker_threads: 4,
             enable_validation: true,
             max_request_size: 100 * 1024 * 1024, // 100MB
+            performance_mode: PerformanceMode::ParseAndStoreMode, // Default to normal operation
         }
     }
 }
@@ -269,6 +285,15 @@ impl IngestConfig {
 
         if let Ok(enable_validation) = env::var("KAIROSDB_ENABLE_VALIDATION") {
             config.ingestion.enable_validation = enable_validation.parse()?;
+        }
+
+        if let Ok(perf_mode) = env::var("KAIROSDB_PERFORMANCE_MODE") {
+            config.ingestion.performance_mode = match perf_mode.to_lowercase().as_str() {
+                "no_parse" => PerformanceMode::NoParseMode,
+                "parse_only" => PerformanceMode::ParseOnlyMode,
+                "parse_and_store" => PerformanceMode::ParseAndStoreMode,
+                _ => return Err(anyhow::anyhow!("Invalid performance mode: {}. Valid options: no_parse, parse_only, parse_and_store", perf_mode)),
+            };
         }
 
         // Performance configuration

@@ -15,14 +15,24 @@ docker_build_with_restart(
   entrypoint=['/app/kairosdb-ingest'],
   dockerfile='Dockerfile.dev',
   target='ingest',
+  only=[
+    './config',
+    './target/release/kairosdb-ingest',
+    'Cargo.toml',
+    'Cargo.lock',
+    'kairosdb-ingest/src',
+    'kairosdb-core/src',
+    'kairosdb-ingest/Cargo.toml',
+    'kairosdb-core/Cargo.toml',
+  ],
   live_update=[
-    sync('./target/debug/kairosdb-ingest', '/app/kairosdb-ingest'),
+    sync('./target/release/kairosdb-ingest', '/app/kairosdb-ingest'),
     sync('./config/development.yaml', '/app/config/development.yaml'),
   ],
 )
 
 # Local resource to build the Rust binary
-local_resource('build-kairosdb-ingest', 'cargo build --bin kairosdb-ingest',
+local_resource('build-kairosdb-ingest', 'cargo build --release --bin kairosdb-ingest',
   deps=[
     'kairosdb-ingest/src', 
     'kairosdb-core/src', 
@@ -88,14 +98,24 @@ docker_build_with_restart(
   entrypoint=['/app/kairosdb-query'],
   dockerfile='Dockerfile.dev',
   target='query',
+  only=[
+    './config',
+    './target/release/kairosdb-query',
+    'Cargo.toml',
+    'Cargo.lock',
+    'kairosdb-query/src',
+    'kairosdb-core/src',
+    'kairosdb-query/Cargo.toml',
+    'kairosdb-core/Cargo.toml',
+  ],
   live_update=[
-    sync('./target/debug/kairosdb-query', '/app/kairosdb-query'),
+    sync('./target/release/kairosdb-query', '/app/kairosdb-query'),
     sync('./config/development.yaml', '/app/config/development.yaml'),
   ],
 )
 
 # Local resource to build the Rust query binary
-local_resource('build-kairosdb-query', 'cargo build --bin kairosdb-query',
+local_resource('build-kairosdb-query', 'cargo build --release --bin kairosdb-query',
   deps=[
     'kairosdb-query/src', 
     'kairosdb-core/src', 

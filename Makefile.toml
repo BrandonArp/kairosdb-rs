@@ -220,6 +220,18 @@ cwd = "kairosdb-query"
 command = "cargo"
 args = ["run", "--bin", "kairosdb-query"]
 
+[tasks.run-ingest-release]
+description = "Run the ingest service (release mode)"
+cwd = "kairosdb-ingest"
+command = "cargo"
+args = ["run", "--release", "--bin", "kairosdb-ingest"]
+
+[tasks.run-query-release]
+description = "Run the query service (release mode)"
+cwd = "kairosdb-query"
+command = "cargo"
+args = ["run", "--release", "--bin", "kairosdb-query"]
+
 [tasks.run-datastore-demo]
 description = "Run the datastore demo"
 cwd = "kairosdb-core"
@@ -244,35 +256,35 @@ args = ["bench", "--bench", "ingestion"]
 description = "Run performance tests (requires Tilt environment)"
 script = '''
 echo "🚀 Running performance test suite..."
-cd tests && cargo run --bin perf_test -- --url http://localhost:8081 suite
+cd tests && cargo run --release --bin perf_test -- --url http://localhost:8081 suite
 '''
 
 [tasks.perf-test-small]
 description = "Run small performance test (quick validation)"
 script = '''
 echo "🏃 Running small performance test..."
-cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run small_scale
+cd tests && cargo run --release --bin perf_test -- --url http://localhost:8081 run small_scale
 '''
 
 [tasks.perf-test-medium]
 description = "Run medium performance test (CI-appropriate)"
 script = '''
 echo "🏃 Running medium performance test..."
-cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run medium_scale
+cd tests && cargo run --release --bin perf_test -- --url http://localhost:8081 run medium_scale
 '''
 
 [tasks.perf-test-large]
 description = "Run large performance test (load testing)"
 script = '''
 echo "🚀 Running large performance test..."
-cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run large_scale
+cd tests && cargo run --release --bin perf_test -- --url http://localhost:8081 run large_scale
 '''
 
 [tasks.perf-test-stress]
 description = "Run stress test (find breaking points)"
 script = '''
 echo "💪 Running stress performance test..."
-cd tests && cargo run --bin perf_test -- --url http://localhost:8081 run stress_test
+cd tests && cargo run --release --bin perf_test -- --url http://localhost:8081 run stress_test
 '''
 
 [tasks.perf-monitor]
@@ -337,7 +349,9 @@ echo "  ci-full         - Run CI with integration tests (requires Tilt)"
 echo ""
 echo "🚀 Services:"
 echo "  run-ingest      - Run the ingest service"
+echo "  run-ingest-release - Run the ingest service (release mode)"
 echo "  run-query       - Run the query service"
+echo "  run-query-release - Run the query service (release mode)"
 echo "  run-datastore-demo - Run the datastore demo"
 echo ""
 echo "📊 Benchmarking:"

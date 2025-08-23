@@ -25,6 +25,10 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Set ingestion service performance mode
+    #[arg(long, value_parser = ["no_parse", "parse_only", "parse_and_store"])]
+    perf_mode: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +62,10 @@ enum Commands {
         /// Override duration in seconds
         #[arg(long)]
         duration: Option<u64>,
+
+        /// Override performance mode
+        #[arg(long, value_parser = ["no_parse", "parse_only", "parse_and_store"])]
+        performance_mode: Option<String>,
     },
 
     /// Run all predefined test scenarios
@@ -141,6 +149,7 @@ async fn main() -> Result<()> {
             batch_size,
             concurrent,
             duration,
+            performance_mode,
         } => {
             run_single_scenario(
                 &scenario, 
@@ -154,6 +163,7 @@ async fn main() -> Result<()> {
                     batch_size,
                     concurrent_batches: concurrent,
                     duration_seconds: duration,
+                    performance_mode,
                     ..Default::default()
                 }
             ).await

@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use kairosdb_core::{datapoint::DataPointBatch, error::KairosResult};
+use tracing::trace;
 use std::{
     collections::HashMap,
     sync::{
@@ -117,7 +118,7 @@ impl CassandraClient for MockCassandraClient {
             return Ok(());
         }
 
-        debug!("Mock: Writing batch of {} data points", batch.points.len());
+        trace!("Mock: Writing batch of {} data points", batch.points.len());
 
         let mut storage = self.storage.lock().unwrap();
 

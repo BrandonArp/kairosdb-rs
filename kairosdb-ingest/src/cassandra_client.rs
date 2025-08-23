@@ -446,7 +446,7 @@ impl CassandraClient for CassandraClientImpl {
             return Ok(());
         }
 
-        debug!("Writing batch of {} data points", batch.points.len());
+        trace!("Writing batch of {} data points", batch.points.len());
         self.stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
@@ -464,7 +464,7 @@ impl CassandraClient for CassandraClientImpl {
         // Write indexes
         self.write_indexes(batch).await?;
 
-        debug!("Batch written successfully");
+        trace!("Batch written successfully");
         Ok(())
     }
 

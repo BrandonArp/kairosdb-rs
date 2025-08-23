@@ -12,10 +12,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 10,
             histogram_samples_per_datapoint: (10, 100),
             batch_size: 25,
-            concurrent_batches: 2,
+            concurrent_batches: 25, // Higher concurrency for small scale
             duration_seconds: 30,
             tag_cardinality_limit: 5,
             warmup_seconds: 5,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -27,10 +29,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 25,
             histogram_samples_per_datapoint: (50, 500),
             batch_size: 100,
-            concurrent_batches: 5,
+            concurrent_batches: 50, // Default high concurrency
             duration_seconds: 120,
             tag_cardinality_limit: 15,
             warmup_seconds: 10,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -42,10 +46,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 50,
             histogram_samples_per_datapoint: (100, 1000),
             batch_size: 200,
-            concurrent_batches: 10,
+            concurrent_batches: 75, // Higher load for large scale
             duration_seconds: 300,
             tag_cardinality_limit: 25,
             warmup_seconds: 15,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -57,10 +63,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 100,
             histogram_samples_per_datapoint: (500, 2000),
             batch_size: 500,
-            concurrent_batches: 20,
+            concurrent_batches: 100, // Maximum load for stress test
             duration_seconds: 600,
             tag_cardinality_limit: 50,
             warmup_seconds: 30,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -72,10 +80,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 1000,
             histogram_samples_per_datapoint: (10, 100),
             batch_size: 50,
-            concurrent_batches: 3,
+            concurrent_batches: 30, // Moderate concurrency for high cardinality
             duration_seconds: 180,
             tag_cardinality_limit: 100,
             warmup_seconds: 10,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -87,10 +97,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 10,
             histogram_samples_per_datapoint: (5, 50),
             batch_size: 10,
-            concurrent_batches: 50,
+            concurrent_batches: 75, // High frequency needs high concurrency
             duration_seconds: 240,
             tag_cardinality_limit: 8,
             warmup_seconds: 10,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -102,10 +114,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 20,
             histogram_samples_per_datapoint: (100, 1000),
             batch_size: 1000,
-            concurrent_batches: 2,
+            concurrent_batches: 20, // Lower concurrency for large batches
             duration_seconds: 180,
             tag_cardinality_limit: 15,
             warmup_seconds: 15,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -117,10 +131,12 @@ impl TestScenarios {
             tag_combinations_per_metric: 30,
             histogram_samples_per_datapoint: (1000, 5000),
             batch_size: 100,
-            concurrent_batches: 8,
+            concurrent_batches: 40, // Moderate concurrency for memory pressure
             duration_seconds: 300,
             tag_cardinality_limit: 20,
             warmup_seconds: 20,
+            performance_mode: None, // Use server default
+            producer_tasks: 8, // Multiple producers for better generation throughput
         }
     }
 
@@ -198,6 +214,9 @@ impl TestScenarios {
         if let Some(warmup) = overrides.warmup_seconds {
             config.warmup_seconds = warmup;
         }
+        if let Some(perf_mode) = overrides.performance_mode {
+            config.performance_mode = Some(perf_mode);
+        }
 
         Some(config)
     }
@@ -215,6 +234,7 @@ pub struct ScenarioOverrides {
     pub duration_seconds: Option<u64>,
     pub tag_cardinality_limit: Option<usize>,
     pub warmup_seconds: Option<u64>,
+    pub performance_mode: Option<String>,
 }
 
 /// Performance test suite runner for running multiple scenarios

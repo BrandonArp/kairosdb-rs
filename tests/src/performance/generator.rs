@@ -17,7 +17,6 @@ pub struct MetricDataGenerator {
     config: GeneratorConfig,
     metric_templates: Vec<MetricTemplate>,
     tag_pools: TagPools,
-    rng: ThreadRng,
 }
 
 #[derive(Debug, Clone)]
@@ -89,11 +88,15 @@ impl MetricDataGenerator {
             config,
             metric_templates: Vec::new(),
             tag_pools: TagPools::new(),
-            rng: thread_rng(),
         };
         
         generator.generate_metric_templates();
         generator
+    }
+    
+    /// Get the configuration (for cloning to other tasks)
+    pub fn get_config(&self) -> &GeneratorConfig {
+        &self.config
     }
 
     fn generate_metric_templates(&mut self) {
@@ -146,6 +149,7 @@ impl MetricDataGenerator {
     }
 
     fn generate_tag_combinations_for_metric(&mut self, metric_name: &str) -> Vec<HashMap<String, String>> {
+        let mut rng = thread_rng();
         let mut combinations = Vec::new();
         let pools = &self.tag_pools;
 
@@ -165,57 +169,57 @@ impl MetricDataGenerator {
             
             match tag_strategy {
                 TagStrategy::Http => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("method".to_string(), pools.methods.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("endpoint".to_string(), pools.endpoints.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("status_code".to_string(), pools.status_codes.choose(&mut self.rng).unwrap().clone());
-                    if self.rng.gen_bool(0.7) {
-                        tags.insert("region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("method".to_string(), pools.methods.choose(&mut rng).unwrap().clone());
+                    tags.insert("endpoint".to_string(), pools.endpoints.choose(&mut rng).unwrap().clone());
+                    tags.insert("status_code".to_string(), pools.status_codes.choose(&mut rng).unwrap().clone());
+                    if rng.gen_bool(0.7) {
+                        tags.insert("region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
                     }
                 }
                 TagStrategy::Database => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("table".to_string(), format!("table_{}", self.rng.gen_range(1..=20)));
-                    tags.insert("operation".to_string(), ["SELECT", "INSERT", "UPDATE", "DELETE"].choose(&mut self.rng).unwrap().to_string());
-                    if self.rng.gen_bool(0.8) {
-                        tags.insert("region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("table".to_string(), format!("table_{}", rng.gen_range(1..=20)));
+                    tags.insert("operation".to_string(), ["SELECT", "INSERT", "UPDATE", "DELETE"].choose(&mut rng).unwrap().to_string());
+                    if rng.gen_bool(0.8) {
+                        tags.insert("region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
                     }
                 }
                 TagStrategy::System => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("instance".to_string(), pools.instances.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
-                    if self.rng.gen_bool(0.6) {
-                        tags.insert("version".to_string(), pools.versions.choose(&mut self.rng).unwrap().clone());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("instance".to_string(), pools.instances.choose(&mut rng).unwrap().clone());
+                    tags.insert("region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
+                    if rng.gen_bool(0.6) {
+                        tags.insert("version".to_string(), pools.versions.choose(&mut rng).unwrap().clone());
                     }
                 }
                 TagStrategy::Cache => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("cache_type".to_string(), ["redis", "memcached", "local"].choose(&mut self.rng).unwrap().to_string());
-                    tags.insert("cache_level".to_string(), ["l1", "l2", "l3"].choose(&mut self.rng).unwrap().to_string());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("cache_type".to_string(), ["redis", "memcached", "local"].choose(&mut rng).unwrap().to_string());
+                    tags.insert("cache_level".to_string(), ["l1", "l2", "l3"].choose(&mut rng).unwrap().to_string());
                 }
                 TagStrategy::Queue => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("queue_name".to_string(), format!("queue_{}", self.rng.gen_range(1..=10)));
-                    tags.insert("queue_type".to_string(), ["kafka", "rabbitmq", "sqs"].choose(&mut self.rng).unwrap().to_string());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("queue_name".to_string(), format!("queue_{}", rng.gen_range(1..=10)));
+                    tags.insert("queue_type".to_string(), ["kafka", "rabbitmq", "sqs"].choose(&mut rng).unwrap().to_string());
                 }
                 TagStrategy::Network => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("source_region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("target_region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("protocol".to_string(), ["http", "grpc", "tcp", "udp"].choose(&mut self.rng).unwrap().to_string());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    tags.insert("source_region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
+                    tags.insert("target_region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
+                    tags.insert("protocol".to_string(), ["http", "grpc", "tcp", "udp"].choose(&mut rng).unwrap().to_string());
                 }
                 TagStrategy::Generic => {
-                    tags.insert("service".to_string(), pools.services.choose(&mut self.rng).unwrap().clone());
-                    tags.insert("environment".to_string(), pools.environments.choose(&mut self.rng).unwrap().clone());
-                    if self.rng.gen_bool(0.7) {
-                        tags.insert("region".to_string(), pools.regions.choose(&mut self.rng).unwrap().clone());
+                    tags.insert("service".to_string(), pools.services.choose(&mut rng).unwrap().clone());
+                    tags.insert("environment".to_string(), pools.environments.choose(&mut rng).unwrap().clone());
+                    if rng.gen_bool(0.7) {
+                        tags.insert("region".to_string(), pools.regions.choose(&mut rng).unwrap().clone());
                     }
                 }
             }
@@ -231,8 +235,12 @@ impl MetricDataGenerator {
         let now = chrono::Utc::now().timestamp_millis() as u64;
 
         for _ in 0..batch_size {
-            let template = &self.metric_templates[thread_rng().gen_range(0..self.metric_templates.len())];
-            let tag_combo = &template.tag_combinations[thread_rng().gen_range(0..template.tag_combinations.len())];
+            let (template, tag_combo) = {
+                let mut rng = thread_rng(); // Create fresh RNG for each iteration
+                let template = &self.metric_templates[rng.gen_range(0..self.metric_templates.len())];
+                let tag_combo = &template.tag_combinations[rng.gen_range(0..template.tag_combinations.len())];
+                (template, tag_combo)
+            }; // RNG goes out of scope here
             
             let datapoint = self.generate_datapoint(template, tag_combo, now).await;
             batch.push(datapoint);

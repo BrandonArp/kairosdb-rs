@@ -5,7 +5,7 @@
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Json, Response},
@@ -18,10 +18,19 @@ use std::{io::Read, time::Instant};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
+    config::PerformanceMode,
     ingestion::HealthStatus,
     json_parser::{ErrorResponse, IngestResponse, JsonParser},
     AppState,
 };
+
+/// Query parameters for performance testing
+#[derive(serde::Deserialize)]
+pub struct PerfParams {
+    /// Override performance mode for this request
+    #[serde(default)]
+    perf_mode: Option<String>,
+}
 
 /// Health check endpoint compatible with KairosDB format
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -117,11 +126,42 @@ pub async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoRes
 /// Main data ingestion endpoint - compatible with Java KairosDB
 pub async fn ingest_handler(
     State(state): State<AppState>,
+    Query(params): Query<PerfParams>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
     let start_time = Instant::now();
     trace!("Received ingestion request, size: {} bytes", body.len());
+
+    // Determine performance mode (query param overrides config)
+    let perf_mode = if let Some(mode_str) = &params.perf_mode {
+        match mode_str.to_lowercase().as_str() {
+            "no_parse" => PerformanceMode::NoParseMode,
+            "parse_only" => PerformanceMode::ParseOnlyMode,
+            "parse_and_store" => PerformanceMode::ParseAndStoreMode,
+            _ => {
+                let error_response = ErrorResponse::from_error(&format!("Invalid perf_mode: {}. Valid options: no_parse, parse_only, parse_and_store", mode_str));
+                return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
+            }
+        }
+    } else {
+        state.config.ingestion.performance_mode.clone()
+    };
+
+    // Handle performance modes for testing
+    match perf_mode {
+        PerformanceMode::NoParseMode => {
+            // Skip all processing - just return success immediately
+            let processing_time = start_time.elapsed().as_millis() as u64;
+            let response = IngestResponse {
+                datapoints_ingested: 1, // Fake count since we didn't parse
+                ingest_time: processing_time,
+                warnings: vec!["Performance mode: no_parse - skipped all processing".to_string()],
+            };
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        _ => {} // Continue with normal processing for other modes
+    }
 
     // Handle gzipped content if present
     let json_str = if headers
@@ -161,11 +201,31 @@ pub async fn ingest_handler(
     let batch_size = batch.len();
     trace!("Parsed {} data points", batch_size);
 
-    // Submit batch for ingestion
+    // Handle parse_only mode - skip Cassandra storage
+    if perf_mode == PerformanceMode::ParseOnlyMode {
+        let processing_time = start_time.elapsed().as_millis() as u64;
+        trace!(
+            "Parse-only mode: Successfully parsed {} data points in {}ms",
+            batch_size, processing_time
+        );
+
+        let mut response_warnings = warnings;
+        response_warnings.push("Performance mode: parse_only - skipped Cassandra storage".to_string());
+
+        let response = IngestResponse {
+            datapoints_ingested: batch_size,
+            ingest_time: processing_time,
+            warnings: response_warnings,
+        };
+
+        return (StatusCode::OK, Json(response)).into_response();
+    }
+
+    // Submit batch for ingestion (normal mode)
     match state.ingestion_service.ingest_batch(batch).await {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
-            debug!(
+            trace!(
                 "Successfully ingested {} data points in {}ms",
                 batch_size, processing_time
             );
@@ -194,8 +254,38 @@ pub async fn ingest_handler(
 }
 
 /// Handle gzipped ingestion requests
-pub async fn ingest_gzip_handler(State(state): State<AppState>, body: Body) -> impl IntoResponse {
+pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Query<PerfParams>, body: Body) -> impl IntoResponse {
     let start_time = Instant::now();
+
+    // Determine performance mode (query param overrides config)
+    let perf_mode = if let Some(mode_str) = &params.perf_mode {
+        match mode_str.to_lowercase().as_str() {
+            "no_parse" => PerformanceMode::NoParseMode,
+            "parse_only" => PerformanceMode::ParseOnlyMode,
+            "parse_and_store" => PerformanceMode::ParseAndStoreMode,
+            _ => {
+                let error_response = ErrorResponse::from_error(&format!("Invalid perf_mode: {}. Valid options: no_parse, parse_only, parse_and_store", mode_str));
+                return (StatusCode::BAD_REQUEST, Json(error_response)).into_response();
+            }
+        }
+    } else {
+        state.config.ingestion.performance_mode.clone()
+    };
+
+    // Handle performance modes for testing
+    match perf_mode {
+        PerformanceMode::NoParseMode => {
+            // Skip all processing - just return success immediately
+            let processing_time = start_time.elapsed().as_millis() as u64;
+            let response = IngestResponse {
+                datapoints_ingested: 1, // Fake count since we didn't parse
+                ingest_time: processing_time,
+                warnings: vec!["Performance mode: no_parse - skipped all processing (gzip)".to_string()],
+            };
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+        _ => {} // Continue with normal processing for other modes
+    }
 
     // Read the gzipped body
     let body_bytes = match axum::body::to_bytes(body, usize::MAX).await {
@@ -241,10 +331,30 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, body: Body) -> i
 
     let batch_size = batch.len();
 
+    // Handle parse_only mode - skip Cassandra storage
+    if perf_mode == PerformanceMode::ParseOnlyMode {
+        let processing_time = start_time.elapsed().as_millis() as u64;
+        trace!(
+            "Parse-only mode: Successfully parsed {} data points from gzipped request in {}ms",
+            batch_size, processing_time
+        );
+
+        let mut response_warnings = warnings;
+        response_warnings.push("Performance mode: parse_only - skipped Cassandra storage (gzip)".to_string());
+
+        let response = IngestResponse {
+            datapoints_ingested: batch_size,
+            ingest_time: processing_time,
+            warnings: response_warnings,
+        };
+
+        return (StatusCode::OK, Json(response)).into_response();
+    }
+
     match state.ingestion_service.ingest_batch(batch).await {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
-            debug!(
+            trace!(
                 "Successfully ingested {} data points from gzipped request in {}ms",
                 batch_size, processing_time
             );

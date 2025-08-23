@@ -36,7 +36,7 @@ USER kairosdb
 FROM base AS ingest
 
 # Copy binary (will be built locally and synced by Tilt)
-COPY --chown=kairosdb:kairosdb target/debug/kairosdb-ingest /app/kairosdb-ingest
+COPY --chown=kairosdb:kairosdb target/release/kairosdb-ingest /app/kairosdb-ingest
 
 # Add metadata labels
 LABEL org.opencontainers.image.title="KairosDB Ingest Service (Development)" \
@@ -51,7 +51,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/app/kairosdb-ingest"]
 FROM base AS query
 
 # Copy binary (will be built locally and synced by Tilt)
-COPY --chown=kairosdb:kairosdb target/debug/kairosdb-query /app/kairosdb-query
+COPY --chown=kairosdb:kairosdb target/release/kairosdb-query /app/kairosdb-query
 
 # Add metadata labels
 LABEL org.opencontainers.image.title="KairosDB Query Service (Development)" \
