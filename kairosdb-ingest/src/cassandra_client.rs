@@ -4,6 +4,7 @@
 //! with proper error handling, connection management, and KairosDB schema compatibility.
 
 use async_trait::async_trait;
+use tokio::sync::{mpsc, oneshot};
 use futures::future::join_all;
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
@@ -34,13 +35,29 @@ use crate::bloom_manager::BloomManager;
 use crate::cassandra::{CassandraClient, CassandraStats};
 use crate::config::CassandraConfig;
 
-/// Production Cassandra client implementation using ScyllaDB Rust driver
+/// Write command for the single writer task
+#[derive(Debug)]
+enum WriteCommand {
+    Batch {
+        batch: DataPointBatch,
+        response_tx: oneshot::Sender<KairosResult<()>>,
+    },
+    Shutdown,
+}
+
+/// Production Cassandra client implementation using single writer task
 #[derive(Clone)]
 pub struct CassandraClientImpl {
-    session: Arc<Session>,
-    config: Arc<CassandraConfig>,
+    write_tx: mpsc::UnboundedSender<WriteCommand>,
     stats: Arc<CassandraClientStats>,
-    bloom_manager: Arc<BloomManager>,
+}
+
+/// Internal writer task state (not shared, no Arc needed!)
+struct WriterTaskState {
+    session: Session,
+    config: Arc<CassandraConfig>,
+    bloom_manager: BloomManager,
+    stats: Arc<CassandraClientStats>,
     // Prepared statements for performance
     insert_data_point: Option<PreparedStatement>,
     insert_row_key_index: Option<PreparedStatement>,

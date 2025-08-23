@@ -24,9 +24,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
-    cassandra_client::CassandraClientImpl,
     config::IngestConfig,
     mock_client::MockCassandraClient,
+    single_writer_client::SingleWriterCassandraClient,
 };
 
 /// Comprehensive metrics for monitoring ingestion service
@@ -96,9 +96,9 @@ impl IngestionService {
             Arc::new(MockCassandraClient::new())
         } else {
             info!("Using production Cassandra client");
-            let mut client = CassandraClientImpl::new(config.cassandra.clone())
+            let client = SingleWriterCassandraClient::new(config.cassandra.clone())
                 .await
-                .context("Failed to initialize production Cassandra client")?;
+                .context("Failed to initialize single writer Cassandra client")?;
 
             // Ensure schema exists
             info!("Ensuring KairosDB schema exists");
@@ -107,12 +107,8 @@ impl IngestionService {
                 .await
                 .context("Failed to ensure Cassandra schema")?;
 
-            // Prepare statements after schema is ready
-            info!("Preparing Cassandra statements");
-            client
-                .prepare_statements()
-                .await
-                .context("Failed to prepare Cassandra statements")?;
+            // Single writer client handles statement preparation internally
+            info!("Single writer Cassandra client ready");
 
             Arc::new(client)
         };

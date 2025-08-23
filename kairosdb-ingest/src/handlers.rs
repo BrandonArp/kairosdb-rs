@@ -17,6 +17,9 @@ use serde_json::json;
 use std::{io::Read, time::Instant};
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(feature = "profiling")]
+use pprof;
+
 use crate::{
     config::PerformanceMode,
     ingestion::HealthStatus,
@@ -443,6 +446,77 @@ pub async fn request_size_middleware(headers: HeaderMap, request: Request, next:
     }
 
     next.run(request).await
+}
+
+/// CPU profiling endpoint - generates flame graph
+#[cfg(feature = "profiling")]
+pub async fn profile_handler(Query(params): Query<ProfileParams>) -> impl IntoResponse {
+    let duration = params.duration.unwrap_or(30); // Default 30 seconds
+    let frequency = params.frequency.unwrap_or(99); // Default 99Hz sampling
+    
+    info!("Starting CPU profiling for {} seconds at {}Hz", duration, frequency);
+    
+    // Start profiling
+    let guard = match pprof::ProfilerGuardBuilder::default()
+        .frequency(frequency)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+    {
+        Ok(guard) => guard,
+        Err(e) => {
+            error!("Failed to start profiler: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Profiler error: {}", e)).into_response();
+        }
+    };
+    
+    // Wait for the specified duration
+    tokio::time::sleep(tokio::time::Duration::from_secs(duration)).await;
+    
+    // Stop profiling and generate report
+    match guard.report().build() {
+        Ok(report) => {
+            info!("Profiling completed, generating flame graph");
+            
+            // Generate flame graph
+            let mut flame_graph = Vec::new();
+            if let Err(e) = report.flamegraph(&mut flame_graph) {
+                error!("Failed to generate flame graph: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, format!("Flame graph error: {}", e)).into_response();
+            }
+            
+            // Return flame graph as SVG
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "image/svg+xml")
+                .header("Content-Disposition", "attachment; filename=\"profile.svg\"")
+                .body(Body::from(flame_graph))
+                .unwrap()
+                .into_response()
+        }
+        Err(e) => {
+            error!("Failed to build profiling report: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Report error: {}", e)).into_response()
+        }
+    }
+}
+
+/// Profiling endpoint parameters
+#[cfg(feature = "profiling")]
+#[derive(serde::Deserialize)]
+pub struct ProfileParams {
+    /// Duration to profile in seconds (default: 30)
+    duration: Option<u64>,
+    /// Sampling frequency in Hz (default: 99)
+    frequency: Option<i32>,
+}
+
+/// Stub profiling handler when profiling feature is disabled
+#[cfg(not(feature = "profiling"))]
+pub async fn profile_handler() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Profiling not enabled. Rebuild with --features profiling"
+    )
 }
 
 #[cfg(test)]

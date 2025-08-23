@@ -76,6 +76,13 @@ hex = "0.4"
 # Bloom filter for index deduplication
 probabilistic-collections = "0.7"
 
+# CPU profiling support
+pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"], optional = true }
+
+[features]
+# Enable CPU profiling with pprof
+profiling = ["pprof"]
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers = "0.15"

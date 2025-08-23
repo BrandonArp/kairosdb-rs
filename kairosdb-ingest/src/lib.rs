@@ -6,13 +6,14 @@
 // Core modules
 pub mod bloom_manager;
 pub mod cassandra;
-pub mod cassandra_client;
+// pub mod cassandra_client;  // Temporarily disabled - using single_writer_client
 pub mod config;
 pub mod handlers;
 pub mod ingestion;
 pub mod json_parser;
 pub mod metrics;
 pub mod mock_client;
+pub mod single_writer_client;
 
 // Re-export commonly used types
 pub use config::IngestConfig;
@@ -54,6 +55,8 @@ pub fn create_router(state: AppState) -> axum::Router {
         )
         // Version endpoint for compatibility
         .route("/api/v1/version", get(version_handler))
+        // CPU profiling endpoint (when enabled)
+        .route("/debug/pprof/profile", get(profile_handler))
         // Apply middleware layers in order (bottom to top)
         .layer(
             ServiceBuilder::new()
