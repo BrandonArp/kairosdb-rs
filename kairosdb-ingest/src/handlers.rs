@@ -15,7 +15,7 @@ use kairosdb_core::error::KairosError;
 use prometheus::TextEncoder;
 use serde_json::json;
 use std::{io::Read, time::Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     ingestion::HealthStatus,
@@ -121,7 +121,7 @@ pub async fn ingest_handler(
     body: String,
 ) -> impl IntoResponse {
     let start_time = Instant::now();
-    debug!("Received ingestion request, size: {} bytes", body.len());
+    trace!("Received ingestion request, size: {} bytes", body.len());
 
     // Handle gzipped content if present
     let json_str = if headers
@@ -159,13 +159,13 @@ pub async fn ingest_handler(
     };
 
     let batch_size = batch.len();
-    debug!("Parsed {} data points", batch_size);
+    trace!("Parsed {} data points", batch_size);
 
     // Submit batch for ingestion
     match state.ingestion_service.ingest_batch(batch).await {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
-            info!(
+            debug!(
                 "Successfully ingested {} data points in {}ms",
                 batch_size, processing_time
             );
@@ -217,7 +217,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, body: Body) -> i
         }
     };
 
-    debug!(
+    trace!(
         "Decompressed {} bytes to {} bytes",
         body_bytes.len(),
         json_str.len()
@@ -244,7 +244,7 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, body: Body) -> i
     match state.ingestion_service.ingest_batch(batch).await {
         Ok(_) => {
             let processing_time = start_time.elapsed().as_millis() as u64;
-            info!(
+            debug!(
                 "Successfully ingested {} data points from gzipped request in {}ms",
                 batch_size, processing_time
             );
@@ -312,7 +312,7 @@ pub async fn timing_middleware(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
 
     let duration = start.elapsed();
-    debug!("{} {} - {}ms", method, uri, duration.as_millis());
+    trace!("{} {} - {}ms", method, uri, duration.as_millis());
 
     response
 }

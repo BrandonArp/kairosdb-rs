@@ -89,7 +89,7 @@ impl IngestionService {
                     // Clear backpressure if it was active
                     backpressure.store(0, Ordering::Relaxed);
                     
-                    debug!("Worker {} processed batch of {} points in {:?}", 
+                    trace!("Worker {} processed batch of {} points in {:?}", 
                            worker_id, batch_size, processing_time);
                 }
                 Err(e) => {
@@ -132,7 +132,7 @@ impl IngestionService {
         // Write batch to Cassandra
         batch_writer.write_batch(batch).await?;
         
-        debug!("Batch processed successfully in {:?}", start.elapsed());
+        trace!("Batch processed successfully in {:?}", start.elapsed());
         Ok(())
     }
     

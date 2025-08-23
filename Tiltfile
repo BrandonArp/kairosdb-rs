@@ -1,4 +1,12 @@
 load('ext://restart_process', 'docker_build_with_restart')
+load('ext://helm_resource', 'helm_resource')
+
+
+# Load Helm charts
+helm_resource(
+  'prometheus',
+  'oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack',
+)
 
 # Build the Rust ingestion service with hot reload
 docker_build_with_restart(

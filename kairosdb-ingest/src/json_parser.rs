@@ -14,7 +14,7 @@ use kairosdb_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, trace};
 use validator::Validate;
 
 /// JSON request format for KairosDB data point ingestion
@@ -131,7 +131,7 @@ impl JsonParser {
 
     /// Parse JSON into a batch of data points
     pub fn parse_json(&self, json_str: &str) -> KairosResult<(DataPointBatch, Vec<String>)> {
-        debug!("Parsing JSON input, length: {}", json_str.len());
+        trace!("Parsing JSON input, length: {}", json_str.len());
 
         // Parse the JSON string
         let request: IngestRequest = serde_json::from_str(json_str)
@@ -181,7 +181,7 @@ impl JsonParser {
         }
 
         let batch = DataPointBatch::from_points(all_points)?;
-        debug!("Successfully parsed {} data points", batch.len());
+        trace!("Successfully parsed {} data points", batch.len());
 
         Ok((batch, warnings))
     }

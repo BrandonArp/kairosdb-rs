@@ -20,7 +20,7 @@ use std::{
     },
     time::Instant,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
@@ -202,7 +202,7 @@ impl IngestionService {
         let current_queue_size = self.metrics.queue_size.load(Ordering::Relaxed);
         let max_queue_size = self.config.ingestion.max_queue_size;
 
-        debug!(
+        trace!(
             "Queue size check: current={}, limit={}",
             current_queue_size, max_queue_size
         );
@@ -231,7 +231,7 @@ impl IngestionService {
         // Process the batch directly with the Cassandra client
         match self.cassandra_client.write_batch(&batch).await {
             Ok(_) => {
-                debug!(
+                trace!(
                     "Successfully processed batch of {} points in {:?}",
                     batch.points.len(),
                     start.elapsed()

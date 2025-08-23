@@ -17,7 +17,7 @@ use std::{
         Arc,
     },
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 // ScyllaDB Rust driver imports
 use scylla::client::session::Session;
@@ -181,11 +181,11 @@ impl CassandraClientImpl {
     async fn execute_query(&self, query: &str) -> KairosResult<QueryResult> {
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
 
-        debug!("Executing query: {}", query);
+        trace!("Executing query: {}", query);
 
         match self.session.query_unpaged(query, &[]).await {
             Ok(result) => {
-                debug!("Query executed successfully");
+                trace!("Query executed successfully");
                 Ok(result)
             }
             Err(e) => {
@@ -209,7 +209,7 @@ impl CassandraClientImpl {
 
         match self.session.execute_unpaged(prepared, values).await {
             Ok(result) => {
-                debug!("Prepared statement executed successfully");
+                trace!("Prepared statement executed successfully");
                 Ok(result)
             }
             Err(e) => {
@@ -234,7 +234,7 @@ impl CassandraClientImpl {
         let column_key_bytes = column_name.to_bytes();
         let value_bytes = &value.bytes;
 
-        debug!(
+        trace!(
             "Writing data point: row_key_len={}, column_key_len={}, value_len={}, row_key_hex={}",
             row_key_bytes.len(),
             column_key_bytes.len(),
@@ -251,7 +251,7 @@ impl CassandraClientImpl {
             ));
         }
 
-        debug!("Data point written successfully");
+        trace!("Data point written successfully");
         Ok(())
     }
 
@@ -261,7 +261,7 @@ impl CassandraClientImpl {
         let column_bytes = entry.column().to_bytes();
         let value_bytes = entry.value().to_bytes();
 
-        debug!("Writing row key index entry");
+        trace!("Writing row key index entry");
 
         if let Some(ref prepared) = self.insert_row_key_index {
             self.execute_prepared(prepared, (key_bytes, column_bytes, value_bytes))
@@ -272,13 +272,13 @@ impl CassandraClientImpl {
             ));
         }
 
-        debug!("Row key index entry written successfully");
+        trace!("Row key index entry written successfully");
         Ok(())
     }
 
     /// Write an entry to the row_keys table (new format)
     async fn write_row_keys(&self, row_key: &RowKey, ttl: Option<u32>) -> KairosResult<()> {
-        debug!("Writing row_keys entry");
+        trace!("Writing row_keys entry");
 
         if let Some(ref prepared) = self.insert_row_keys {
             // Convert tags to a map format expected by Cassandra
@@ -317,7 +317,7 @@ impl CassandraClientImpl {
             ));
         }
 
-        debug!("Row keys entry written successfully");
+        trace!("Row keys entry written successfully");
         Ok(())
     }
 
@@ -327,7 +327,7 @@ impl CassandraClientImpl {
         row_key: &RowKey,
         ttl: Option<u32>,
     ) -> KairosResult<()> {
-        debug!("Writing row_key_time_index entry");
+        trace!("Writing row_key_time_index entry");
 
         if let Some(ref prepared) = self.insert_row_key_time_index {
             // Convert to Cassandra timestamp type
@@ -349,7 +349,7 @@ impl CassandraClientImpl {
             ));
         }
 
-        debug!("Row key time index entry written successfully");
+        trace!("Row key time index entry written successfully");
         Ok(())
     }
 
@@ -359,7 +359,7 @@ impl CassandraClientImpl {
         let column_name = entry.index_column();
         let value_bytes = vec![0u8]; // Empty value for string index
 
-        debug!("Writing string index entry: {}", column_name);
+        trace!("Writing string index entry: {}", column_name);
 
         if let Some(ref prepared) = self.insert_string_index {
             self.execute_prepared(prepared, (key_bytes, column_name, value_bytes))
@@ -370,7 +370,7 @@ impl CassandraClientImpl {
             ));
         }
 
-        debug!("String index entry written successfully");
+        trace!("String index entry written successfully");
         Ok(())
     }
 
@@ -390,7 +390,7 @@ impl CassandraClientImpl {
             }
         }
 
-        debug!(
+        trace!(
             "Writing indexes for {} metrics, {} tag keys, {} tag values",
             metric_names.len(),
             tag_names.len(),
@@ -433,7 +433,7 @@ impl CassandraClientImpl {
             self.write_row_key_time_index(&row_key, ttl).await?;
         }
 
-        debug!("All indexes written successfully");
+        trace!("All indexes written successfully");
         Ok(())
     }
 }
@@ -442,11 +442,11 @@ impl CassandraClientImpl {
 impl CassandraClient for CassandraClientImpl {
     async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
         if batch.points.is_empty() {
-            debug!("Empty batch, nothing to write");
+            trace!("Empty batch, nothing to write");
             return Ok(());
         }
 
-        info!("Writing batch of {} data points", batch.points.len());
+        debug!("Writing batch of {} data points", batch.points.len());
         self.stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
@@ -464,7 +464,7 @@ impl CassandraClient for CassandraClientImpl {
         // Write indexes
         self.write_indexes(batch).await?;
 
-        info!("Batch written successfully");
+        debug!("Batch written successfully");
         Ok(())
     }
 

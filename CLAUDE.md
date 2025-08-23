@@ -287,6 +287,30 @@ cd tests && cargo run --bin perf_test -- run large_scale --duration 600
 - Efficiency scoring and bottleneck identification
 - Memory and resource utilization estimates
 
+### Logging Configuration for Performance Testing
+Services use appropriate logging levels optimized for development and performance:
+```bash
+# Development default (INFO level - good balance)
+cargo make run-ingest
+
+# Performance testing (minimal logging)
+RUST_LOG=warn cargo make perf-test-small
+
+# Development debugging (detailed but not per-operation)
+RUST_LOG=debug cargo make perf-test-small
+
+# Maximum verbosity (per-datapoint logging - severely impacts performance)
+RUST_LOG=trace cargo make perf-test-small
+```
+
+**Logging Level Guidelines:**
+- **INFO**: Service startup, batch summaries, important events
+- **DEBUG**: Development debugging, method entry/exit, validation steps  
+- **TRACE**: Per-datapoint operations, per-request details, detailed timing
+- **WARN/ERROR**: Performance testing and production
+
+⚠️ **Performance Impact**: TRACE logging can reduce throughput by 10x+ due to per-datapoint output.
+
 ### CLI Usage Examples
 ```bash
 # List all available scenarios
