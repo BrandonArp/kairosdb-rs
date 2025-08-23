@@ -275,13 +275,11 @@ impl IngestionService {
             }
         }
 
-        // Write all data points to persistent queue (write-ahead log)
-        for data_point in &batch.points {
-            if let Err(e) = self.persistent_queue.enqueue(data_point.clone()) {
-                error!("Failed to write data point to persistent queue: {}", e);
-                self.metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
-                return Err(e);
-            }
+        // Write entire batch to persistent queue (write-ahead log) - single Fjall operation
+        if let Err(e) = self.persistent_queue.enqueue_batch(batch.clone()) {
+            error!("Failed to write batch to persistent queue: {}", e);
+            self.metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
         }
 
         // Update queue size metric
@@ -338,7 +336,7 @@ impl IngestionService {
                 loop {
                     match persistent_queue.dequeue_batch(config.ingestion.max_batch_size) {
                         Ok(Some(batch)) => {
-                            trace!("Processing batch of {} points from persistent queue", batch.points.len());
+                            trace!("Processing batch of {} points from queue", batch.points.len());
                             batches_processed_this_cycle += 1;
                             
                             // Write to Cassandra with timing

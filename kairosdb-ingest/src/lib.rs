@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod http_metrics;
 pub mod ingestion;
 pub mod json_parser;
+pub mod memory_queue;
 pub mod metrics;
 pub mod mock_client;
 pub mod persistent_queue;

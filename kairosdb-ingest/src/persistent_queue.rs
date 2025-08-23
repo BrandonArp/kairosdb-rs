@@ -17,24 +17,31 @@ use std::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-/// Entry in the persistent queue
+/// Entry in the persistent queue - now stores batches instead of individual points
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueEntry {
     pub id: String,
     pub timestamp_ns: u64,
-    pub data_point: DataPoint,
+    pub batch: DataPointBatch,
 }
 
 impl QueueEntry {
-    pub fn new(data_point: DataPoint) -> Self {
+    pub fn new_from_batch(batch: DataPointBatch) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             timestamp_ns: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64,
-            data_point,
+            batch,
         }
+    }
+
+    // Keep backward compatibility for single data points
+    pub fn new(data_point: DataPoint) -> Self {
+        let mut batch = DataPointBatch::new();
+        batch.points.push(data_point);
+        Self::new_from_batch(batch)
     }
     
     /// Generate a sortable key for queue ordering
@@ -202,7 +209,34 @@ impl PersistentQueue {
         })
     }
     
-    /// Enqueue a data point (write-ahead log)
+    /// Enqueue an entire batch (optimized write-ahead log)
+    pub fn enqueue_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
+        let start_time = Instant::now();
+        
+        let entry = QueueEntry::new_from_batch(batch);
+        let key = entry.queue_key();
+        
+        // Serialize the entire batch at once
+        let data = rmp_serde::to_vec(&entry).map_err(|e| {
+            KairosError::validation(format!("Failed to serialize queue entry: {}", e))
+        })?;
+        
+        // Single write to Fjall for the entire batch
+        self.partition.insert(&key, data).map_err(|e| {
+            KairosError::validation(format!("Failed to write batch to queue: {}", e))
+        })?;
+        
+        // Update metrics
+        let duration = start_time.elapsed();
+        self.metrics.enqueue_duration.observe(duration.as_secs_f64());
+        self.metrics.enqueue_total.inc_by(entry.batch.points.len() as f64);
+        
+        trace!("Enqueued batch of {} points to persistent queue in {:?}", 
+               entry.batch.points.len(), duration);
+        Ok(())
+    }
+
+    /// Enqueue a single data point (backward compatibility)
     pub fn enqueue(&self, data_point: DataPoint) -> KairosResult<()> {
         let start_time = Instant::now();
         
@@ -234,88 +268,65 @@ impl PersistentQueue {
     }
     
     /// Dequeue a batch of data points for processing
-    pub fn dequeue_batch(&self, max_size: usize) -> KairosResult<Option<DataPointBatch>> {
+    pub fn dequeue_batch(&self, _max_size: usize) -> KairosResult<Option<DataPointBatch>> {
         let start_time = Instant::now();
-        let mut batch = DataPointBatch::new();
-        let mut keys_to_remove = Vec::new();
-        let mut oldest_timestamp: Option<u64> = None;
         
-        // Read entries in order
-        let mut count = 0;
-        for item in self.partition.iter() {
-            if count >= max_size {
-                break;
+        // Get the first entry from the queue
+        let mut iter = self.partition.iter();
+        let item = match iter.next() {
+            Some(item) => item,
+            None => {
+                // Queue is empty
+                self.metrics.oldest_entry_age_seconds.set(0.0);
+                return Ok(None);
             }
+        };
+        
+        let (key, value) = item
+            .map_err(|e| {
+                self.metrics.dequeue_errors.inc();
+                KairosError::internal(format!("Failed to read from queue: {}", e))
+            })?;
             
-            let (key, value) = item
-                .map_err(|e| {
-                    self.metrics.dequeue_errors.inc();
-                    KairosError::internal(format!("Failed to read from queue: {}", e))
-                })?;
-                
-            // Deserialize the entry using MessagePack
-            let entry: QueueEntry = match rmp_serde::from_slice(&value) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    self.metrics.dequeue_errors.inc();
-                    // Skip corrupted entries and remove them
-                    debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
-                    keys_to_remove.push(key);
-                    continue;
-                }
-            };
-                
-            // Track oldest entry for age metric
-            if oldest_timestamp.is_none() {
-                oldest_timestamp = Some(entry.timestamp_ns);
+        // Deserialize the entry using MessagePack
+        let entry: QueueEntry = match rmp_serde::from_slice(&value) {
+            Ok(entry) => entry,
+            Err(e) => {
+                self.metrics.dequeue_errors.inc();
+                // Remove corrupted entry
+                debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
+                self.partition.remove(key)
+                    .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
+                // Try again with the next entry
+                return self.dequeue_batch(_max_size);
             }
-                
-            // Add to batch
-            batch.add_point(entry.data_point)
-                .map_err(|e| {
-                    self.metrics.dequeue_errors.inc();
-                    KairosError::internal(format!("Failed to add point to batch: {}", e))
-                })?;
-                
-            keys_to_remove.push(key);
-            count += 1;
-        }
+        };
         
-        if batch.points.is_empty() {
-            // Update oldest entry age even when queue is empty
-            self.metrics.oldest_entry_age_seconds.set(0.0);
-            return Ok(None);
-        }
-        
-        // Remove processed entries
-        let items_removed = keys_to_remove.len();
-        for key in keys_to_remove {
-            self.partition.remove(key)
-                .map_err(|e| {
-                    self.metrics.dequeue_errors.inc();
-                    KairosError::internal(format!("Failed to remove processed entry: {}", e))
-                })?;
-        }
+        // Remove the processed entry
+        self.partition.remove(key)
+            .map_err(|e| {
+                self.metrics.dequeue_errors.inc();
+                KairosError::internal(format!("Failed to remove processed entry: {}", e))
+            })?;
         
         // Update metrics
-        let new_size = self.queue_size.fetch_sub(items_removed as u64, Ordering::Relaxed) - items_removed as u64;
-        self.metrics.dequeue_total.inc_by(items_removed as f64);
-        self.metrics.current_size.set(new_size as f64);
+        let batch_size = entry.batch.points.len();
+        self.queue_size.fetch_sub(1, Ordering::Relaxed);
+        self.metrics.dequeue_total.inc_by(batch_size as f64);
+        self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
         self.metrics.dequeue_duration.observe(start_time.elapsed().as_secs_f64());
-        self.metrics.batch_size.observe(batch.points.len() as f64);
+        self.metrics.batch_size.observe(batch_size as f64);
         
-        // Update oldest entry age if we have one
-        if let Some(oldest_ns) = oldest_timestamp {
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64;
-            let age_seconds = (now_ns.saturating_sub(oldest_ns)) as f64 / 1_000_000_000.0;
-            self.metrics.oldest_entry_age_seconds.set(age_seconds);
-        }
+        // Update oldest entry age
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
+        self.metrics.oldest_entry_age_seconds.set(age_seconds);
         
-        debug!("Dequeued batch of {} data points", batch.points.len());
-        Ok(Some(batch))
+        debug!("Dequeued batch with {} points in {:?}", batch_size, start_time.elapsed());
+        Ok(Some(entry.batch))
     }
     
     /// Get current queue size
