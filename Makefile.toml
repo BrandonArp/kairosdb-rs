@@ -41,7 +41,7 @@ args = ["fmt", "--all", "--check"]
 [tasks.lint]
 description = "Run clippy lints"
 command = "cargo"
-args = ["clippy", "--all-targets", "--all-features"]
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
 
 [tasks.build]
 description = "Build all workspace members"

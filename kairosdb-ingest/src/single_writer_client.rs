@@ -266,7 +266,7 @@ impl SingleWriterCassandraClient {
         }
 
         // Wait for any remaining outstanding requests to complete
-        while let Some(_) = outstanding_requests.next().await {
+        while outstanding_requests.next().await.is_some() {
             // Just wait for completion
         }
 
@@ -551,7 +551,7 @@ impl SingleWriterCassandraClient {
             let bloom_key = format!("metric_name:{}", metric_name);
             if bloom_manager.should_write_index(&bloom_key) {
                 let entry = StringIndexEntry::metric_name(metric_name);
-                Self::write_string_index_static(&state, &entry).await?;
+                Self::write_string_index_static(state, &entry).await?;
                 indexes_written += 1;
             }
         }
@@ -561,7 +561,7 @@ impl SingleWriterCassandraClient {
             let bloom_key = format!("tag_name:{}", tag_name);
             if bloom_manager.should_write_index(&bloom_key) {
                 let entry = StringIndexEntry::tag_name(tag_name);
-                Self::write_string_index_static(&state, &entry).await?;
+                Self::write_string_index_static(state, &entry).await?;
                 indexes_written += 1;
             }
         }
@@ -571,7 +571,7 @@ impl SingleWriterCassandraClient {
             let bloom_key = format!("tag_value:{}", tag_value);
             if bloom_manager.should_write_index(&bloom_key) {
                 let entry = StringIndexEntry::tag_value(tag_value);
-                Self::write_string_index_static(&state, &entry).await?;
+                Self::write_string_index_static(state, &entry).await?;
                 indexes_written += 1;
             }
         }

@@ -423,7 +423,7 @@ impl HighPerformanceQueue {
                 Ok(_) => {
                     recovered_count += 1;
                     // Delete the file after successful recovery
-                    if let Err(e) = fs::remove_file(&entry.path()) {
+                    if let Err(e) = fs::remove_file(entry.path()) {
                         warn!("Failed to delete recovered file {:?}: {}", entry.path(), e);
                     }
                 }
@@ -470,7 +470,7 @@ impl HighPerformanceQueue {
         match self.recover_single_file(&oldest_file.path()) {
             Ok(batch) => {
                 // Delete the file
-                if let Err(e) = fs::remove_file(&oldest_file.path()) {
+                if let Err(e) = fs::remove_file(oldest_file.path()) {
                     warn!(
                         "Failed to delete recovered file {:?}: {}",
                         oldest_file.path(),

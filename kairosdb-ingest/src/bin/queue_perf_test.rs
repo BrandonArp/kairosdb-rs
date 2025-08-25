@@ -13,7 +13,7 @@ use tokio::time;
 use tracing::{info, warn};
 
 #[cfg(feature = "profiling")]
-use pprof;
+extern crate pprof;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -235,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Wait for both tasks
-    let _ = producer_handle.await?;
+    producer_handle.await?;
     let (consumed_batches, consumed_points) = consumer_handle.await?;
     let mixed_duration = mixed_start.elapsed();
 

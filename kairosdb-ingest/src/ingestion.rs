@@ -549,7 +549,7 @@ impl IngestionService {
             if !successful_removals.is_empty() {
                 let total_points = Self::process_successful_batch(
                     &persistent_queue,
-                    &mut successful_removals,
+                    &successful_removals,
                     &metrics,
                 )
                 .await;
@@ -564,7 +564,7 @@ impl IngestionService {
 
             // Process batched unclaims
             if !failed_unclaims.is_empty() {
-                Self::process_failed_batch(&persistent_queue, &mut failed_unclaims, &metrics).await;
+                Self::process_failed_batch(&persistent_queue, &failed_unclaims, &metrics).await;
                 failed_unclaims.clear();
             }
         }
@@ -589,7 +589,7 @@ impl IngestionService {
     /// Process a batch of successful responses
     async fn process_successful_batch(
         persistent_queue: &Arc<PersistentQueue>,
-        successful_removals: &mut Vec<(String, usize)>,
+        successful_removals: &[(String, usize)],
         metrics: &IngestionMetrics,
     ) -> u64 {
         let mut total_points = 0;
@@ -611,7 +611,7 @@ impl IngestionService {
     /// Process a batch of failed responses  
     async fn process_failed_batch(
         persistent_queue: &Arc<PersistentQueue>,
-        failed_unclaims: &mut Vec<(String, String)>,
+        failed_unclaims: &[(String, String)],
         metrics: &IngestionMetrics,
     ) {
         for (queue_key, error_msg) in failed_unclaims.iter() {

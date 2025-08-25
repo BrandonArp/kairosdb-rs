@@ -584,7 +584,7 @@ impl MultiWorkerCassandraClient {
             // Use the unique key for bloom filtering
             let bloom_key = format!("row_keys:{}", unique_key);
             if bloom_manager.should_write_index(&bloom_key) {
-                let row_key = RowKey::from_data_point(&data_point);
+                let row_key = RowKey::from_data_point(data_point);
                 let metric_name = data_point.metric.as_str();
                 let table_name = "data_points";
                 let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());

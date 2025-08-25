@@ -15,7 +15,9 @@ use kairosdb_core::error::KairosError;
 use prometheus::TextEncoder;
 use serde_json::json;
 use std::{io::Read, time::Instant};
-use tracing::{error, info, trace, warn};
+#[cfg(feature = "profiling")]
+use tracing::info;
+use tracing::{error, trace, warn};
 
 #[cfg(feature = "profiling")]
 use pprof;
