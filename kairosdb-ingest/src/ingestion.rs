@@ -441,8 +441,8 @@ impl IngestionService {
                 if responses_collected == 1 {
                     // Single response - don't log batch info
                 } else {
-                    info!("Processed batch of {} successful responses ({} total points)", 
-                          successful_removals.len(), total_points);
+                    // info!("Processed batch of {} successful responses ({} total points)",
+                    //       successful_removals.len(), total_points);
                 }
                 successful_removals.clear();
             }
@@ -530,7 +530,7 @@ impl IngestionService {
             }
             
             // Use large batches to fill channel efficiently
-            let batch_size = available_slots.min(500); // Up to 500 items per batch
+            let batch_size = available_slots.min(900); // Up to 900 items per batch
             
             let work_items = match persistent_queue.claim_work_items_batch(30000, batch_size) {
                 Ok(items) => items,
