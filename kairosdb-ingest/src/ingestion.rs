@@ -349,7 +349,7 @@ impl IngestionService {
         })
     }
     
-    /// Run the optimized bidirectional processor
+    /// Run the optimized bidirectional processor with separate tasks
     async fn run_bidirectional_processor(
         persistent_queue: Arc<PersistentQueue>,
         work_tx: flume::Sender<WorkItem>,
@@ -357,81 +357,114 @@ impl IngestionService {
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
     ) {
-        let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
-        let mut interval = tokio::time::interval(interval_duration);
-        let mut _responses_processed = 0;
+        info!("Starting separate response processor and work sender tasks");
         
-        loop {
-            // Process up to 10 responses, then force work sending
-            let mut responses_this_cycle = 0;
-            
-            // Try to drain responses with timeout to prevent starvation
-            while responses_this_cycle < 10 {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(5), // Small timeout
-                    response_rx.recv_async()
-                ).await {
-                    Ok(Ok(work_response)) => {
-                        // info!("Queue processor received response for {}", work_response.queue_key);
-                        match work_response.result {
-                            Ok(batch_size) => {
-                                // Successful Cassandra write - remove from queue
-                                if let Err(e) = persistent_queue.remove_processed_item(&work_response.queue_key, batch_size) {
-                                    error!("Failed to remove successful item from queue: {}", e);
-                                } else {
-                                    metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
-                                    // info!("Removed successful item {} ({} points) from queue",
-                                    //        work_response.queue_key, batch_size);
-                                }
-                            }
-                            Err(error_msg) => {
-                                // Cassandra failure - unclaim for retry
-                                metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
-                                if let Err(e) = persistent_queue.mark_item_failed(&work_response.queue_key) {
-                                    error!("Failed to unclaim failed item: {}", e);
-                                } else {
-                                    warn!("Unclaimed failed item {} for retry: {}", 
-                                          work_response.queue_key, error_msg);
-                                }
-                            }
-                        }
-                        responses_this_cycle += 1;
-                        _responses_processed += 1;
+        // Spawn dedicated response processing task
+        let response_task = {
+            let queue = persistent_queue.clone();
+            let metrics = metrics.clone();
+            tokio::spawn(async move {
+                Self::run_response_processor(queue, response_rx, metrics).await;
+            })
+        };
+        
+        // Spawn dedicated work sending task
+        let work_task = {
+            let queue = persistent_queue.clone();
+            let config = config.clone();
+            tokio::spawn(async move {
+                Self::run_work_sender(queue, work_tx, config).await;
+            })
+        };
+        
+        // Wait for either task to complete (shouldn't happen under normal conditions)
+        tokio::select! {
+            result = response_task => {
+                error!("Response processor task completed unexpectedly: {:?}", result);
+            }
+            result = work_task => {
+                error!("Work sender task completed unexpectedly: {:?}", result);
+            }
+        }
+        
+        error!("Bidirectional processor exiting - this should not happen");
+    }
+    
+    /// Dedicated response processing task - processes responses as fast as possible
+    async fn run_response_processor(
+        persistent_queue: Arc<PersistentQueue>,
+        response_rx: flume::Receiver<WorkResponse>,
+        metrics: IngestionMetrics,
+    ) {
+        info!("Response processor task started");
+        
+        while let Ok(work_response) = response_rx.recv_async().await {
+            match work_response.result {
+                Ok(batch_size) => {
+                    // Successful Cassandra write - remove from queue
+                    if let Err(e) = persistent_queue.remove_processed_item(&work_response.queue_key, batch_size) {
+                        error!("Failed to remove successful item from queue: {}", e);
+                    } else {
+                        metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
                     }
-                    Ok(Err(e)) => {
-                        error!("Response channel error: {}", e);
-                        return;
-                    }
-                    Err(_) => {
-                        // Timeout - no more responses available, break to send work
-                        break;
+                }
+                Err(error_msg) => {
+                    // Cassandra failure - unclaim for retry
+                    metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
+                    if let Err(e) = persistent_queue.mark_item_failed(&work_response.queue_key) {
+                        error!("Failed to unclaim failed item: {}", e);
+                    } else {
+                        warn!("Unclaimed failed item {} for retry: {}", 
+                              work_response.queue_key, error_msg);
                     }
                 }
             }
+        }
+        
+        error!("Response processor exiting - response channel closed");
+    }
+    
+    /// Dedicated work sending task - sends work items based on channel capacity
+    async fn run_work_sender(
+        persistent_queue: Arc<PersistentQueue>,
+        work_tx: flume::Sender<WorkItem>,
+        config: Arc<IngestConfig>,
+    ) {
+        let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
+        let mut interval = tokio::time::interval(interval_duration);
+        
+        info!("Work sender task started with {}ms intervals", config.ingestion.batch_timeout_ms);
+        
+        loop {
+            interval.tick().await;
             
-            // ALWAYS send work after processing responses (or timeout) - batched approach
             // Check how much room is available in the work channel
             let work_channel_len = work_tx.len();
             let work_channel_capacity = work_tx.capacity().unwrap_or(1000);
             let available_slots = work_channel_capacity.saturating_sub(work_channel_len);
             
+            if available_slots == 0 {
+                // Channel is completely full - workers are busy, skip this cycle
+                continue;
+            }
+            
             // Only claim what we can actually send to avoid unclaiming issues
             let batch_size = available_slots.min(100); // Cap at 100 for reasonable batch size
             
-            let work_items = if batch_size > 0 {
-                match persistent_queue.claim_work_items_batch(30000, batch_size) {
-                    Ok(items) => items,
-                    Err(e) => {
-                        error!("Failed to claim work items from queue: {}", e);
-                        continue;
-                    }
+            let work_items = match persistent_queue.claim_work_items_batch(30000, batch_size) {
+                Ok(items) => items,
+                Err(e) => {
+                    error!("Failed to claim work items from queue: {}", e);
+                    continue;
                 }
-            } else {
-                Vec::new() // Channel is full, don't claim anything
             };
             
+            if work_items.is_empty() {
+                continue; // No work available
+            }
+            
             let mut items_sent = 0;
-            for work_item in work_items {
+            for work_item in &work_items {
                 let cassandra_work = WorkItem {
                     batch: work_item.entry.batch.clone(),
                     queue_key: work_item.queue_key.clone(),
@@ -447,7 +480,7 @@ impl IngestionService {
                         // Unexpected - channel filled between our check and send
                         warn!("Work channel unexpectedly full, unclaiming remaining {} items", work_items.len() - items_sent);
                         // Unclaim this and all remaining items
-                        for remaining_item in work_items.into_iter().skip(items_sent) {
+                        for remaining_item in work_items.iter().skip(items_sent) {
                             if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
                                 error!("Failed to unclaim item after unexpected full: {}", unclaim_err);
                             }
@@ -455,34 +488,24 @@ impl IngestionService {
                         break;
                     }
                     Err(flume::TrySendError::Disconnected(_)) => {
-                        error!("Work channel disconnected");
+                        error!("Work channel disconnected, work sender exiting");
                         // Unclaim this and all remaining items
-                        for remaining_item in work_items.into_iter().skip(items_sent) {
+                        for remaining_item in work_items.iter().skip(items_sent) {
                             if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
                                 error!("Failed to unclaim item after disconnect: {}", unclaim_err);
                             }
                         }
-                        return; // Exit processor
+                        return; // Exit task
                     }
                 }
             }
             
-            if items_sent > 0 || available_slots == 0 {
+            if items_sent > 0 {
                 let current_channel_len = work_tx.len();
                 let work_channel_fullness = (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u32;
                 
-                if items_sent > 0 {
-                    info!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, had {} slots available)", 
-                          items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, available_slots);
-                } else {
-                    info!("Work channel full ({}/{} items, {}% full), skipping work claiming this cycle", 
-                          current_channel_len, work_channel_capacity, work_channel_fullness);
-                }
-            }
-            
-            // If no responses and no work sent, wait briefly to avoid busy loop
-            if responses_this_cycle == 0 && items_sent == 0 {
-                interval.tick().await;
+                info!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, had {} slots available)", 
+                      items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, available_slots);
             }
         }
     }
