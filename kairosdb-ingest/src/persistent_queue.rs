@@ -83,12 +83,12 @@ impl QueueMetrics {
         };
 
         let enqueue_total = register_counter!(
-            format!("kairosdb_queue_enqueue_total{}", suffix),
+            format!("kairosdb_queue_datapoints_enqueued_total{}", suffix),
             "Total number of data points enqueued"
         ).unwrap_or_else(|_| Counter::new("test_counter", "test").unwrap());
 
         let dequeue_total = register_counter!(
-            format!("kairosdb_queue_dequeue_total{}", suffix),
+            format!("kairosdb_queue_datapoints_dequeued_total{}", suffix),
             "Total number of data points dequeued"
         ).unwrap_or_else(|_| Counter::new("test_counter2", "test").unwrap());
 
@@ -103,8 +103,8 @@ impl QueueMetrics {
         ).unwrap_or_else(|_| Counter::new("test_counter4", "test").unwrap());
 
         let current_size = register_gauge!(
-            format!("kairosdb_queue_size_current{}", suffix),
-            "Current number of items in persistent queue"
+            format!("kairosdb_queue_batches_pending{}", suffix),
+            "Current number of batches pending in persistent queue"
         ).unwrap_or_else(|_| Gauge::new("test_gauge", "test").unwrap());
 
         let oldest_entry_age_seconds = register_gauge!(
@@ -136,8 +136,8 @@ impl QueueMetrics {
         });
 
         let batch_size = register_histogram!(
-            format!("kairosdb_queue_batch_size{}", suffix),
-            "Size of dequeued batches"
+            format!("kairosdb_queue_batch_datapoints{}", suffix),
+            "Number of data points per batch dequeued from queue"
         ).unwrap_or_else(|_| {
             prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
                 "test_histogram3", "test"
