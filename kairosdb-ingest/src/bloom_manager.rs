@@ -285,11 +285,13 @@ mod tests {
         
         // Wait for overlap period to start
         sleep(Duration::from_millis(60));
+        manager.maybe_maintain(); // Trigger maintenance to start overlap
         let stats = manager.get_stats();
         assert!(stats.in_overlap_period);
         
         // Wait for full rotation
         sleep(Duration::from_millis(60));
+        manager.maybe_maintain(); // Trigger maintenance to complete rotation
         let stats = manager.get_stats();
         assert!(!stats.in_overlap_period);
     }

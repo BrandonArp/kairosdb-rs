@@ -48,7 +48,7 @@ async fn test_metric_data_generation() {
 }
 
 #[test]
-fn test_scenario_selection() {
+async fn test_scenario_selection() {
     let small = TestScenarios::by_name("small_scale");
     assert!(small.is_some());
     
@@ -60,7 +60,7 @@ fn test_scenario_selection() {
 }
 
 #[test]
-fn test_custom_scenario_overrides() {
+async fn test_custom_scenario_overrides() {
     let overrides = ScenarioOverrides {
         metrics_count: Some(1000),
         duration_seconds: Some(120),

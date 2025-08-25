@@ -94,15 +94,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     loop {
         let batch_start = Instant::now();
-        match queue.dequeue_batch(1000) {
-            Ok(Some(batch)) => {
+        match queue.claim_work_items_batch(1000, 1000) {
+            Ok(work_items) if !work_items.is_empty() => {
                 dequeue_times.push(batch_start.elapsed());
-                dequeued_batches += 1;
-                dequeued_points += batch.points.len();
+                
+                let mut total_points = 0;
+                for work_item in &work_items {
+                    total_points += work_item.entry.batch.points.len();
+                    // Remove processed items
+                    if let Err(e) = queue.remove_processed_item(&work_item.queue_key, work_item.entry.batch.points.len()) {
+                        eprintln!("Failed to remove processed item: {}", e);
+                    }
+                }
+                
+                dequeued_batches += work_items.len();
+                dequeued_points += total_points;
                 
                 // Removed frequent logging for performance
             }
-            Ok(None) => {
+            Ok(_) => {
                 info!("Queue empty, stopping dequeue test");
                 break;
             }
@@ -161,13 +171,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut consumed_points = 0;
         
         loop {
-            match queue_clone2.dequeue_batch(1000) {
-                Ok(Some(batch)) => {
-                    consumed_batches += 1;
-                    consumed_points += batch.points.len();
+            match queue_clone2.claim_work_items_batch(1000, 1000) {
+                Ok(work_items) if !work_items.is_empty() => {
+                    let mut total_points = 0;
+                    for work_item in &work_items {
+                        total_points += work_item.entry.batch.points.len();
+                        // Remove processed items
+                        if let Err(e) = queue_clone2.remove_processed_item(&work_item.queue_key, work_item.entry.batch.points.len()) {
+                            eprintln!("Failed to remove processed item: {}", e);
+                        }
+                    }
+                    consumed_batches += work_items.len();
+                    consumed_points += total_points;
                 }
-                Ok(None) => {
-                    // Check if producer is still running
+                Ok(_) => {
+                    // No items or empty result - check if producer is still running
                     time::sleep(Duration::from_millis(10)).await;
                     
                     // Try again a few times before giving up

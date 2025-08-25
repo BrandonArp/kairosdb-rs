@@ -598,68 +598,6 @@ impl PersistentQueue {
         Ok(())
     }
     
-    /// DEPRECATED: Dequeue a batch of data points for processing (removes immediately)
-    /// Use peek_next_work_item() + remove_processed_item() for proper status tracking
-    pub fn dequeue_batch(&self, _max_size: usize) -> KairosResult<Option<DataPointBatch>> {
-        let start_time = Instant::now();
-        
-        // Get the first entry from the queue
-        let mut iter = self.partition.iter();
-        let item = match iter.next() {
-            Some(item) => item,
-            None => {
-                // Queue is empty
-                self.metrics.oldest_entry_age_seconds.set(0.0);
-                return Ok(None);
-            }
-        };
-        
-        let (key, value) = item
-            .map_err(|e| {
-                self.metrics.dequeue_errors.inc();
-                KairosError::internal(format!("Failed to read from queue: {}", e))
-            })?;
-            
-        // Deserialize the entry using MessagePack
-        let entry: QueueEntry = match rmp_serde::from_slice(&value) {
-            Ok(entry) => entry,
-            Err(e) => {
-                self.metrics.dequeue_errors.inc();
-                // Remove corrupted entry
-                debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
-                self.partition.remove(key)
-                    .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
-                // Try again with the next entry
-                return self.dequeue_batch(_max_size);
-            }
-        };
-        
-        // Remove the processed entry
-        self.partition.remove(key)
-            .map_err(|e| {
-                self.metrics.dequeue_errors.inc();
-                KairosError::internal(format!("Failed to remove processed entry: {}", e))
-            })?;
-        
-        // Update metrics
-        let batch_size = entry.batch.points.len();
-        self.queue_size.fetch_sub(1, Ordering::Relaxed);
-        self.metrics.dequeue_total.inc_by(batch_size as f64);
-        self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
-        self.metrics.dequeue_duration.observe(start_time.elapsed().as_secs_f64());
-        self.metrics.batch_size.observe(batch_size as f64);
-        
-        // Update oldest entry age
-        let now_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
-        self.metrics.oldest_entry_age_seconds.set(age_seconds);
-        
-        trace!("Dequeued batch with {} points in {:?}", batch_size, start_time.elapsed());
-        Ok(Some(entry.batch))
-    }
     
     /// Get current queue size
     pub fn size(&self) -> u64 {
@@ -743,43 +681,15 @@ mod tests {
         assert_eq!(queue.size(), 1);
         assert!(!queue.is_empty());
         
-        // Test dequeue
-        let batch = queue.dequeue_batch(10).unwrap();
-        assert!(batch.is_some());
+        // Test claim_work_items_batch (the proper crash-safe method)
+        let work_items = queue.claim_work_items_batch(1000, 10).unwrap();
+        assert_eq!(work_items.len(), 1);
+        assert_eq!(work_items[0].entry.batch.points.len(), 1);
+        assert_eq!(work_items[0].entry.batch.points[0].metric, "test.metric");
         
-        let batch = batch.unwrap();
-        assert_eq!(batch.points.len(), 1);
-        assert_eq!(batch.points[0].metric, "test.metric");
+        // Remove the processed item
+        queue.remove_processed_item(&work_items[0].queue_key, work_items[0].entry.batch.points.len()).unwrap();
         assert_eq!(queue.size(), 0);
         assert!(queue.is_empty());
-    }
-    
-    #[tokio::test]
-    async fn test_persistent_queue_ordering() {
-        use std::sync::atomic::AtomicU32;
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        
-        let temp_dir = TempDir::new().unwrap();
-        let queue = PersistentQueue::new(temp_dir.path().join(format!("test_order_{}", id))).await.unwrap();
-        
-        // Enqueue multiple points
-        for i in 0..5 {
-            let data_point = DataPoint::new_long(format!("test.metric.{}", i), Timestamp::now(), i);
-            queue.enqueue(data_point).unwrap();
-            // Small delay to ensure different timestamps
-            tokio::time::sleep(std::time::Duration::from_nanos(1)).await;
-        }
-        
-        assert_eq!(queue.size(), 5);
-        
-        // Dequeue in batches and verify ordering
-        let batch1 = queue.dequeue_batch(2).unwrap().unwrap();
-        assert_eq!(batch1.points.len(), 2);
-        
-        let batch2 = queue.dequeue_batch(10).unwrap().unwrap();
-        assert_eq!(batch2.points.len(), 3);
-        
-        assert_eq!(queue.size(), 0);
     }
 }

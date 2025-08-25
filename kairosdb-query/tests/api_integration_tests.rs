@@ -25,11 +25,14 @@ async fn create_test_app() -> axum::Router {
 
     let config = Arc::new(QueryConfig::default());
 
-    // Initialize mock datastore
+    // Set Cassandra contact points to localhost for tests (Tilt port forward)
+    std::env::set_var("KAIROSDB_CASSANDRA_CONTACT_POINTS", "localhost:9042");
+
+    // Initialize datastore with the existing kairosdb keyspace
     let datastore: Arc<dyn TimeSeriesStore> = Arc::new(
-        CassandraLegacyStore::new("kairosdb_test".to_string())
+        CassandraLegacyStore::new("kairosdb".to_string())
             .await
-            .expect("Failed to create mock datastore"),
+            .expect("Failed to create datastore"),
     );
 
     let state = AppState {
@@ -706,7 +709,10 @@ mod service_integration_tests {
         let config = Arc::new(QueryConfig::default());
 
         // Test datastore initialization
-        let datastore = CassandraLegacyStore::new("kairosdb_test".to_string())
+        // Set Cassandra contact points to localhost for tests (Tilt port forward)
+        std::env::set_var("KAIROSDB_CASSANDRA_CONTACT_POINTS", "localhost:9042");
+        
+        let datastore = CassandraLegacyStore::new("kairosdb".to_string())
             .await
             .expect("Failed to create datastore");
 

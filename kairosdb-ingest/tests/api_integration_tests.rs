@@ -29,6 +29,7 @@ async fn create_test_app_with_mock() -> axum::Router {
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
         config,
+        http_metrics: Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new().unwrap()),
     };
 
     create_router(state)
@@ -49,6 +50,7 @@ async fn create_test_app() -> axum::Router {
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
         config,
+        http_metrics: Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new().unwrap()),
     };
 
     create_router(state)
@@ -617,7 +619,7 @@ mod service_integration_tests {
             ))
             .unwrap();
 
-        let result = service.ingest_batch(batch).await;
+        let result = service.ingest_batch(batch);
         assert!(result.is_ok());
 
         // Verify metrics updated
