@@ -25,6 +25,7 @@ ingestion:
   enable_validation: true
   max_request_size: 16777216  # 16MB
   performance_mode: "parse_and_store_mode"  # Options: no_parse_mode, parse_only_mode, parse_and_store_mode
+  default_sync: false  # Default to fast mode for development - can be overridden with ?sync=true
 
 # Performance configuration
 performance:

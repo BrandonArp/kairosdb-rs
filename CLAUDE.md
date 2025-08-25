@@ -121,6 +121,7 @@ KairosDB-rs is a high-performance Rust rewrite of KairosDB with microservices ar
 - `KAIROSDB_MAX_BATCH_SIZE`: Max data points per batch (default: 10000)
 - `KAIROSDB_WORKER_THREADS`: Processing threads (default: 4)
 - `KAIROSDB_MAX_MEMORY_MB`: Memory limit for backpressure (default: 1024)
+- `KAIROSDB_DEFAULT_SYNC`: Default sync-to-disk behavior (default: false)
 
 ### Query Service Specific  
 - `KAIROSDB_QUERY_BIND_ADDRESS`: HTTP bind address (default: 0.0.0.0:8081)
@@ -136,6 +137,39 @@ This implementation maintains 100% API compatibility with Java KairosDB plus his
 - `POST /api/v1/datapoints/gzip` - Compressed ingestion
 - `GET /health`, `/health/ready`, `/health/live` - Health checks
 - `GET /metrics` - Prometheus metrics
+
+**Query Parameters**:
+- `sync=true/false` - Force sync to disk before returning success (overrides default_sync config)
+- `perf_mode=parse_only/parse_and_store/no_parse` - Performance testing modes
+
+**Durability Control Examples**:
+```bash
+# Fast ingestion (default) - buffered writes for performance
+curl -X POST http://localhost:8080/api/v1/datapoints -d '[{"name":"cpu.usage","datapoints":[[1640995200000,75.2]],"tags":{"host":"web1"}}]'
+
+# Durable ingestion - guaranteed fsync to disk before 200 OK 
+curl -X POST http://localhost:8080/api/v1/datapoints?sync=true -d '[{"name":"cpu.usage","datapoints":[[1640995200000,75.2]],"tags":{"host":"web1"}}]'
+
+# Set default durability via environment variable
+KAIROSDB_DEFAULT_SYNC=true ./kairosdb-ingest
+```
+
+**Configuration Options**:
+```yaml
+# config/development.yaml - Fast development mode
+ingestion:
+  default_sync: false  # Optimize for performance
+
+# config/production.yaml - Durable production mode  
+ingestion:
+  default_sync: true   # Optimize for durability
+```
+
+**Implementation Details**:
+- Uses Fjall's `PersistMode::SyncAll` for guaranteed durability when `sync=true`
+- Buffered writes with periodic persistence for `sync=false` (performance mode)  
+- HTTP 200 OK response only sent after successful disk persistence when sync enabled
+- Configuration precedence: Query parameter > Environment variable > YAML config > Default
 
 **Data Format**: Supports all KairosDB JSON formats including single metrics, metric arrays, all data types (long, double, text, complex, binary, histogram), and TTL values.
 

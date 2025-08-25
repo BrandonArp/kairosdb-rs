@@ -5,7 +5,7 @@
 //! tasks drain the queue to Cassandra.
 
 use anyhow::{Context, Result};
-use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 use kairosdb_core::datapoint::{DataPoint, DataPointBatch};
 use kairosdb_core::error::{KairosError, KairosResult};
 use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
@@ -237,6 +237,49 @@ impl PersistentQueue {
         
         trace!("Enqueued batch of {} points to persistent queue in {:?}", 
                batch_size, duration);
+        Ok(())
+    }
+
+    /// Enqueue an entire batch with optional sync control
+    pub fn enqueue_batch_with_sync(&self, batch: DataPointBatch, sync_to_disk: bool) -> KairosResult<()> {
+        let start_time = Instant::now();
+        
+        let entry = QueueEntry::new_from_batch(batch);
+        let key = entry.queue_key();
+        
+        // Serialize the entire batch at once
+        let data = rmp_serde::to_vec(&entry).map_err(|e| {
+            KairosError::validation(format!("Failed to serialize queue entry: {}", e))
+        })?;
+        
+        // Single write to Fjall for the entire batch
+        self.partition.insert(&key, data).map_err(|e| {
+            KairosError::validation(format!("Failed to write batch to queue: {}", e))
+        })?;
+        
+        // Conditionally persist to disk immediately 
+        if sync_to_disk {
+            self.keyspace.persist(PersistMode::SyncAll).map_err(|e| {
+                KairosError::validation(format!("Failed to sync queue to disk: {}", e))
+            })?;
+        }
+        
+        // Update metrics and queue size counter
+        let batch_size = entry.batch.points.len();
+        let new_size = self.queue_size.fetch_add(1, Ordering::Relaxed) + 1;
+        let duration = start_time.elapsed();
+        
+        self.metrics.enqueue_duration.observe(duration.as_secs_f64());
+        self.metrics.enqueue_total.inc_by(batch_size as f64);
+        self.metrics.current_size.set(new_size as f64);
+        
+        if sync_to_disk {
+            trace!("Enqueued batch of {} points to persistent queue with sync in {:?}", 
+                   batch_size, duration);
+        } else {
+            trace!("Enqueued batch of {} points to persistent queue (buffered) in {:?}", 
+                   batch_size, duration);
+        }
         Ok(())
     }
 

@@ -213,29 +213,34 @@ impl IngestionService {
     }
 
     /// Submit a batch for ingestion with write-ahead logging (fire-and-forget)
+    /// Uses the default sync setting from configuration
     pub fn ingest_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
+        self.ingest_batch_with_sync(batch, self.config.ingestion.default_sync)
+    }
+
+    /// Submit a batch for ingestion with optional sync control
+    pub fn ingest_batch_with_sync(&self, batch: DataPointBatch, sync_to_disk: bool) -> KairosResult<()> {
         let start = Instant::now();
 
-        // Check disk usage for backpressure
+        // Check disk usage for backpressure (same as ingest_batch)
         let disk_usage = self.persistent_queue.get_disk_usage_bytes()
-            .unwrap_or(0); // Fall back to 0 if we can't read disk usage
+            .unwrap_or(0);
         let max_disk_bytes = self.config.ingestion.max_queue_disk_bytes;
 
-        // Also check item count as a secondary limit
         let current_queue_size = self.persistent_queue.size();
         let max_queue_size = self.config.ingestion.max_queue_size as u64;
 
         trace!(
-            "Queue check: items={}/{}, disk={:.2}MB/{:.2}MB",
+            "Queue check (sync={}): items={}/{}, disk={:.2}MB/{:.2}MB",
+            sync_to_disk,
             current_queue_size, max_queue_size,
             disk_usage as f64 / 1_048_576.0,
             max_disk_bytes as f64 / 1_048_576.0
         );
 
-        // Update disk usage metric
         self.persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
 
-        // Check disk usage limit first (primary limit)
+        // Check disk usage limit first
         if disk_usage > max_disk_bytes {
             self.backpressure_active.store(1, Ordering::Relaxed);
             warn!(
@@ -248,7 +253,7 @@ impl IngestionService {
             ));
         }
 
-        // Check item count limit (secondary limit)
+        // Check item count limit
         if current_queue_size > max_queue_size {
             self.backpressure_active.store(1, Ordering::Relaxed);
             warn!(
@@ -263,40 +268,31 @@ impl IngestionService {
         // Validate batch if validation is enabled
         if self.config.ingestion.enable_validation {
             if let Err(e) = batch.validate_self() {
-                self.metrics
-                    .validation_errors
-                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics.validation_errors.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
             }
         }
 
-        // Write entire batch to persistent queue (write-ahead log) - single Fjall operation
-        if let Err(e) = self.persistent_queue.enqueue_batch(batch.clone()) {
+        // Write batch to persistent queue with sync control
+        if let Err(e) = self.persistent_queue.enqueue_batch_with_sync(batch.clone(), sync_to_disk) {
             error!("Failed to write batch to persistent queue: {}", e);
             self.metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
 
-        // Queue size is tracked by PersistentQueue internally
-
-        // Update success metrics (immediate response after writing to queue)
-        self.metrics
-            .datapoints_ingested
-            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
-        self.metrics
-            .batches_processed
-            .fetch_add(1, Ordering::Relaxed);
+        // Update success metrics
+        self.metrics.datapoints_ingested.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        self.metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
         *self.metrics.last_batch_time.write() = Some(Instant::now());
 
         let elapsed = start.elapsed();
-        self.metrics
-            .avg_batch_time_ms
-            .store(elapsed.as_millis() as u64, Ordering::Relaxed);
+        self.metrics.avg_batch_time_ms.store(elapsed.as_millis() as u64, Ordering::Relaxed);
 
         trace!(
-            "Successfully enqueued batch of {} points in {:?}",
+            "Successfully enqueued batch of {} points (sync={}) in {:?}",
             batch.points.len(),
-            start.elapsed()
+            sync_to_disk,
+            elapsed
         );
 
         Ok(())

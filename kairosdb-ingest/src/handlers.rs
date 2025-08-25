@@ -27,12 +27,15 @@ use crate::{
     AppState,
 };
 
-/// Query parameters for performance testing
+/// Query parameters for ingestion requests
 #[derive(serde::Deserialize)]
-pub struct PerfParams {
+pub struct IngestParams {
     /// Override performance mode for this request
     #[serde(default)]
     perf_mode: Option<String>,
+    /// Force sync to disk before returning success (default: false for performance)
+    #[serde(default)]
+    sync: Option<bool>,
 }
 
 /// Health check endpoint compatible with KairosDB format
@@ -135,7 +138,7 @@ pub async fn metrics_json_handler(State(state): State<AppState>) -> impl IntoRes
 /// Main data ingestion endpoint - compatible with Java KairosDB
 pub async fn ingest_handler(
     State(state): State<AppState>,
-    Query(params): Query<PerfParams>,
+    Query(params): Query<IngestParams>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
@@ -249,7 +252,8 @@ pub async fn ingest_handler(
 
     // Submit batch for ingestion (normal mode)
     let queue_start = Instant::now();
-    match state.ingestion_service.ingest_batch(batch) {
+    let should_sync = params.sync.unwrap_or(state.config.ingestion.default_sync);
+    match state.ingestion_service.ingest_batch_with_sync(batch, should_sync) {
         Ok(_) => {
             timer.record_queue_write_time(queue_start.elapsed());
             state.http_metrics.requests_by_endpoint.ingest_success.inc();
@@ -294,7 +298,7 @@ pub async fn ingest_handler(
 }
 
 /// Handle gzipped ingestion requests
-pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Query<PerfParams>, body: Body) -> impl IntoResponse {
+pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Query<IngestParams>, body: Body) -> impl IntoResponse {
     let timer = state.http_metrics.start_request_timer("ingest_gzip");
 
     // Determine performance mode (query param overrides config)
@@ -410,7 +414,8 @@ pub async fn ingest_gzip_handler(State(state): State<AppState>, Query(params): Q
     }
 
     let queue_start = Instant::now();
-    match state.ingestion_service.ingest_batch(batch) {
+    let should_sync = params.sync.unwrap_or(state.config.ingestion.default_sync);
+    match state.ingestion_service.ingest_batch_with_sync(batch, should_sync) {
         Ok(_) => {
             timer.record_queue_write_time(queue_start.elapsed());
             state.http_metrics.requests_by_endpoint.ingest_success.inc();

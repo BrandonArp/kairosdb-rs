@@ -58,6 +58,9 @@ pub struct CassandraConfig {
     /// Maximum concurrent requests per connection
     pub max_concurrent_requests_per_connection: usize,
 
+    /// Maximum total concurrent requests (across all connections)
+    pub max_concurrent_requests: Option<usize>,
+
     /// Username for authentication
     pub username: Option<String>,
 
@@ -97,6 +100,10 @@ pub struct IngestionConfig {
 
     /// Performance testing mode
     pub performance_mode: PerformanceMode,
+
+    /// Default sync behavior - force flush to disk before returning success
+    /// Can be overridden per-request with ?sync=true/false query parameter
+    pub default_sync: bool,
 }
 
 /// Metrics and monitoring configuration
@@ -184,6 +191,7 @@ impl Default for CassandraConfig {
             query_timeout_ms: 10000,
             max_connections: 20, // Increased for better concurrency
             max_concurrent_requests_per_connection: 100, // High concurrency per connection
+            max_concurrent_requests: Some(50), // Default to 50 total concurrent requests
             username: None,
             password: None,
             replication_factor: 1,
@@ -203,6 +211,7 @@ impl Default for IngestionConfig {
             enable_validation: true,
             max_request_size: 100 * 1024 * 1024, // 100MB
             performance_mode: PerformanceMode::ParseAndStoreMode, // Default to normal operation
+            default_sync: false, // Default to fast mode for performance
         }
     }
 }
@@ -293,6 +302,10 @@ impl IngestConfig {
 
         if let Ok(enable_validation) = env::var("KAIROSDB_ENABLE_VALIDATION") {
             config.ingestion.enable_validation = enable_validation.parse()?;
+        }
+
+        if let Ok(default_sync) = env::var("KAIROSDB_DEFAULT_SYNC") {
+            config.ingestion.default_sync = default_sync.parse()?;
         }
 
         if let Ok(perf_mode) = env::var("KAIROSDB_PERFORMANCE_MODE") {

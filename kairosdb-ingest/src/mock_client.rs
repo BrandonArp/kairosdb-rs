@@ -204,6 +204,11 @@ impl CassandraClient for MockCassandraClient {
             prepared_statement_cache_hits: total_queries,
             prepared_statement_cache_misses: 0,
             
+            // Mock concurrency metrics (no actual concurrency in mock)
+            current_concurrent_requests: 0,
+            max_concurrent_requests_reached: 1,
+            avg_semaphore_wait_time_ms: 0.0,
+            
             // Mock timing metrics (all zeros for mock)
             avg_datapoint_write_time_ms: 0.0,
             avg_index_write_time_ms: 0.0,

@@ -137,6 +137,7 @@ impl BloomState {
 }
 
 /// Thread-safe bloom filter manager for index deduplication
+#[derive(Clone)]
 pub struct BloomManager {
     state: Arc<RwLock<BloomState>>,
 }
