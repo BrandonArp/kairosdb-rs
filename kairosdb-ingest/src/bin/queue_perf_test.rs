@@ -12,15 +12,21 @@ use std::fs;
 use tokio::time;
 use tracing::{info, warn};
 
+#[cfg(feature = "profiling")]
+use pprof;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter("debug")
+        .with_env_filter("info")
         .with_target(false)
         .init();
 
     info!("Starting Queue Performance Test");
+
+    #[cfg(feature = "profiling")]
+    let _guard = pprof::ProfilerGuard::new(1000)?;
 
     // Test parameters
     let num_batches = 1000;
@@ -50,15 +56,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test 1: Batch Enqueue Performance
     info!("\n=== Test 1: Batch Enqueue Performance ===");
     let enqueue_start = Instant::now();
+    let mut enqueue_times = Vec::new();
     
     for (i, batch) in batches.iter().enumerate() {
+        let batch_start = Instant::now();
         if let Err(e) = queue.enqueue_batch(batch.clone()) {
             warn!("Failed to enqueue batch {}: {}", i, e);
         }
+        enqueue_times.push(batch_start.elapsed());
         
-        if (i + 1) % 100 == 0 {
-            info!("Enqueued {} batches", i + 1);
-        }
+        // Removed frequent logging for performance
     }
     
     let enqueue_duration = enqueue_start.elapsed();
@@ -71,6 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Queue size: {}", queue_size_after_enqueue);
     if num_batches > 0 {
         info!("  Avg enqueue time: {:?}", enqueue_duration / num_batches as u32);
+        enqueue_times.sort();
+        info!("  Enqueue p50: {:?}", enqueue_times[num_batches / 2]);
+        info!("  Enqueue p99: {:?}", enqueue_times[num_batches * 99 / 100]);
+        info!("  Enqueue min: {:?}", enqueue_times[0]);
+        info!("  Enqueue max: {:?}", enqueue_times[num_batches - 1]);
     }
 
     // Test 2: Batch Dequeue Performance  
@@ -78,16 +90,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dequeue_start = Instant::now();
     let mut dequeued_batches = 0;
     let mut dequeued_points = 0;
+    let mut dequeue_times = Vec::new();
     
     loop {
+        let batch_start = Instant::now();
         match queue.dequeue_batch(1000) {
             Ok(Some(batch)) => {
+                dequeue_times.push(batch_start.elapsed());
                 dequeued_batches += 1;
                 dequeued_points += batch.points.len();
                 
-                if dequeued_batches % 100 == 0 {
-                    info!("Dequeued {} batches", dequeued_batches);
-                }
+                // Removed frequent logging for performance
             }
             Ok(None) => {
                 info!("Queue empty, stopping dequeue test");
@@ -112,6 +125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Queue size: {}", queue_size_after_dequeue);
     if dequeued_batches > 0 {
         info!("  Avg dequeue time: {:?}", dequeue_duration / dequeued_batches as u32);
+        dequeue_times.sort();
+        info!("  Dequeue p50: {:?}", dequeue_times[dequeued_batches / 2]);
+        info!("  Dequeue p99: {:?}", dequeue_times[dequeued_batches * 99 / 100]);
+        info!("  Dequeue min: {:?}", dequeue_times[0]);
+        info!("  Dequeue max: {:?}", dequeue_times[dequeued_batches - 1]);
     }
 
     // Test 3: Mixed Workload (Producer/Consumer)
@@ -194,6 +212,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("\n=== Performance Test Complete ===");
+    
+    #[cfg(feature = "profiling")]
+    if let Ok(report) = _guard.report().build() {
+        let file = std::fs::File::create("flamegraph.svg")?;
+        report.flamegraph(file)?;
+        info!("Flamegraph saved to flamegraph.svg");
+    }
     
     Ok(())
 }

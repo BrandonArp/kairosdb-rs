@@ -226,13 +226,17 @@ impl PersistentQueue {
             KairosError::validation(format!("Failed to write batch to queue: {}", e))
         })?;
         
-        // Update metrics
+        // Update metrics and queue size counter
+        let batch_size = entry.batch.points.len();
+        let new_size = self.queue_size.fetch_add(1, Ordering::Relaxed) + 1;
         let duration = start_time.elapsed();
+        
         self.metrics.enqueue_duration.observe(duration.as_secs_f64());
-        self.metrics.enqueue_total.inc_by(entry.batch.points.len() as f64);
+        self.metrics.enqueue_total.inc_by(batch_size as f64);
+        self.metrics.current_size.set(new_size as f64);
         
         trace!("Enqueued batch of {} points to persistent queue in {:?}", 
-               entry.batch.points.len(), duration);
+               batch_size, duration);
         Ok(())
     }
 
@@ -325,7 +329,7 @@ impl PersistentQueue {
         let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
         self.metrics.oldest_entry_age_seconds.set(age_seconds);
         
-        debug!("Dequeued batch with {} points in {:?}", batch_size, start_time.elapsed());
+        trace!("Dequeued batch with {} points in {:?}", batch_size, start_time.elapsed());
         Ok(Some(entry.batch))
     }
     

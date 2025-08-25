@@ -138,7 +138,7 @@ impl SingleWriterCassandraClient {
             .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
             .pool_size(PoolSize::PerHost(
                 std::num::NonZero::new(config.max_connections)
-                    .unwrap_or_else(|| std::num::NonZero::new(1).unwrap())
+                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap())
             ))
             .default_execution_profile_handle(
                 ExecutionProfile::builder()
@@ -204,13 +204,13 @@ impl SingleWriterCassandraClient {
                 }
                 WriteCommand::Batch { batch, response_tx } => {
                     let batch_start = std::time::Instant::now();
-                    info!("Writer task: Processing batch of {} points", batch.points.len());
+                    trace!("Writer task: Processing batch of {} points", batch.points.len());
                     
                     let result = state.write_batch_internal(&batch).await;
                     let batch_duration = batch_start.elapsed();
                     
                     match &result {
-                        Ok(_) => info!("Writer task: Batch of {} points completed successfully in {:?}", batch.points.len(), batch_duration),
+                        Ok(_) => trace!("Writer task: Batch of {} points completed successfully in {:?}", batch.points.len(), batch_duration),
                         Err(e) => error!("Writer task: Batch of {} points failed after {:?}: {}", batch.points.len(), batch_duration, e),
                     }
                     
@@ -278,7 +278,7 @@ impl WriterTaskState {
         }
 
         let internal_start = std::time::Instant::now();
-        info!("Single writer processing batch of {} data points", batch.points.len());
+        trace!("Single writer processing batch of {} data points", batch.points.len());
         self.stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
@@ -301,7 +301,7 @@ impl WriterTaskState {
         
         // Execute all data point writes concurrently
         let datapoints_start = std::time::Instant::now();
-        info!("Executing {} concurrent data point writes to Cassandra", batch.points.len());
+        trace!("Executing {} concurrent data point writes to Cassandra", batch.points.len());
         let results = future::try_join_all(write_futures).await;
         let datapoints_duration = datapoints_start.elapsed();
         
@@ -309,7 +309,7 @@ impl WriterTaskState {
         let datapoint_count = batch.points.len() as u64;
         match results {
             Ok(_) => {
-                info!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
+                trace!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
                 self.stats.total_queries.fetch_add(datapoint_count, Ordering::Relaxed);
                 self.stats.datapoint_writes.fetch_add(datapoint_count, Ordering::Relaxed);
                 self.stats.prepared_statement_cache_hits.fetch_add(datapoint_count, Ordering::Relaxed);
@@ -326,11 +326,11 @@ impl WriterTaskState {
 
         // Write indexes with bloom filter deduplication (no locking needed!)
         let indexes_start = std::time::Instant::now();
-        info!("Writing indexes for batch");
+        trace!("Writing indexes for batch");
         match self.write_indexes(batch).await {
             Ok(index_count) => {
                 let indexes_duration = indexes_start.elapsed();
-                info!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
+                trace!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
                 self.stats.index_writes.fetch_add(index_count, Ordering::Relaxed);
                 self.stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
             }
@@ -346,7 +346,7 @@ impl WriterTaskState {
         let total_duration = internal_start.elapsed();
         self.stats.total_batch_write_time_ns.fetch_add(total_duration.as_nanos() as u64, Ordering::Relaxed);
         self.stats.batches_processed.fetch_add(1, Ordering::Relaxed);
-        info!("Single writer batch completed successfully in {:?} total (datapoints: {:?}, indexes: {:?})", 
+        trace!("Single writer batch completed successfully in {:?} total (datapoints: {:?}, indexes: {:?})", 
               total_duration, datapoints_duration, indexes_start.elapsed());
         Ok(())
     }
@@ -477,7 +477,7 @@ impl CassandraClient for SingleWriterCassandraClient {
             response_tx,
         };
 
-        info!("SingleWriter: Sending batch of {} points to writer task", batch.points.len());
+        trace!("SingleWriter: Sending batch of {} points to writer task", batch.points.len());
         self.write_tx.send(command).map_err(|_| {
             KairosError::cassandra("Writer task unavailable")
         })?;
@@ -488,7 +488,7 @@ impl CassandraClient for SingleWriterCassandraClient {
         })?;
         
         let duration = start.elapsed();
-        info!("SingleWriter: Batch write completed in {:?}", duration);
+        trace!("SingleWriter: Batch write completed in {:?}", duration);
         result
     }
 

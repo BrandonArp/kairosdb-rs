@@ -43,8 +43,6 @@ pub struct IngestionMetrics {
     pub validation_errors: Arc<AtomicU64>,
     /// Total Cassandra errors
     pub cassandra_errors: Arc<AtomicU64>,
-    /// Current queue size
-    pub queue_size: Arc<AtomicUsize>,
     /// Current memory usage in bytes
     pub memory_usage: Arc<AtomicU64>,
     /// Average processing time per batch (ms)
@@ -61,7 +59,6 @@ pub struct PrometheusMetrics {
     pub datapoints_total: Counter,
     pub batches_total: Counter,
     pub errors_total: Counter,
-    pub queue_size_gauge: Gauge,
     pub memory_usage_gauge: Gauge,
     pub batch_duration_histogram: Histogram,
 }
@@ -135,7 +132,6 @@ impl IngestionService {
             ingestion_errors: Arc::new(AtomicU64::new(0)),
             validation_errors: Arc::new(AtomicU64::new(0)),
             cassandra_errors: Arc::new(AtomicU64::new(0)),
-            queue_size: Arc::new(AtomicUsize::new(0)),
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
@@ -193,7 +189,6 @@ impl IngestionService {
             ingestion_errors: Arc::new(AtomicU64::new(0)),
             validation_errors: Arc::new(AtomicU64::new(0)),
             cassandra_errors: Arc::new(AtomicU64::new(0)),
-            queue_size: Arc::new(AtomicUsize::new(0)),
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
@@ -282,8 +277,7 @@ impl IngestionService {
             return Err(e);
         }
 
-        // Update queue size metric
-        self.metrics.queue_size.store(self.persistent_queue.size() as usize, Ordering::Relaxed);
+        // Queue size is tracked by PersistentQueue internally
 
         // Update success metrics (immediate response after writing to queue)
         self.metrics
@@ -341,11 +335,11 @@ impl IngestionService {
                             
                             // Write to Cassandra with timing
                             let cassandra_start = std::time::Instant::now();
-                            info!("Writing batch of {} points to Cassandra", batch.points.len());
+                            trace!("Writing batch of {} points to Cassandra", batch.points.len());
                             match cassandra_client.write_batch(&batch).await {
                                 Ok(_) => {
                                     let cassandra_duration = cassandra_start.elapsed();
-                                    info!("Successfully wrote batch of {} points to Cassandra in {:?}", batch.points.len(), cassandra_duration);
+                                    trace!("Successfully wrote batch of {} points to Cassandra in {:?}", batch.points.len(), cassandra_duration);
                                     // Note: metrics are already updated when items are enqueued for immediate response
                                 }
                                 Err(e) => {
@@ -377,8 +371,7 @@ impl IngestionService {
                     }
                 }
                 
-                // Update queue size and disk usage metrics
-                metrics.queue_size.store(persistent_queue.size() as usize, Ordering::Relaxed);
+                // Queue metrics are tracked by PersistentQueue internally
                 
                 // Update disk usage metric periodically
                 if let Ok(disk_usage) = persistent_queue.get_disk_usage_bytes() {
@@ -411,7 +404,7 @@ impl IngestionService {
             ingestion_errors: self.metrics.ingestion_errors.load(Ordering::Relaxed),
             validation_errors: self.metrics.validation_errors.load(Ordering::Relaxed),
             cassandra_errors: self.metrics.cassandra_errors.load(Ordering::Relaxed),
-            queue_size: self.metrics.queue_size.load(Ordering::Relaxed),
+            queue_size: self.persistent_queue.size() as usize,
             memory_usage: self.metrics.memory_usage.load(Ordering::Relaxed),
             avg_batch_time_ms: self.metrics.avg_batch_time_ms.load(Ordering::Relaxed),
             last_batch_time: *self.metrics.last_batch_time.read(),
@@ -423,7 +416,7 @@ impl IngestionService {
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let cassandra_healthy = self.cassandra_client.health_check().await.unwrap_or(false);
         let backpressure_active = self.backpressure_active.load(Ordering::Relaxed) > 0;
-        let queue_size = self.metrics.queue_size.load(Ordering::Relaxed);
+        let queue_size = self.persistent_queue.size() as usize;
         let max_queue_size = self.config.ingestion.max_queue_size;
 
         let status = if cassandra_healthy && !backpressure_active && queue_size < max_queue_size {
@@ -473,12 +466,6 @@ impl PrometheusMetrics {
         )
         .unwrap_or_else(|_| prometheus::Counter::new("test_counter3", "test").unwrap());
 
-        let queue_size_gauge = register_gauge!(
-            format!("kairosdb_queue_size{}", suffix),
-            "Current queue size"
-        )
-        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge", "test").unwrap());
-
         let memory_usage_gauge = register_gauge!(
             format!("kairosdb_memory_usage_bytes{}", suffix),
             "Current memory usage in bytes"
@@ -501,7 +488,6 @@ impl PrometheusMetrics {
             datapoints_total,
             batches_total,
             errors_total,
-            queue_size_gauge,
             memory_usage_gauge,
             batch_duration_histogram,
         })
@@ -520,7 +506,6 @@ impl Default for IngestionMetrics {
             ingestion_errors: Arc::new(AtomicU64::new(0)),
             validation_errors: Arc::new(AtomicU64::new(0)),
             cassandra_errors: Arc::new(AtomicU64::new(0)),
-            queue_size: Arc::new(AtomicUsize::new(0)),
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
