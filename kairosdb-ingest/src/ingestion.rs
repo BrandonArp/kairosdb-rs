@@ -21,7 +21,7 @@ use std::{
     },
     time::Instant,
 };
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
@@ -50,6 +50,14 @@ pub struct IngestionMetrics {
     pub avg_batch_time_ms: Arc<AtomicU64>,
     /// Last batch processing time
     pub last_batch_time: Arc<RwLock<Option<Instant>>>,
+    /// Work channel utilization percentage (0-100)
+    pub work_channel_utilization: Arc<AtomicU64>,
+    /// Response channel utilization percentage (0-100)
+    pub response_channel_utilization: Arc<AtomicU64>,
+    /// Rolling average of work channel utilization (simple exponential)
+    pub work_channel_avg_utilization: Arc<AtomicU64>,
+    /// Rolling average of response channel utilization (simple exponential)
+    pub response_channel_avg_utilization: Arc<AtomicU64>,
     /// Prometheus metrics
     pub prometheus_metrics: PrometheusMetrics,
 }
@@ -62,6 +70,10 @@ pub struct PrometheusMetrics {
     pub errors_total: Counter,
     pub memory_usage_gauge: Gauge,
     pub batch_duration_histogram: Histogram,
+    pub work_channel_utilization_gauge: Gauge,
+    pub response_channel_utilization_gauge: Gauge,
+    pub work_channel_avg_utilization_gauge: Gauge,
+    pub response_channel_avg_utilization_gauge: Gauge,
 }
 
 /// Main ingestion service that handles data point processing
@@ -149,6 +161,10 @@ impl IngestionService {
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
+            work_channel_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_utilization: Arc::new(AtomicU64::new(0)),
+            work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             prometheus_metrics,
         };
 
@@ -208,6 +224,10 @@ impl IngestionService {
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
+            work_channel_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_utilization: Arc::new(AtomicU64::new(0)),
+            work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             prometheus_metrics,
         };
 
@@ -372,8 +392,9 @@ impl IngestionService {
         let work_task = {
             let queue = persistent_queue.clone();
             let config = config.clone();
+            let metrics_clone = metrics.clone();
             tokio::spawn(async move {
-                Self::run_work_sender(queue, work_tx, config).await;
+                Self::run_work_sender(queue, work_tx, config, metrics_clone).await;
             })
         };
         
@@ -435,14 +456,29 @@ impl IngestionService {
                 }
             }
             
+            // Record response channel utilization AFTER collecting responses
+            let response_channel_len = response_rx.len();
+            let response_channel_capacity = response_rx.capacity().unwrap_or(1000);
+            let response_channel_fullness = (response_channel_len as f32 / response_channel_capacity as f32 * 100.0) as u64;
+            
+            // Update response channel metrics
+            metrics.response_channel_utilization.store(response_channel_fullness, Ordering::Relaxed);
+            metrics.prometheus_metrics.response_channel_utilization_gauge.set(response_channel_fullness as f64);
+            
+            // Update rolling average for response channel
+            let old_avg = metrics.response_channel_avg_utilization.load(Ordering::Relaxed);
+            let new_avg = ((old_avg as f64 * 0.9) + (response_channel_fullness as f64 * 0.1)) as u64;
+            metrics.response_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
+            metrics.prometheus_metrics.response_channel_avg_utilization_gauge.set(new_avg as f64);
+            
             // Process batched removals
             if !successful_removals.is_empty() {
                 let total_points = Self::process_successful_batch(&persistent_queue, &mut successful_removals, &metrics).await;
                 if responses_collected == 1 {
                     // Single response - don't log batch info
                 } else {
-                    // info!("Processed batch of {} successful responses ({} total points)",
-                    //       successful_removals.len(), total_points);
+                    debug!("Processed batch of {} successful responses ({} total points, response channel: {}/{} items, {}% full, {}% avg)",
+                          successful_removals.len(), total_points, response_channel_len, response_channel_capacity, response_channel_fullness, new_avg);
                 }
                 successful_removals.clear();
             }
@@ -512,6 +548,7 @@ impl IngestionService {
         persistent_queue: Arc<PersistentQueue>,
         work_tx: flume::Sender<WorkItem>,
         config: Arc<IngestConfig>,
+        metrics: IngestionMetrics,
     ) {
         let full_channel_delay = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
         
@@ -581,12 +618,23 @@ impl IngestionService {
                 }
             }
             
+            // Always record channel utilization metrics
+            let current_channel_len = work_tx.len();
+            let work_channel_fullness = (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u64;
+            
+            // Update current utilization
+            metrics.work_channel_utilization.store(work_channel_fullness, Ordering::Relaxed);
+            metrics.prometheus_metrics.work_channel_utilization_gauge.set(work_channel_fullness as f64);
+            
+            // Update rolling average (simple exponential average: new_avg = 0.9 * old_avg + 0.1 * current)
+            let old_avg = metrics.work_channel_avg_utilization.load(Ordering::Relaxed);
+            let new_avg = ((old_avg as f64 * 0.9) + (work_channel_fullness as f64 * 0.1)) as u64;
+            metrics.work_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
+            metrics.prometheus_metrics.work_channel_avg_utilization_gauge.set(new_avg as f64);
+            
             if items_sent > 0 {
-                let current_channel_len = work_tx.len();
-                let work_channel_fullness = (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u32;
-                
-                info!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, had {} slots available)", 
-                      items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, available_slots);
+                debug!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, {}% avg, had {} slots available)",
+                      items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, new_avg, available_slots);
             }
             
             // No delay - loop immediately to check for more work
@@ -681,12 +729,36 @@ impl PrometheusMetrics {
             .unwrap()
         });
 
+        let work_channel_utilization_gauge = register_gauge!(
+            format!("kairosdb_work_channel_utilization{}", suffix),
+            "Work channel utilization percentage (0-100)"
+        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge3", "test").unwrap());
+
+        let response_channel_utilization_gauge = register_gauge!(
+            format!("kairosdb_response_channel_utilization{}", suffix),
+            "Response channel utilization percentage (0-100)"
+        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge4", "test").unwrap());
+
+        let work_channel_avg_utilization_gauge = register_gauge!(
+            format!("kairosdb_work_channel_avg_utilization{}", suffix),
+            "Work channel average utilization percentage (0-100)"
+        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge5", "test").unwrap());
+
+        let response_channel_avg_utilization_gauge = register_gauge!(
+            format!("kairosdb_response_channel_avg_utilization{}", suffix),
+            "Response channel average utilization percentage (0-100)"
+        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge6", "test").unwrap());
+
         Ok(Self {
             datapoints_total,
             batches_total,
             errors_total,
             memory_usage_gauge,
             batch_duration_histogram,
+            work_channel_utilization_gauge,
+            response_channel_utilization_gauge,
+            work_channel_avg_utilization_gauge,
+            response_channel_avg_utilization_gauge,
         })
     }
 }
@@ -705,6 +777,10 @@ impl Default for IngestionMetrics {
             cassandra_errors: Arc::new(AtomicU64::new(0)),
             memory_usage: Arc::new(AtomicU64::new(0)),
             avg_batch_time_ms: Arc::new(AtomicU64::new(0)),
+            work_channel_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_utilization: Arc::new(AtomicU64::new(0)),
+            work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
             prometheus_metrics: PrometheusMetrics::new_with_prefix(&format!("test_{}", id))
                 .unwrap(),
