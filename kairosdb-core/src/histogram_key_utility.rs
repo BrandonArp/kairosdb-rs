@@ -218,7 +218,7 @@ mod tests {
             }
 
             // Verify the unpacked value maintains the same order of magnitude (approximately)
-            if val >= 1e-50 && val <= 1e50 {
+            if (1e-50..=1e50).contains(&val) {
                 let ratio = unpacked / val;
                 assert!(
                     ratio > 1e-3 && ratio < 1e3,
