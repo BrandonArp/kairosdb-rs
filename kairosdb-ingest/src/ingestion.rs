@@ -27,10 +27,12 @@ use tracing::{debug, error, info, trace, warn};
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
     config::IngestConfig,
-    mock_client::MockCassandraClient,
     multi_writer_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     persistent_queue::PersistentQueue,
 };
+
+#[cfg(test)]
+use crate::mock_client::MockCassandraClient;
 
 /// Comprehensive metrics for monitoring ingestion service
 #[derive(Debug, Clone)]
@@ -87,10 +89,10 @@ pub struct IngestionService {
 
     /// Cassandra client for data persistence
     cassandra_client: BoxedCassandraClient,
-    
+
     /// Direct channel to Cassandra workers (bypasses client interface)
     cassandra_work_tx: Option<flume::Sender<WorkItem>>,
-    
+
     /// Response channel from Cassandra workers
     cassandra_response_rx: Option<flume::Receiver<WorkResponse>>,
 
@@ -113,25 +115,25 @@ impl IngestionService {
         let persistent_queue = Arc::new(
             PersistentQueue::new(queue_dir)
                 .await
-                .context("Failed to initialize persistent queue")?
+                .context("Failed to initialize persistent queue")?,
         );
 
         // Always use multi-worker Cassandra client with bidirectional channels
         info!("Using production multi-worker Cassandra client with bidirectional channels");
         let num_workers = config.cassandra.max_concurrent_requests;
-        
+
         // Create shared MPMC channels for bidirectional communication
         let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
         let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
-        
+
         let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
-            config.cassandra.clone(), 
+            config.cassandra.clone(),
             num_workers,
             work_tx.clone(),
             work_rx,
             response_tx,
             response_rx.clone(),
-            shutdown_token.clone()
+            shutdown_token.clone(),
         )
         .await
         .context("Failed to initialize multi-worker Cassandra client")?;
@@ -143,8 +145,10 @@ impl IngestionService {
             .await
             .context("Failed to ensure Cassandra schema")?;
 
-        info!("Multi-worker Cassandra client ready with {} workers and bidirectional channels", 
-              num_workers.unwrap_or(200));
+        info!(
+            "Multi-worker Cassandra client ready with {} workers and bidirectional channels",
+            num_workers.unwrap_or(200)
+        );
 
         let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
         let cassandra_work_tx = work_tx;
@@ -185,7 +189,7 @@ impl IngestionService {
 
         // Queue processor will be started in main.rs with proper shutdown handling
         info!("Ingestion service initialized, queue processor will be started with shutdown token");
-        
+
         info!(
             "Ingestion service initialized with {} worker threads and persistent queue processor",
             config.ingestion.worker_threads
@@ -205,7 +209,7 @@ impl IngestionService {
         let persistent_queue = Arc::new(
             PersistentQueue::new(queue_dir)
                 .await
-                .context("Failed to initialize test persistent queue")?
+                .context("Failed to initialize test persistent queue")?,
         );
 
         // Use mock client for testing
@@ -237,15 +241,16 @@ impl IngestionService {
             config,
             persistent_queue,
             cassandra_client,
-            cassandra_work_tx: None,  // Mock client doesn't use direct channel
-            cassandra_response_rx: None,  // Mock client doesn't use response channel
+            cassandra_work_tx: None, // Mock client doesn't use direct channel
+            cassandra_response_rx: None, // Mock client doesn't use response channel
             metrics,
             backpressure_active,
         };
 
         // Start background queue processing task for testing
-        let _queue_processor = service.start_queue_processor().await;
-        
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let _queue_processor = service.start_queue_processor(shutdown_token).await;
+
         info!("Test ingestion service initialized with mock client and persistent queue processor");
         Ok(service)
     }
@@ -257,12 +262,15 @@ impl IngestionService {
     }
 
     /// Submit a batch for ingestion with optional sync control
-    pub fn ingest_batch_with_sync(&self, batch: DataPointBatch, sync_to_disk: bool) -> KairosResult<()> {
+    pub fn ingest_batch_with_sync(
+        &self,
+        batch: DataPointBatch,
+        sync_to_disk: bool,
+    ) -> KairosResult<()> {
         let start = Instant::now();
 
         // Check disk usage for backpressure (same as ingest_batch)
-        let disk_usage = self.persistent_queue.get_disk_usage_bytes()
-            .unwrap_or(0);
+        let disk_usage = self.persistent_queue.get_disk_usage_bytes().unwrap_or(0);
         let max_disk_bytes = self.config.ingestion.max_queue_disk_bytes;
 
         let current_queue_size = self.persistent_queue.size();
@@ -271,12 +279,16 @@ impl IngestionService {
         trace!(
             "Queue check (sync={}): items={}/{}, disk={:.2}MB/{:.2}MB",
             sync_to_disk,
-            current_queue_size, max_queue_size,
+            current_queue_size,
+            max_queue_size,
             disk_usage as f64 / 1_048_576.0,
             max_disk_bytes as f64 / 1_048_576.0
         );
 
-        self.persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
+        self.persistent_queue
+            .metrics()
+            .disk_usage_bytes
+            .set(disk_usage as f64);
 
         // Check disk usage limit first
         if disk_usage > max_disk_bytes {
@@ -286,9 +298,10 @@ impl IngestionService {
                 disk_usage as f64 / 1_048_576.0,
                 max_disk_bytes as f64 / 1_048_576.0
             );
-            return Err(KairosError::rate_limit(
-                format!("Queue disk usage limit exceeded: {:.2}MB", disk_usage as f64 / 1_048_576.0)
-            ));
+            return Err(KairosError::rate_limit(format!(
+                "Queue disk usage limit exceeded: {:.2}MB",
+                disk_usage as f64 / 1_048_576.0
+            )));
         }
 
         // Check item count limit
@@ -298,33 +311,47 @@ impl IngestionService {
                 "Queue item count limit exceeded: {} > {}, activating backpressure",
                 current_queue_size, max_queue_size
             );
-            return Err(KairosError::rate_limit(
-                format!("Queue size limit exceeded: {} items", current_queue_size)
-            ));
+            return Err(KairosError::rate_limit(format!(
+                "Queue size limit exceeded: {} items",
+                current_queue_size
+            )));
         }
 
         // Validate batch if validation is enabled
         if self.config.ingestion.enable_validation {
             if let Err(e) = batch.validate_self() {
-                self.metrics.validation_errors.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .validation_errors
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(e);
             }
         }
 
         // Write batch to persistent queue with sync control
-        if let Err(e) = self.persistent_queue.enqueue_batch_with_sync(batch.clone(), sync_to_disk) {
+        if let Err(e) = self
+            .persistent_queue
+            .enqueue_batch_with_sync(batch.clone(), sync_to_disk)
+        {
             error!("Failed to write batch to persistent queue: {}", e);
-            self.metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .ingestion_errors
+                .fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
 
         // Update success metrics
-        self.metrics.datapoints_ingested.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
-        self.metrics.batches_processed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .datapoints_ingested
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .batches_processed
+            .fetch_add(1, Ordering::Relaxed);
         *self.metrics.last_batch_time.write() = Some(Instant::now());
 
         let elapsed = start.elapsed();
-        self.metrics.avg_batch_time_ms.store(elapsed.as_millis() as u64, Ordering::Relaxed);
+        self.metrics
+            .avg_batch_time_ms
+            .store(elapsed.as_millis() as u64, Ordering::Relaxed);
 
         trace!(
             "Successfully enqueued batch of {} points (sync={}) in {:?}",
@@ -337,27 +364,36 @@ impl IngestionService {
     }
 
     /// Start the background queue processor task
-    pub async fn start_queue_processor(&self, shutdown_token: tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()> {
+    pub async fn start_queue_processor(
+        &self,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let persistent_queue = self.persistent_queue.clone();
-        let cassandra_client = self.cassandra_client.clone();
+        let _cassandra_client = self.cassandra_client.clone();
         let cassandra_work_tx = self.cassandra_work_tx.clone();
         let cassandra_response_rx = self.cassandra_response_rx.clone();
         let config = self.config.clone();
         let metrics = self.metrics.clone();
-        
+
         tokio::spawn(async move {
             info!("Persistent queue processor task spawned successfully");
-            
-            let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
-            info!("Creating interval timer with duration: {:?}", interval_duration);
-            let mut interval = tokio::time::interval(interval_duration);
-            
+
+            let interval_duration =
+                std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
+            info!(
+                "Creating interval timer with duration: {:?}",
+                interval_duration
+            );
+            let _interval = tokio::time::interval(interval_duration);
+
             info!("Starting persistent queue processor with bidirectional MPMC channels");
-            
+
             // Use bidirectional processor only
-            let work_tx = cassandra_work_tx.expect("Multi-worker client should provide work channel");
-            let response_rx = cassandra_response_rx.expect("Multi-worker client should provide response channel");
-            
+            let work_tx =
+                cassandra_work_tx.expect("Multi-worker client should provide work channel");
+            let response_rx =
+                cassandra_response_rx.expect("Multi-worker client should provide response channel");
+
             info!("Starting optimized bidirectional channel mode");
             Self::run_bidirectional_processor(
                 persistent_queue,
@@ -365,11 +401,12 @@ impl IngestionService {
                 response_rx,
                 config,
                 metrics,
-                shutdown_token
-            ).await;
+                shutdown_token,
+            )
+            .await;
         })
     }
-    
+
     /// Run the optimized bidirectional processor with separate tasks
     async fn run_bidirectional_processor(
         persistent_queue: Arc<PersistentQueue>,
@@ -380,17 +417,18 @@ impl IngestionService {
         shutdown_token: CancellationToken,
     ) {
         info!("Starting separate response processor and work sender tasks");
-        
+
         // Spawn dedicated response processing task
         let response_task = {
             let queue = persistent_queue.clone();
             let metrics = metrics.clone();
             let shutdown_token_clone = shutdown_token.clone();
             tokio::spawn(async move {
-                Self::run_response_processor(queue, response_rx, metrics, shutdown_token_clone).await;
+                Self::run_response_processor(queue, response_rx, metrics, shutdown_token_clone)
+                    .await;
             })
         };
-        
+
         // Spawn dedicated work sending task
         let work_task = {
             let queue = persistent_queue.clone();
@@ -398,10 +436,11 @@ impl IngestionService {
             let metrics_clone = metrics.clone();
             let shutdown_token_clone = shutdown_token.clone();
             tokio::spawn(async move {
-                Self::run_work_sender(queue, work_tx, config, metrics_clone, shutdown_token_clone).await;
+                Self::run_work_sender(queue, work_tx, config, metrics_clone, shutdown_token_clone)
+                    .await;
             })
         };
-        
+
         // Wait for shutdown signal or task completion
         tokio::select! {
             _ = shutdown_token.cancelled() => {
@@ -414,10 +453,10 @@ impl IngestionService {
                 warn!("Work sender task completed unexpectedly: {:?}", result);
             }
         }
-        
+
         info!("Queue processor shutdown complete");
     }
-    
+
     /// Dedicated response processing task - processes responses with batched queue operations
     async fn run_response_processor(
         persistent_queue: Arc<PersistentQueue>,
@@ -426,10 +465,10 @@ impl IngestionService {
         shutdown_token: CancellationToken,
     ) {
         info!("Response processor task started with batched queue operations");
-        
+
         let mut successful_removals = Vec::new();
         let mut failed_unclaims = Vec::new();
-        
+
         loop {
             // Check for shutdown signal
             if shutdown_token.is_cancelled() {
@@ -439,25 +478,43 @@ impl IngestionService {
             // Record response channel utilization BEFORE collecting responses
             let response_channel_len = response_rx.len();
             let response_channel_capacity = response_rx.capacity().unwrap_or(1000);
-            let response_channel_fullness = (response_channel_len as f32 / response_channel_capacity as f32 * 100.0) as u64;
-            
+            let response_channel_fullness =
+                (response_channel_len as f32 / response_channel_capacity as f32 * 100.0) as u64;
+
             // Update response channel metrics
-            metrics.response_channel_utilization.store(response_channel_fullness, Ordering::Relaxed);
-            metrics.prometheus_metrics.response_channel_utilization_gauge.set(response_channel_fullness as f64);
-            
+            metrics
+                .response_channel_utilization
+                .store(response_channel_fullness, Ordering::Relaxed);
+            metrics
+                .prometheus_metrics
+                .response_channel_utilization_gauge
+                .set(response_channel_fullness as f64);
+
             // Update rolling average for response channel
-            let old_avg = metrics.response_channel_avg_utilization.load(Ordering::Relaxed);
-            let new_avg = ((old_avg as f64 * 0.9) + (response_channel_fullness as f64 * 0.1)) as u64;
-            metrics.response_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
-            metrics.prometheus_metrics.response_channel_avg_utilization_gauge.set(new_avg as f64);
-            
+            let old_avg = metrics
+                .response_channel_avg_utilization
+                .load(Ordering::Relaxed);
+            let new_avg =
+                ((old_avg as f64 * 0.9) + (response_channel_fullness as f64 * 0.1)) as u64;
+            metrics
+                .response_channel_avg_utilization
+                .store(new_avg, Ordering::Relaxed);
+            metrics
+                .prometheus_metrics
+                .response_channel_avg_utilization_gauge
+                .set(new_avg as f64);
+
             // Collect responses in batches - process immediately available ones
             let mut responses_collected = 0;
-            
+
             // Always get at least one response (blocking)
             match response_rx.recv_async().await {
                 Ok(work_response) => {
-                    Self::collect_response(&mut successful_removals, &mut failed_unclaims, work_response);
+                    Self::collect_response(
+                        &mut successful_removals,
+                        &mut failed_unclaims,
+                        work_response,
+                    );
                     responses_collected += 1;
                 }
                 Err(_) => {
@@ -465,12 +522,16 @@ impl IngestionService {
                     break;
                 }
             }
-            
+
             // Then collect all immediately available responses (non-blocking)
             while responses_collected < 100 {
                 match response_rx.try_recv() {
                     Ok(work_response) => {
-                        Self::collect_response(&mut successful_removals, &mut failed_unclaims, work_response);
+                        Self::collect_response(
+                            &mut successful_removals,
+                            &mut failed_unclaims,
+                            work_response,
+                        );
                         responses_collected += 1;
                     }
                     Err(flume::TryRecvError::Empty) => {
@@ -483,10 +544,15 @@ impl IngestionService {
                     }
                 }
             }
-            
+
             // Process batched removals
             if !successful_removals.is_empty() {
-                let total_points = Self::process_successful_batch(&persistent_queue, &mut successful_removals, &metrics).await;
+                let total_points = Self::process_successful_batch(
+                    &persistent_queue,
+                    &mut successful_removals,
+                    &metrics,
+                )
+                .await;
                 if responses_collected == 1 {
                     // Single response - don't log batch info
                 } else {
@@ -495,7 +561,7 @@ impl IngestionService {
                 }
                 successful_removals.clear();
             }
-            
+
             // Process batched unclaims
             if !failed_unclaims.is_empty() {
                 Self::process_failed_batch(&persistent_queue, &mut failed_unclaims, &metrics).await;
@@ -503,7 +569,7 @@ impl IngestionService {
             }
         }
     }
-    
+
     /// Collect a response into the appropriate batch
     fn collect_response(
         successful_removals: &mut Vec<(String, usize)>,
@@ -519,7 +585,7 @@ impl IngestionService {
             }
         }
     }
-    
+
     /// Process a batch of successful responses
     async fn process_successful_batch(
         persistent_queue: &Arc<PersistentQueue>,
@@ -527,19 +593,21 @@ impl IngestionService {
         metrics: &IngestionMetrics,
     ) -> u64 {
         let mut total_points = 0;
-        
+
         for (queue_key, batch_size) in successful_removals.iter() {
             if let Err(e) = persistent_queue.remove_processed_item(queue_key, *batch_size) {
                 error!("Failed to remove successful item from queue: {}", e);
             } else {
-                metrics.datapoints_ingested.fetch_add(*batch_size as u64, Ordering::Relaxed);
+                metrics
+                    .datapoints_ingested
+                    .fetch_add(*batch_size as u64, Ordering::Relaxed);
                 total_points += *batch_size as u64;
             }
         }
-        
+
         total_points
     }
-    
+
     /// Process a batch of failed responses  
     async fn process_failed_batch(
         persistent_queue: &Arc<PersistentQueue>,
@@ -551,11 +619,14 @@ impl IngestionService {
             if let Err(e) = persistent_queue.mark_item_failed(queue_key) {
                 error!("Failed to unclaim failed item: {}", e);
             } else {
-                warn!("Unclaimed failed item {} for retry: {}", queue_key, error_msg);
+                warn!(
+                    "Unclaimed failed item {} for retry: {}",
+                    queue_key, error_msg
+                );
             }
         }
     }
-    
+
     /// Dedicated work sending task - sends work items as fast as possible
     async fn run_work_sender(
         persistent_queue: Arc<PersistentQueue>,
@@ -564,10 +635,14 @@ impl IngestionService {
         metrics: IngestionMetrics,
         shutdown_token: CancellationToken,
     ) {
-        let full_channel_delay = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
-        
-        info!("Work sender task started with no delays (except {}ms when channel full)", config.ingestion.batch_timeout_ms);
-        
+        let full_channel_delay =
+            std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
+
+        info!(
+            "Work sender task started with no delays (except {}ms when channel full)",
+            config.ingestion.batch_timeout_ms
+        );
+
         loop {
             // Check for shutdown signal
             if shutdown_token.is_cancelled() {
@@ -578,16 +653,16 @@ impl IngestionService {
             let work_channel_len = work_tx.len();
             let work_channel_capacity = work_tx.capacity().unwrap_or(1000);
             let available_slots = work_channel_capacity.saturating_sub(work_channel_len);
-            
+
             if available_slots == 0 {
                 // Channel is completely full - workers are busy, wait before checking again
                 tokio::time::sleep(full_channel_delay).await;
                 continue;
             }
-            
+
             // Use large batches to fill channel efficiently
             let batch_size = available_slots.min(900); // Up to 900 items per batch
-            
+
             let work_items = match persistent_queue.claim_work_items_batch(30000, batch_size) {
                 Ok(items) => items,
                 Err(e) => {
@@ -595,20 +670,20 @@ impl IngestionService {
                     continue;
                 }
             };
-            
+
             if work_items.is_empty() {
                 // No work available - add small delay to prevent CPU spinning
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 continue;
             }
-            
+
             let mut items_sent = 0;
             for work_item in &work_items {
                 let cassandra_work = WorkItem {
                     batch: work_item.entry.batch.clone(),
                     queue_key: work_item.queue_key.clone(),
                 };
-                
+
                 // Since we calculated available slots, try_send should always succeed
                 // But handle the edge case where another thread filled the channel
                 match work_tx.try_send(cassandra_work) {
@@ -617,11 +692,19 @@ impl IngestionService {
                     }
                     Err(flume::TrySendError::Full(_)) => {
                         // Unexpected - channel filled between our check and send
-                        warn!("Work channel unexpectedly full, unclaiming remaining {} items", work_items.len() - items_sent);
+                        warn!(
+                            "Work channel unexpectedly full, unclaiming remaining {} items",
+                            work_items.len() - items_sent
+                        );
                         // Unclaim this and all remaining items
                         for remaining_item in work_items.iter().skip(items_sent) {
-                            if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
-                                error!("Failed to unclaim item after unexpected full: {}", unclaim_err);
+                            if let Err(unclaim_err) =
+                                persistent_queue.mark_item_failed(&remaining_item.queue_key)
+                            {
+                                error!(
+                                    "Failed to unclaim item after unexpected full: {}",
+                                    unclaim_err
+                                );
                             }
                         }
                         break;
@@ -630,7 +713,9 @@ impl IngestionService {
                         error!("Work channel disconnected, work sender exiting");
                         // Unclaim this and all remaining items
                         for remaining_item in work_items.iter().skip(items_sent) {
-                            if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
+                            if let Err(unclaim_err) =
+                                persistent_queue.mark_item_failed(&remaining_item.queue_key)
+                            {
                                 error!("Failed to unclaim item after disconnect: {}", unclaim_err);
                             }
                         }
@@ -638,26 +723,37 @@ impl IngestionService {
                     }
                 }
             }
-            
+
             // Always record channel utilization metrics
             let current_channel_len = work_tx.len();
-            let work_channel_fullness = (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u64;
-            
+            let work_channel_fullness =
+                (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u64;
+
             // Update current utilization
-            metrics.work_channel_utilization.store(work_channel_fullness, Ordering::Relaxed);
-            metrics.prometheus_metrics.work_channel_utilization_gauge.set(work_channel_fullness as f64);
-            
+            metrics
+                .work_channel_utilization
+                .store(work_channel_fullness, Ordering::Relaxed);
+            metrics
+                .prometheus_metrics
+                .work_channel_utilization_gauge
+                .set(work_channel_fullness as f64);
+
             // Update rolling average (simple exponential average: new_avg = 0.9 * old_avg + 0.1 * current)
             let old_avg = metrics.work_channel_avg_utilization.load(Ordering::Relaxed);
             let new_avg = ((old_avg as f64 * 0.9) + (work_channel_fullness as f64 * 0.1)) as u64;
-            metrics.work_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
-            metrics.prometheus_metrics.work_channel_avg_utilization_gauge.set(new_avg as f64);
-            
+            metrics
+                .work_channel_avg_utilization
+                .store(new_avg, Ordering::Relaxed);
+            metrics
+                .prometheus_metrics
+                .work_channel_avg_utilization_gauge
+                .set(new_avg as f64);
+
             if items_sent > 0 {
                 debug!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, {}% avg, had {} slots available)",
                       items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, new_avg, available_slots);
             }
-            
+
             // No delay - loop immediately to check for more work
         }
     }
@@ -753,22 +849,26 @@ impl PrometheusMetrics {
         let work_channel_utilization_gauge = register_gauge!(
             format!("kairosdb_work_channel_utilization{}", suffix),
             "Work channel utilization percentage (0-100)"
-        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge3", "test").unwrap());
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge3", "test").unwrap());
 
         let response_channel_utilization_gauge = register_gauge!(
             format!("kairosdb_response_channel_utilization{}", suffix),
             "Response channel utilization percentage (0-100)"
-        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge4", "test").unwrap());
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge4", "test").unwrap());
 
         let work_channel_avg_utilization_gauge = register_gauge!(
             format!("kairosdb_work_channel_avg_utilization{}", suffix),
             "Work channel average utilization percentage (0-100)"
-        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge5", "test").unwrap());
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge5", "test").unwrap());
 
         let response_channel_avg_utilization_gauge = register_gauge!(
             format!("kairosdb_response_channel_avg_utilization{}", suffix),
             "Response channel average utilization percentage (0-100)"
-        ).unwrap_or_else(|_| prometheus::Gauge::new("test_gauge6", "test").unwrap());
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge6", "test").unwrap());
 
         Ok(Self {
             datapoints_total,
@@ -843,7 +943,8 @@ mod tests {
         std::env::set_var("USE_MOCK_CASSANDRA", "true");
 
         let config = Arc::new(IngestConfig::default());
-        let service = IngestionService::new(config).await;
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let service = IngestionService::new(config, shutdown_token).await;
         assert!(service.is_ok());
 
         // Clean up environment variable
@@ -861,7 +962,8 @@ mod tests {
         // Set high queue size limit for testing to avoid triggering backpressure
         config.ingestion.max_queue_size = 100000;
         let config = Arc::new(config);
-        let service = IngestionService::new(config).await.unwrap();
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let service = IngestionService::new(config, shutdown_token).await.unwrap();
 
         let mut batch = DataPointBatch::new();
         batch

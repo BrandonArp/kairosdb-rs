@@ -415,7 +415,7 @@ mod tests {
         assert!(schema.validate().is_ok());
 
         let cql_statements = schema.create_schema_cql();
-        assert_eq!(cql_statements.len(), 5); // keyspace + 4 tables
+        assert_eq!(cql_statements.len(), 6); // keyspace + 5 tables
 
         // Check keyspace creation
         assert!(cql_statements[0].contains("CREATE KEYSPACE"));

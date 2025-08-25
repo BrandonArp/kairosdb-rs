@@ -17,7 +17,7 @@ pub mod metrics;
 pub mod mock_client;
 pub mod multi_writer_client;
 pub mod persistent_queue;
-pub mod single_writer_client;  // Deprecated - will be removed
+pub mod single_writer_client; // Deprecated - will be removed
 
 // Re-export commonly used types
 pub use config::IngestConfig;
@@ -77,9 +77,16 @@ pub fn create_router(state: AppState) -> axum::Router {
                 })
                 .layer(
                     TraceLayer::new_for_http()
-                        .make_span_with(tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::TRACE))
-                        .on_request(tower_http::trace::DefaultOnRequest::new().level(tracing::Level::TRACE))
-                        .on_response(tower_http::trace::DefaultOnResponse::new().level(tracing::Level::TRACE))
+                        .make_span_with(
+                            tower_http::trace::DefaultMakeSpan::new().level(tracing::Level::TRACE),
+                        )
+                        .on_request(
+                            tower_http::trace::DefaultOnRequest::new().level(tracing::Level::TRACE),
+                        )
+                        .on_response(
+                            tower_http::trace::DefaultOnResponse::new()
+                                .level(tracing::Level::TRACE),
+                        ),
                 )
                 .layer(CorsLayer::permissive()),
         )

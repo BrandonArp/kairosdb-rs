@@ -5,12 +5,11 @@
 
 use async_trait::async_trait;
 use futures::{future, stream::FuturesUnordered, StreamExt};
-use tokio::sync::{mpsc, oneshot, Semaphore};
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
     datapoint::DataPointBatch,
     error::{KairosError, KairosResult},
-    schema::{StringIndexEntry},
+    schema::StringIndexEntry,
 };
 use std::{
     collections::HashSet,
@@ -19,6 +18,7 @@ use std::{
         Arc,
     },
 };
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use tracing::{debug, error, info, trace};
 
 // ScyllaDB Rust driver imports
@@ -35,6 +35,7 @@ use crate::config::CassandraConfig;
 
 /// Write command for the single writer task
 #[derive(Debug)]
+#[allow(dead_code)]
 enum WriteCommand {
     DataPoint {
         data_point: kairosdb_core::datapoint::DataPoint,
@@ -55,7 +56,7 @@ pub struct SingleWriterCassandraClient {
 
 /// Internal writer task state (shared across concurrent operations)
 struct WriterTaskState {
-    session: Arc<Session>,  // Arc needed for sharing across concurrent tasks
+    session: Arc<Session>, // Arc needed for sharing across concurrent tasks
     config: Arc<CassandraConfig>,
     bloom_manager: BloomManager,
     stats: Arc<CassandraClientStats>,
@@ -76,7 +77,7 @@ struct CassandraClientStats {
     total_datapoints: AtomicU64,
     connection_errors: AtomicU64,
     batches_processed: AtomicU64,
-    
+
     // Detailed Cassandra operation metrics
     datapoint_writes: AtomicU64,
     datapoint_write_errors: AtomicU64,
@@ -84,12 +85,12 @@ struct CassandraClientStats {
     index_write_errors: AtomicU64,
     prepared_statement_cache_hits: AtomicU64,
     prepared_statement_cache_misses: AtomicU64,
-    
+
     // Concurrency metrics
     concurrent_requests: AtomicU64,
     max_concurrent_requests: AtomicU64,
     semaphore_wait_time_ns: AtomicU64,
-    
+
     // Timing metrics (in nanoseconds for precision)
     total_datapoint_write_time_ns: AtomicU64,
     total_index_write_time_ns: AtomicU64,
@@ -104,7 +105,7 @@ impl Default for CassandraClientStats {
             total_datapoints: AtomicU64::new(0),
             connection_errors: AtomicU64::new(0),
             batches_processed: AtomicU64::new(0),
-            
+
             // Detailed Cassandra operation metrics
             datapoint_writes: AtomicU64::new(0),
             datapoint_write_errors: AtomicU64::new(0),
@@ -112,12 +113,12 @@ impl Default for CassandraClientStats {
             index_write_errors: AtomicU64::new(0),
             prepared_statement_cache_hits: AtomicU64::new(0),
             prepared_statement_cache_misses: AtomicU64::new(0),
-            
+
             // Concurrency metrics
             concurrent_requests: AtomicU64::new(0),
             max_concurrent_requests: AtomicU64::new(0),
             semaphore_wait_time_ns: AtomicU64::new(0),
-            
+
             // Timing metrics (in nanoseconds for precision)
             total_datapoint_write_time_ns: AtomicU64::new(0),
             total_index_write_time_ns: AtomicU64::new(0),
@@ -147,17 +148,21 @@ impl SingleWriterCassandraClient {
 
         // Configure connection pool and concurrency settings
         session_builder = session_builder
-            .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
+            .connection_timeout(std::time::Duration::from_millis(
+                config.connection_timeout_ms,
+            ))
             .pool_size(PoolSize::PerHost(
                 std::num::NonZero::new(config.max_connections)
-                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap())
+                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap()),
             ))
             .default_execution_profile_handle(
                 ExecutionProfile::builder()
                     .consistency(Consistency::LocalQuorum)
-                    .request_timeout(Some(std::time::Duration::from_millis(config.query_timeout_ms)))
+                    .request_timeout(Some(std::time::Duration::from_millis(
+                        config.query_timeout_ms,
+                    )))
                     .build()
-                    .into_handle()
+                    .into_handle(),
             );
 
         let session = session_builder.build().await.map_err(|e| {
@@ -199,14 +204,14 @@ impl SingleWriterCassandraClient {
 
         info!("Single writer task started successfully");
 
-        Ok(Self {
-            write_tx,
-            stats,
-        })
+        Ok(Self { write_tx, stats })
     }
 
     /// The high-concurrency writer task - handles multiple concurrent Cassandra writes
-    async fn writer_task(state: WriterTaskState, mut write_rx: mpsc::UnboundedReceiver<WriteCommand>) {
+    async fn writer_task(
+        state: WriterTaskState,
+        mut write_rx: mpsc::UnboundedReceiver<WriteCommand>,
+    ) {
         info!("High-concurrency writer task started");
 
         // Use FuturesUnordered to track outstanding requests efficiently
@@ -225,14 +230,14 @@ impl SingleWriterCassandraClient {
                                 error!("Failed to create batch from single data point: {}", e);
                                 continue;
                             }
-                            
+
                             // Spawn concurrent processing
                             let future = Self::process_batch_concurrently(state.clone_for_concurrent(), batch, None);
                             outstanding_requests.push(future);
                         }
                         Some(WriteCommand::Batch { batch, response_tx }) => {
                             trace!("Writer task: Queuing batch of {} points for concurrent processing", batch.points.len());
-                            
+
                             // Spawn concurrent processing
                             let future = Self::process_batch_concurrently(state.clone_for_concurrent(), batch, Some(response_tx));
                             outstanding_requests.push(future);
@@ -247,12 +252,12 @@ impl SingleWriterCassandraClient {
                         }
                     }
                 }
-                
+
                 // Handle completed requests
                 _ = outstanding_requests.next(), if !outstanding_requests.is_empty() => {
                     // Completed request is automatically removed from FuturesUnordered
                 }
-                
+
                 // Exit when shutting down and no outstanding requests
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)), if shutting_down && outstanding_requests.is_empty() => {
                     break;
@@ -267,117 +272,194 @@ impl SingleWriterCassandraClient {
 
         info!("High-concurrency writer task stopped");
     }
-    
+
     /// Process a batch concurrently with semaphore-controlled concurrency
     async fn process_batch_concurrently(
-        state: WriterTaskState, 
-        batch: DataPointBatch, 
-        response_tx: Option<oneshot::Sender<KairosResult<()>>>
+        state: WriterTaskState,
+        batch: DataPointBatch,
+        response_tx: Option<oneshot::Sender<KairosResult<()>>>,
     ) {
         let batch_start = std::time::Instant::now();
         let batch_size = batch.points.len();
-        
+
         // Acquire semaphore permit with timing
         let semaphore_start = std::time::Instant::now();
         let semaphore = Arc::clone(&state.semaphore);
         let _permit = match semaphore.acquire().await {
             Ok(permit) => {
                 let wait_time = semaphore_start.elapsed();
-                state.stats.semaphore_wait_time_ns.fetch_add(wait_time.as_nanos() as u64, Ordering::Relaxed);
-                
+                state
+                    .stats
+                    .semaphore_wait_time_ns
+                    .fetch_add(wait_time.as_nanos() as u64, Ordering::Relaxed);
+
                 // Update concurrency metrics
-                let current_concurrent = state.stats.concurrent_requests.fetch_add(1, Ordering::Relaxed) + 1;
+                let current_concurrent = state
+                    .stats
+                    .concurrent_requests
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
                 let max_concurrent = state.stats.max_concurrent_requests.load(Ordering::Relaxed);
                 if current_concurrent > max_concurrent {
-                    state.stats.max_concurrent_requests.store(current_concurrent, Ordering::Relaxed);
+                    state
+                        .stats
+                        .max_concurrent_requests
+                        .store(current_concurrent, Ordering::Relaxed);
                 }
-                
-                trace!("Acquired semaphore permit after {:?} wait (concurrent requests: {})", wait_time, current_concurrent);
+
+                trace!(
+                    "Acquired semaphore permit after {:?} wait (concurrent requests: {})",
+                    wait_time,
+                    current_concurrent
+                );
                 permit
             }
             Err(e) => {
                 error!("Failed to acquire semaphore permit: {}", e);
                 if let Some(tx) = response_tx {
-                    let _ = tx.send(Err(KairosError::cassandra("Concurrency limit acquisition failed")));
+                    let _ = tx.send(Err(KairosError::cassandra(
+                        "Concurrency limit acquisition failed",
+                    )));
                 }
                 return;
             }
         };
-        
+
         // Process the batch - need to make this method work without mutable self
         let result = Self::write_batch_internal_static(state, &batch).await;
         let batch_duration = batch_start.elapsed();
-        
+
         match &result {
-            Ok(_) => trace!("Concurrent batch of {} points completed successfully in {:?}", batch_size, batch_duration),
-            Err(e) => error!("Concurrent batch of {} points failed after {:?}: {}", batch_size, batch_duration, e),
+            Ok(_) => trace!(
+                "Concurrent batch of {} points completed successfully in {:?}",
+                batch_size,
+                batch_duration
+            ),
+            Err(e) => error!(
+                "Concurrent batch of {} points failed after {:?}: {}",
+                batch_size, batch_duration, e
+            ),
         }
-        
+
         // Send response back if requested
         if let Some(tx) = response_tx {
             let _ = tx.send(result);
         }
-        
+
         // Permit is automatically dropped here, releasing the semaphore
     }
-    
+
     /// Static version of write_batch_internal for concurrent processing
-    async fn write_batch_internal_static(state: WriterTaskState, batch: &DataPointBatch) -> KairosResult<()> {
+    async fn write_batch_internal_static(
+        state: WriterTaskState,
+        batch: &DataPointBatch,
+    ) -> KairosResult<()> {
         if batch.points.is_empty() {
             trace!("Empty batch, nothing to write");
             return Ok(());
         }
 
         let internal_start = std::time::Instant::now();
-        trace!("Concurrent writer processing batch of {} data points", batch.points.len());
-        state.stats
+        trace!(
+            "Concurrent writer processing batch of {} data points",
+            batch.points.len()
+        );
+        state
+            .stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
         // Prepare all data point writes concurrently
-        let prepared_stmt = state.insert_data_point.as_ref()
+        let prepared_stmt = state
+            .insert_data_point
+            .as_ref()
             .ok_or_else(|| KairosError::cassandra("Data point prepared statement not available"))?;
-        
-        let write_futures: Vec<_> = batch.points.iter().map(|data_point| {
-            let row_key = RowKey::from_data_point(data_point);
-            let column_name = ColumnName::from_timestamp(data_point.timestamp);
-            let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
-            
-            let row_key_bytes = row_key.to_bytes();
-            let column_key_bytes = column_name.to_bytes();
-            let value_bytes = &cassandra_value.bytes;
-            
-            state.session.execute_unpaged(prepared_stmt, (row_key_bytes, column_key_bytes, value_bytes.clone()))
-        }).collect();
-        
+
+        let write_futures: Vec<_> = batch
+            .points
+            .iter()
+            .map(|data_point| {
+                let row_key = RowKey::from_data_point(data_point);
+                let column_name = ColumnName::from_timestamp(data_point.timestamp);
+                let cassandra_value =
+                    CassandraValue::from_data_point_value(&data_point.value, None);
+
+                let row_key_bytes = row_key.to_bytes();
+                let column_key_bytes = column_name.to_bytes();
+                let value_bytes = &cassandra_value.bytes;
+
+                state.session.execute_unpaged(
+                    prepared_stmt,
+                    (row_key_bytes, column_key_bytes, value_bytes.clone()),
+                )
+            })
+            .collect();
+
         // Execute all data point writes concurrently
         let datapoints_start = std::time::Instant::now();
-        trace!("Executing {} concurrent data point writes to Cassandra", batch.points.len());
+        trace!(
+            "Executing {} concurrent data point writes to Cassandra",
+            batch.points.len()
+        );
         let results = future::try_join_all(write_futures).await;
         let datapoints_duration = datapoints_start.elapsed();
-        
+
         // Update detailed stats based on results
         let datapoint_count = batch.points.len() as u64;
         match results {
             Ok(_) => {
-                trace!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
-                state.stats.total_queries.fetch_add(datapoint_count, Ordering::Relaxed);
-                state.stats.datapoint_writes.fetch_add(datapoint_count, Ordering::Relaxed);
-                state.stats.prepared_statement_cache_hits.fetch_add(datapoint_count, Ordering::Relaxed);
-                state.stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
-                
+                trace!(
+                    "Successfully wrote {} data points to Cassandra in {:?}",
+                    batch.points.len(),
+                    datapoints_duration
+                );
+                state
+                    .stats
+                    .total_queries
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                state
+                    .stats
+                    .datapoint_writes
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                state
+                    .stats
+                    .prepared_statement_cache_hits
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_datapoint_write_time_ns
+                    .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+
                 // Update concurrency metrics after successful completion
-                state.stats.concurrent_requests.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .concurrent_requests
+                    .fetch_sub(1, Ordering::Relaxed);
             }
             Err(e) => {
-                error!("Failed to write data points to Cassandra after {:?}: {}", datapoints_duration, e);
+                error!(
+                    "Failed to write data points to Cassandra after {:?}: {}",
+                    datapoints_duration, e
+                );
                 state.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-                state.stats.datapoint_write_errors.fetch_add(datapoint_count, Ordering::Relaxed);
-                state.stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
-                
+                state
+                    .stats
+                    .datapoint_write_errors
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_datapoint_write_time_ns
+                    .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+
                 // Update concurrency metrics even on failure
-                state.stats.concurrent_requests.fetch_sub(1, Ordering::Relaxed);
-                return Err(KairosError::cassandra(format!("Failed to write data points: {}", e)));
+                state
+                    .stats
+                    .concurrent_requests
+                    .fetch_sub(1, Ordering::Relaxed);
+                return Err(KairosError::cassandra(format!(
+                    "Failed to write data points: {}",
+                    e
+                )));
             }
         }
 
@@ -387,28 +469,59 @@ impl SingleWriterCassandraClient {
         match Self::write_indexes_static(&state, batch).await {
             Ok(index_count) => {
                 let indexes_duration = indexes_start.elapsed();
-                trace!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
-                state.stats.index_writes.fetch_add(index_count, Ordering::Relaxed);
-                state.stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+                trace!(
+                    "Completed writing {} indexes in {:?}",
+                    index_count,
+                    indexes_duration
+                );
+                state
+                    .stats
+                    .index_writes
+                    .fetch_add(index_count, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_index_write_time_ns
+                    .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
             }
             Err(e) => {
                 let indexes_duration = indexes_start.elapsed();
-                error!("Failed to write indexes after {:?}: {}", indexes_duration, e);
-                state.stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
-                state.stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+                error!(
+                    "Failed to write indexes after {:?}: {}",
+                    indexes_duration, e
+                );
+                state
+                    .stats
+                    .index_write_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                state
+                    .stats
+                    .total_index_write_time_ns
+                    .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
                 return Err(e);
             }
         }
 
         let total_duration = internal_start.elapsed();
-        state.stats.total_batch_write_time_ns.fetch_add(total_duration.as_nanos() as u64, Ordering::Relaxed);
-        state.stats.batches_processed.fetch_add(1, Ordering::Relaxed);
-        trace!("Concurrent writer batch completed successfully in {:?} total", total_duration);
+        state
+            .stats
+            .total_batch_write_time_ns
+            .fetch_add(total_duration.as_nanos() as u64, Ordering::Relaxed);
+        state
+            .stats
+            .batches_processed
+            .fetch_add(1, Ordering::Relaxed);
+        trace!(
+            "Concurrent writer batch completed successfully in {:?} total",
+            total_duration
+        );
         Ok(())
     }
-    
+
     /// Static version of write_indexes for concurrent processing
-    async fn write_indexes_static(state: &WriterTaskState, batch: &DataPointBatch) -> KairosResult<u64> {
+    async fn write_indexes_static(
+        state: &WriterTaskState,
+        batch: &DataPointBatch,
+    ) -> KairosResult<u64> {
         let mut metric_names = HashSet::new();
         let mut tag_names = HashSet::new();
         let mut tag_values = HashSet::new();
@@ -431,7 +544,7 @@ impl SingleWriterCassandraClient {
         );
 
         let mut indexes_written = 0u64;
-        let mut bloom_manager = state.bloom_manager.clone(); // Each concurrent task gets its own
+        let bloom_manager = state.bloom_manager.clone(); // Each concurrent task gets its own
 
         // Write metric name indexes (with bloom filter deduplication)
         for metric_name in metric_names {
@@ -466,15 +579,20 @@ impl SingleWriterCassandraClient {
         trace!("All {} indexes written successfully", indexes_written);
         Ok(indexes_written)
     }
-    
+
     /// Static version of write_string_index for concurrent processing
-    async fn write_string_index_static(state: &WriterTaskState, entry: &StringIndexEntry) -> KairosResult<()> {
+    async fn write_string_index_static(
+        state: &WriterTaskState,
+        entry: &StringIndexEntry,
+    ) -> KairosResult<()> {
         let key_bytes = entry.key().to_bytes();
         let column_name = entry.index_column();
         let value_bytes = vec![0u8]; // Empty value for string index
 
         if let Some(ref prepared) = state.insert_string_index {
-            state.session.execute_unpaged(prepared, (key_bytes, column_name, value_bytes))
+            state
+                .session
+                .execute_unpaged(prepared, (key_bytes, column_name, value_bytes))
                 .await
                 .map_err(|e| {
                     state.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
@@ -491,11 +609,12 @@ impl SingleWriterCassandraClient {
     }
 }
 
+#[allow(dead_code)]
 impl WriterTaskState {
     /// Clone the state for concurrent processing (shares session and prepared statements)
     fn clone_for_concurrent(&self) -> Self {
         Self {
-            session: Arc::clone(&self.session),  // Share the Arc<Session>
+            session: Arc::clone(&self.session), // Share the Arc<Session>
             config: Arc::clone(&self.config),
             bloom_manager: BloomManager::new(), // Each concurrent task gets its own bloom filter
             stats: Arc::clone(&self.stats),
@@ -516,33 +635,28 @@ impl WriterTaskState {
             "INSERT INTO {}.data_points (key, column1, value) VALUES (?, ?, ?)",
             self.config.keyspace
         );
-        self.insert_data_point = Some(
-            self.session.prepare(data_point_query).await.map_err(|e| {
+        self.insert_data_point =
+            Some(self.session.prepare(data_point_query).await.map_err(|e| {
                 KairosError::cassandra(format!("Failed to prepare data point statement: {}", e))
-            })?
-        );
+            })?);
 
         // Prepare string index insert
         let string_index_query = format!(
             "INSERT INTO {}.string_index (key, column1, value) VALUES (?, ?, ?)",
             self.config.keyspace
         );
-        self.insert_string_index = Some(
-            self.session.prepare(string_index_query).await.map_err(|e| {
-                KairosError::cassandra(format!("Failed to prepare string index statement: {}", e))
-            })?
-        );
+        self.insert_string_index = Some(self.session.prepare(string_index_query).await.map_err(
+            |e| KairosError::cassandra(format!("Failed to prepare string index statement: {}", e)),
+        )?);
 
         // Prepare row key index insert
         let row_key_index_query = format!(
             "INSERT INTO {}.row_key_index (key, column1, value) VALUES (?, ?, ?)",
             self.config.keyspace
         );
-        self.insert_row_key_index = Some(
-            self.session.prepare(row_key_index_query).await.map_err(|e| {
-                KairosError::cassandra(format!("Failed to prepare row key index statement: {}", e))
-            })?
-        );
+        self.insert_row_key_index = Some(self.session.prepare(row_key_index_query).await.map_err(
+            |e| KairosError::cassandra(format!("Failed to prepare row key index statement: {}", e)),
+        )?);
 
         info!("All CQL statements prepared successfully");
         Ok(())
@@ -556,49 +670,87 @@ impl WriterTaskState {
         }
 
         let internal_start = std::time::Instant::now();
-        trace!("Single writer processing batch of {} data points", batch.points.len());
+        trace!(
+            "Single writer processing batch of {} data points",
+            batch.points.len()
+        );
         self.stats
             .total_datapoints
             .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
         // Prepare all data point writes concurrently
-        let prepared_stmt = self.insert_data_point.as_ref()
+        let prepared_stmt = self
+            .insert_data_point
+            .as_ref()
             .ok_or_else(|| KairosError::cassandra("Data point prepared statement not available"))?;
-        
-        let write_futures: Vec<_> = batch.points.iter().map(|data_point| {
-            let row_key = RowKey::from_data_point(data_point);
-            let column_name = ColumnName::from_timestamp(data_point.timestamp);
-            let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
-            
-            let row_key_bytes = row_key.to_bytes();
-            let column_key_bytes = column_name.to_bytes();
-            let value_bytes = &cassandra_value.bytes;
-            
-            self.session.execute_unpaged(prepared_stmt, (row_key_bytes, column_key_bytes, value_bytes.clone()))
-        }).collect();
-        
+
+        let write_futures: Vec<_> = batch
+            .points
+            .iter()
+            .map(|data_point| {
+                let row_key = RowKey::from_data_point(data_point);
+                let column_name = ColumnName::from_timestamp(data_point.timestamp);
+                let cassandra_value =
+                    CassandraValue::from_data_point_value(&data_point.value, None);
+
+                let row_key_bytes = row_key.to_bytes();
+                let column_key_bytes = column_name.to_bytes();
+                let value_bytes = &cassandra_value.bytes;
+
+                self.session.execute_unpaged(
+                    prepared_stmt,
+                    (row_key_bytes, column_key_bytes, value_bytes.clone()),
+                )
+            })
+            .collect();
+
         // Execute all data point writes concurrently
         let datapoints_start = std::time::Instant::now();
-        trace!("Executing {} concurrent data point writes to Cassandra", batch.points.len());
+        trace!(
+            "Executing {} concurrent data point writes to Cassandra",
+            batch.points.len()
+        );
         let results = future::try_join_all(write_futures).await;
         let datapoints_duration = datapoints_start.elapsed();
-        
+
         // Update detailed stats based on results
         let datapoint_count = batch.points.len() as u64;
         match results {
             Ok(_) => {
-                trace!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
-                self.stats.total_queries.fetch_add(datapoint_count, Ordering::Relaxed);
-                self.stats.datapoint_writes.fetch_add(datapoint_count, Ordering::Relaxed);
-                self.stats.prepared_statement_cache_hits.fetch_add(datapoint_count, Ordering::Relaxed);
-                self.stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+                trace!(
+                    "Successfully wrote {} data points to Cassandra in {:?}",
+                    batch.points.len(),
+                    datapoints_duration
+                );
+                self.stats
+                    .total_queries
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                self.stats
+                    .datapoint_writes
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                self.stats
+                    .prepared_statement_cache_hits
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                self.stats
+                    .total_datapoint_write_time_ns
+                    .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
             }
             Err(e) => {
-                error!("Failed to write data points to Cassandra after {:?}: {}", datapoints_duration, e);
+                error!(
+                    "Failed to write data points to Cassandra after {:?}: {}",
+                    datapoints_duration, e
+                );
                 self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-                self.stats.datapoint_write_errors.fetch_add(datapoint_count, Ordering::Relaxed);
-                self.stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
-                return Err(KairosError::cassandra(format!("Failed to write data points: {}", e)));
+                self.stats
+                    .datapoint_write_errors
+                    .fetch_add(datapoint_count, Ordering::Relaxed);
+                self.stats
+                    .total_datapoint_write_time_ns
+                    .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+                return Err(KairosError::cassandra(format!(
+                    "Failed to write data points: {}",
+                    e
+                )));
             }
         }
 
@@ -608,21 +760,38 @@ impl WriterTaskState {
         match self.write_indexes(batch).await {
             Ok(index_count) => {
                 let indexes_duration = indexes_start.elapsed();
-                trace!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
-                self.stats.index_writes.fetch_add(index_count, Ordering::Relaxed);
-                self.stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+                trace!(
+                    "Completed writing {} indexes in {:?}",
+                    index_count,
+                    indexes_duration
+                );
+                self.stats
+                    .index_writes
+                    .fetch_add(index_count, Ordering::Relaxed);
+                self.stats
+                    .total_index_write_time_ns
+                    .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
             }
             Err(e) => {
                 let indexes_duration = indexes_start.elapsed();
-                error!("Failed to write indexes after {:?}: {}", indexes_duration, e);
-                self.stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
-                self.stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+                error!(
+                    "Failed to write indexes after {:?}: {}",
+                    indexes_duration, e
+                );
+                self.stats
+                    .index_write_errors
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_index_write_time_ns
+                    .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
                 return Err(e);
             }
         }
 
         let total_duration = internal_start.elapsed();
-        self.stats.total_batch_write_time_ns.fetch_add(total_duration.as_nanos() as u64, Ordering::Relaxed);
+        self.stats
+            .total_batch_write_time_ns
+            .fetch_add(total_duration.as_nanos() as u64, Ordering::Relaxed);
         self.stats.batches_processed.fetch_add(1, Ordering::Relaxed);
         trace!("Single writer batch completed successfully in {:?} total (datapoints: {:?}, indexes: {:?})", 
               total_duration, datapoints_duration, indexes_start.elapsed());
@@ -641,7 +810,8 @@ impl WriterTaskState {
         let value_bytes = &value.bytes;
 
         if let Some(ref prepared) = self.insert_data_point {
-            self.session.execute_unpaged(prepared, (row_key_bytes, column_key_bytes, value_bytes))
+            self.session
+                .execute_unpaged(prepared, (row_key_bytes, column_key_bytes, value_bytes))
                 .await
                 .map_err(|e| {
                     self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
@@ -724,7 +894,8 @@ impl WriterTaskState {
         let value_bytes = vec![0u8]; // Empty value for string index
 
         if let Some(ref prepared) = self.insert_string_index {
-            self.session.execute_unpaged(prepared, (key_bytes, column_name, value_bytes))
+            self.session
+                .execute_unpaged(prepared, (key_bytes, column_name, value_bytes))
                 .await
                 .map_err(|e| {
                     self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
@@ -745,7 +916,7 @@ impl WriterTaskState {
 impl CassandraClient for SingleWriterCassandraClient {
     async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
         let start = std::time::Instant::now();
-        
+
         // Create oneshot channel for response
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -755,16 +926,19 @@ impl CassandraClient for SingleWriterCassandraClient {
             response_tx,
         };
 
-        trace!("SingleWriter: Sending batch of {} points to writer task", batch.points.len());
-        self.write_tx.send(command).map_err(|_| {
-            KairosError::cassandra("Writer task unavailable")
-        })?;
+        trace!(
+            "SingleWriter: Sending batch of {} points to writer task",
+            batch.points.len()
+        );
+        self.write_tx
+            .send(command)
+            .map_err(|_| KairosError::cassandra("Writer task unavailable"))?;
 
         // Wait for response from writer task
-        let result = response_rx.await.map_err(|_| {
-            KairosError::cassandra("Writer task response lost")
-        })?;
-        
+        let result = response_rx
+            .await
+            .map_err(|_| KairosError::cassandra("Writer task response lost"))?;
+
         let duration = start.elapsed();
         trace!("SingleWriter: Batch write completed in {:?}", duration);
         result
@@ -778,66 +952,86 @@ impl CassandraClient for SingleWriterCassandraClient {
 
     fn get_stats(&self) -> CassandraStats {
         let bloom_stats = BloomManager::new().get_stats(); // Placeholder - would need writer task stats
-        
+
         // Calculate average timing metrics
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
         let index_writes = self.stats.index_writes.load(Ordering::Relaxed);
         let total_batches = self.stats.batches_processed.load(Ordering::Relaxed).max(1); // Avoid division by zero
-        
+
         let avg_datapoint_write_time_ms = if datapoint_writes > 0 {
-            (self.stats.total_datapoint_write_time_ns.load(Ordering::Relaxed) as f64) / (datapoint_writes as f64) / 1_000_000.0
+            (self
+                .stats
+                .total_datapoint_write_time_ns
+                .load(Ordering::Relaxed) as f64)
+                / (datapoint_writes as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         let avg_index_write_time_ms = if index_writes > 0 {
-            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64) / (index_writes as f64) / 1_000_000.0
+            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (index_writes as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         let avg_batch_write_time_ms = if total_batches > 0 {
-            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64) / (total_batches as f64) / 1_000_000.0
+            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (total_batches as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         // Calculate semaphore wait time average
         let total_batches_completed = self.stats.batches_processed.load(Ordering::Relaxed);
         let avg_semaphore_wait_time_ms = if total_batches_completed > 0 {
-            (self.stats.semaphore_wait_time_ns.load(Ordering::Relaxed) as f64) / (total_batches_completed as f64) / 1_000_000.0
+            (self.stats.semaphore_wait_time_ns.load(Ordering::Relaxed) as f64)
+                / (total_batches_completed as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         CassandraStats {
             total_queries: self.stats.total_queries.load(Ordering::Relaxed),
             failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
             total_datapoints_written: self.stats.total_datapoints.load(Ordering::Relaxed),
-            avg_batch_size: if total_batches > 0 { 
-                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64 
-            } else { 
-                0.0 
+            avg_batch_size: if total_batches > 0 {
+                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64
+            } else {
+                0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
             bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
             bloom_filter_expected_items: bloom_stats.expected_items,
             bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
-            
+
             // Detailed Cassandra operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
             datapoint_write_errors: self.stats.datapoint_write_errors.load(Ordering::Relaxed),
             index_writes: self.stats.index_writes.load(Ordering::Relaxed),
             index_write_errors: self.stats.index_write_errors.load(Ordering::Relaxed),
-            prepared_statement_cache_hits: self.stats.prepared_statement_cache_hits.load(Ordering::Relaxed),
-            prepared_statement_cache_misses: self.stats.prepared_statement_cache_misses.load(Ordering::Relaxed),
-            
+            prepared_statement_cache_hits: self
+                .stats
+                .prepared_statement_cache_hits
+                .load(Ordering::Relaxed),
+            prepared_statement_cache_misses: self
+                .stats
+                .prepared_statement_cache_misses
+                .load(Ordering::Relaxed),
+
             // Concurrency metrics
             current_concurrent_requests: self.stats.concurrent_requests.load(Ordering::Relaxed),
-            max_concurrent_requests_reached: self.stats.max_concurrent_requests.load(Ordering::Relaxed),
+            max_concurrent_requests_reached: self
+                .stats
+                .max_concurrent_requests
+                .load(Ordering::Relaxed),
             avg_semaphore_wait_time_ms,
-            
+
             // Timing metrics (averaged per operation in milliseconds)
             avg_datapoint_write_time_ms,
             avg_index_write_time_ms,

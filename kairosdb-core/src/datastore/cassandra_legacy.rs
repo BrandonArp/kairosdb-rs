@@ -182,7 +182,7 @@ impl CassandraLegacyStore {
             DataPointValue::Long(_) => "kairos_long",
             DataPointValue::Double(_) => "kairos_double",
             DataPointValue::Text(_) => "kairos_string",
-            DataPointValue::Histogram(_) => "kairos_histogram",
+            DataPointValue::Histogram(_) => "kairos_histogram_v2",
             DataPointValue::Binary(_) => "kairos_bytes",
             _ => "kairos_mixed",
         }

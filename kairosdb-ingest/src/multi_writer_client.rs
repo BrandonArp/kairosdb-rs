@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use flume::{Receiver, Sender};
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
-    datapoint::{DataPoint, DataPointBatch, DataPointValue},
+    datapoint::{DataPointBatch, DataPointValue},
     error::{KairosError, KairosResult},
     schema::StringIndexEntry,
 };
@@ -18,9 +18,8 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 // ScyllaDB Rust driver imports
 use scylla::client::execution_profile::ExecutionProfile;
@@ -38,7 +37,7 @@ use crate::config::CassandraConfig;
 #[derive(Debug)]
 pub struct WorkItem {
     pub batch: DataPointBatch,
-    pub queue_key: String,  // Key to identify the queue item for completion
+    pub queue_key: String, // Key to identify the queue item for completion
 }
 
 /// Response sent back from Cassandra workers to queue processor
@@ -51,6 +50,7 @@ pub struct WorkResponse {
 
 /// Shared session and prepared statements for all workers
 #[derive(Clone)]
+#[allow(dead_code)]
 struct SharedCassandraResources {
     session: Arc<Session>,
     config: Arc<CassandraConfig>,
@@ -68,17 +68,17 @@ struct MultiWorkerStats {
     total_datapoints: AtomicU64,
     connection_errors: AtomicU64,
     batches_processed: AtomicU64,
-    
+
     // Detailed operation metrics
     datapoint_writes: AtomicU64,
     datapoint_write_errors: AtomicU64,
     index_writes: AtomicU64,
     index_write_errors: AtomicU64,
-    
+
     // Worker metrics
     active_workers: AtomicU64,
     total_work_items_processed: AtomicU64,
-    
+
     // Timing metrics (in nanoseconds)
     total_datapoint_write_time_ns: AtomicU64,
     total_index_write_time_ns: AtomicU64,
@@ -86,18 +86,19 @@ struct MultiWorkerStats {
 }
 
 /// Multi-worker Cassandra client with MPMC channels
+#[allow(dead_code)]
 pub struct MultiWorkerCassandraClient {
     work_tx: Sender<WorkItem>,
-    response_rx: Receiver<WorkResponse>,  // For backward compatibility with write_batch
+    response_rx: Receiver<WorkResponse>, // For backward compatibility with write_batch
     stats: Arc<MultiWorkerStats>,
-    shared_resources: SharedCassandraResources,  // Keep for schema operations
+    shared_resources: SharedCassandraResources, // Keep for schema operations
     _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
 }
 
 impl MultiWorkerCassandraClient {
     /// Create a new multi-worker Cassandra client with external channels
     pub async fn new_with_channels(
-        config: CassandraConfig, 
+        config: CassandraConfig,
         num_workers: Option<usize>,
         work_tx: Sender<WorkItem>,
         work_rx: Receiver<WorkItem>,
@@ -108,7 +109,10 @@ impl MultiWorkerCassandraClient {
         let config = Arc::new(config);
         let num_workers = num_workers.unwrap_or(200); // Default to 200 workers for high concurrency
 
-        info!("Initializing Multi-Worker Cassandra Client with {} workers", num_workers);
+        info!(
+            "Initializing Multi-Worker Cassandra Client with {} workers",
+            num_workers
+        );
 
         // Build session with contact points (ONE session for all workers)
         let session = Self::create_session(&config).await?;
@@ -139,9 +143,14 @@ impl MultiWorkerCassandraClient {
             worker_handles.push(worker_handle);
         }
 
-        stats.active_workers.store(num_workers as u64, Ordering::Relaxed);
+        stats
+            .active_workers
+            .store(num_workers as u64, Ordering::Relaxed);
 
-        info!("Multi-worker Cassandra client started with {} workers", num_workers);
+        info!(
+            "Multi-worker Cassandra client started with {} workers",
+            num_workers
+        );
 
         Ok(Self {
             work_tx,
@@ -151,35 +160,38 @@ impl MultiWorkerCassandraClient {
             _worker_handles: worker_handles,
         })
     }
-    
+
     /// Create schema using a specific session and config
     async fn ensure_schema_with_session(
-        session: &Arc<Session>, 
-        config: &Arc<CassandraConfig>
+        session: &Arc<Session>,
+        config: &Arc<CassandraConfig>,
     ) -> KairosResult<()> {
         use kairosdb_core::schema::KairosSchema;
-        
+
         let schema = KairosSchema::new(config.keyspace.clone(), 1);
-        
+
         // Execute keyspace creation
-        session.query_unpaged(schema.create_keyspace_cql(), ()).await
+        session
+            .query_unpaged(schema.create_keyspace_cql(), ())
+            .await
             .map_err(|e| KairosError::cassandra(format!("Failed to create keyspace: {}", e)))?;
-        
+
         // Execute table creation statements
         let statements = vec![
             schema.create_data_points_table_cql(),
             schema.create_row_key_time_index_table_cql(),
             schema.create_string_index_table_cql(),
         ];
-        
+
         for statement in statements {
-            session.query_unpaged(statement, ()).await
-                .map_err(|e| KairosError::cassandra(format!("Failed to execute schema statement: {}", e)))?;
+            session.query_unpaged(statement, ()).await.map_err(|e| {
+                KairosError::cassandra(format!("Failed to execute schema statement: {}", e))
+            })?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Create a new multi-worker Cassandra client (creates its own channels)
     pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
         // Create MPMC channels for work distribution and responses
@@ -187,7 +199,16 @@ impl MultiWorkerCassandraClient {
         let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
         // Create a cancellation token for this instance
         let shutdown_token = CancellationToken::new();
-        Self::new_with_channels(config, num_workers, work_tx, work_rx, response_tx, response_rx, shutdown_token).await
+        Self::new_with_channels(
+            config,
+            num_workers,
+            work_tx,
+            work_rx,
+            response_tx,
+            response_rx,
+            shutdown_token,
+        )
+        .await
     }
 
     /// Create ScyllaDB session
@@ -205,17 +226,21 @@ impl MultiWorkerCassandraClient {
 
         // Configure connection pool and settings
         session_builder = session_builder
-            .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
+            .connection_timeout(std::time::Duration::from_millis(
+                config.connection_timeout_ms,
+            ))
             .pool_size(PoolSize::PerHost(
                 std::num::NonZero::new(config.max_connections)
-                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap())
+                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap()),
             ))
             .default_execution_profile_handle(
                 ExecutionProfile::builder()
                     .consistency(Consistency::LocalQuorum)
-                    .request_timeout(Some(std::time::Duration::from_millis(config.query_timeout_ms)))
+                    .request_timeout(Some(std::time::Duration::from_millis(
+                        config.query_timeout_ms,
+                    )))
                     .build()
-                    .into_handle()
+                    .into_handle(),
             );
 
         let session = session_builder.build().await.map_err(|e| {
@@ -247,9 +272,16 @@ impl MultiWorkerCassandraClient {
             "INSERT INTO {}.row_key_time_index (metric, table_name, row_time, value) VALUES (?, ?, ?, ?)",
             config.keyspace
         );
-        let insert_row_key_time_index = session.prepare(row_key_time_index_query).await.map_err(|e| {
-            KairosError::cassandra(format!("Failed to prepare row_key_time_index statement: {}", e))
-        })?;
+        let insert_row_key_time_index =
+            session
+                .prepare(row_key_time_index_query)
+                .await
+                .map_err(|e| {
+                    KairosError::cassandra(format!(
+                        "Failed to prepare row_key_time_index statement: {}",
+                        e
+                    ))
+                })?;
 
         // Prepare row_keys insert
         let row_keys_query = format!(
@@ -322,19 +354,28 @@ impl MultiWorkerCassandraClient {
                     &work_item.batch,
                     &mut bloom_manager,
                     &stats,
-                ).await;
+                )
+                .await;
 
                 let batch_duration = batch_start.elapsed();
-                stats.total_batch_write_time_ns.fetch_add(batch_duration.as_nanos() as u64, Ordering::Relaxed);
-                stats.total_work_items_processed.fetch_add(1, Ordering::Relaxed);
+                stats
+                    .total_batch_write_time_ns
+                    .fetch_add(batch_duration.as_nanos() as u64, Ordering::Relaxed);
+                stats
+                    .total_work_items_processed
+                    .fetch_add(1, Ordering::Relaxed);
 
                 // Create response for queue processor
                 let response = match &result {
                     Ok(_) => {
-                        trace!("Worker {} completed batch of {} points successfully in {:?}", 
-                               worker_id, batch_size, batch_duration);
+                        trace!(
+                            "Worker {} completed batch of {} points successfully in {:?}",
+                            worker_id,
+                            batch_size,
+                            batch_duration
+                        );
                         stats.batches_processed.fetch_add(1, Ordering::Relaxed);
-                        
+
                         WorkResponse {
                             queue_key: work_item.queue_key.clone(),
                             result: Ok(batch_size),
@@ -342,10 +383,12 @@ impl MultiWorkerCassandraClient {
                         }
                     }
                     Err(e) => {
-                        error!("Worker {} failed to process batch of {} points after {:?}: {}", 
-                               worker_id, batch_size, batch_duration, e);
+                        error!(
+                            "Worker {} failed to process batch of {} points after {:?}: {}",
+                            worker_id, batch_size, batch_duration, e
+                        );
                         stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-                        
+
                         WorkResponse {
                             queue_key: work_item.queue_key.clone(),
                             result: Err(e.to_string()),
@@ -357,7 +400,10 @@ impl MultiWorkerCassandraClient {
                 // Send response back via MPMC channel (BLOCKING - must not drop responses)
                 // info!("Worker {} sending response for batch {}", worker_id, work_item.queue_key);
                 if let Err(e) = response_tx.send(response) {
-                    error!("Worker {} failed to send response (channel disconnected): {}", worker_id, e);
+                    error!(
+                        "Worker {} failed to send response (channel disconnected): {}",
+                        worker_id, e
+                    );
                     break; // Channel disconnected, worker should exit
                 }
                 // info!("Worker {} successfully sent response for {}", worker_id, work_item.queue_key);
@@ -380,9 +426,14 @@ impl MultiWorkerCassandraClient {
         }
 
         let internal_start = std::time::Instant::now();
-        trace!("Sequential worker processing batch of {} data points", batch.points.len());
-        
-        stats.total_datapoints.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        trace!(
+            "Sequential worker processing batch of {} data points",
+            batch.points.len()
+        );
+
+        stats
+            .total_datapoints
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
         // Write all data points sequentially
         let datapoints_start = std::time::Instant::now();
@@ -396,10 +447,14 @@ impl MultiWorkerCassandraClient {
             let value_bytes = &cassandra_value.bytes;
 
             // Write to data_points table
-            match resources.session.execute_unpaged(
-                &resources.insert_data_point,
-                (row_key_bytes.clone(), column_key_bytes, value_bytes.clone())
-            ).await {
+            match resources
+                .session
+                .execute_unpaged(
+                    &resources.insert_data_point,
+                    (row_key_bytes.clone(), column_key_bytes, value_bytes.clone()),
+                )
+                .await
+            {
                 Ok(_) => {
                     stats.total_queries.fetch_add(1, Ordering::Relaxed);
                     stats.datapoint_writes.fetch_add(1, Ordering::Relaxed);
@@ -407,7 +462,10 @@ impl MultiWorkerCassandraClient {
                 Err(e) => {
                     stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                     stats.datapoint_write_errors.fetch_add(1, Ordering::Relaxed);
-                    return Err(KairosError::cassandra(format!("Failed to write data point: {}", e)));
+                    return Err(KairosError::cassandra(format!(
+                        "Failed to write data point: {}",
+                        e
+                    )));
                 }
             }
 
@@ -416,19 +474,35 @@ impl MultiWorkerCassandraClient {
         }
 
         let datapoints_duration = datapoints_start.elapsed();
-        stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
-        trace!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
+        stats
+            .total_datapoint_write_time_ns
+            .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!(
+            "Successfully wrote {} data points to Cassandra in {:?}",
+            batch.points.len(),
+            datapoints_duration
+        );
 
         // Write indexes sequentially with bloom filter deduplication
         let indexes_start = std::time::Instant::now();
-        let index_count = Self::write_indexes_sequentially(resources, batch, bloom_manager, stats).await?;
+        let index_count =
+            Self::write_indexes_sequentially(resources, batch, bloom_manager, stats).await?;
         let indexes_duration = indexes_start.elapsed();
-        
-        stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
-        trace!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
+
+        stats
+            .total_index_write_time_ns
+            .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!(
+            "Completed writing {} indexes in {:?}",
+            index_count,
+            indexes_duration
+        );
 
         let total_duration = internal_start.elapsed();
-        trace!("Sequential worker batch completed successfully in {:?} total", total_duration);
+        trace!(
+            "Sequential worker batch completed successfully in {:?} total",
+            total_duration
+        );
         Ok(())
     }
 
@@ -457,23 +531,26 @@ impl MultiWorkerCassandraClient {
             let row_key = RowKey::from_data_point(data_point);
             let data_type = match &data_point.value {
                 DataPointValue::Long(_) => "kairos_long",
-                DataPointValue::Double(_) => "kairos_double", 
+                DataPointValue::Double(_) => "kairos_double",
                 DataPointValue::Text(_) => "kairos_string",
                 DataPointValue::Complex { .. } => "kairos_complex",
                 DataPointValue::Binary(_) => "kairos_binary",
-                DataPointValue::Histogram(_) => "kairos_histogram",
+                DataPointValue::Histogram(_) => "kairos_histogram_v2",
             };
-            
+
             // Create a unique string key for this row_keys entry (since TagSet doesn't implement Hash/Eq)
             let tags_string: String = {
-                let mut tag_pairs: Vec<_> = data_point.tags.iter()
+                let mut tag_pairs: Vec<_> = data_point
+                    .tags
+                    .iter()
                     .map(|(k, v)| format!("{}={}", k.as_str(), v.as_str()))
                     .collect();
                 tag_pairs.sort(); // Ensure consistent ordering
                 tag_pairs.join(",")
             };
-            
-            let row_keys_entry_key = format!("{}:data_points:{}:{}:{}", 
+
+            let row_keys_entry_key = format!(
+                "{}:data_points:{}:{}:{}",
                 data_point.metric.as_str(),
                 row_key.row_time.timestamp_millis(),
                 data_type,
@@ -511,29 +588,43 @@ impl MultiWorkerCassandraClient {
                 let metric_name = data_point.metric.as_str();
                 let table_name = "data_points";
                 let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
-                
+
                 let data_type = match &data_point.value {
                     DataPointValue::Long(_) => "kairos_long",
-                    DataPointValue::Double(_) => "kairos_double", 
+                    DataPointValue::Double(_) => "kairos_double",
                     DataPointValue::Text(_) => "kairos_string",
                     DataPointValue::Complex { .. } => "kairos_complex",
                     DataPointValue::Binary(_) => "kairos_binary",
-                    DataPointValue::Histogram(_) => "kairos_histogram",
+                    DataPointValue::Histogram(_) => "kairos_histogram_v2",
                 };
 
-                let tags_map: HashMap<String, String> = data_point.tags.iter()
+                let tags_map: HashMap<String, String> = data_point
+                    .tags
+                    .iter()
                     .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
                     .collect();
-                
+
                 // Generate proper UUID v1 timeuuid for mtime
                 let uuid = uuid::Uuid::now_v1(&[1, 2, 3, 4, 5, 6]);
                 let mtime = scylla::value::CqlTimeuuid::from_bytes(uuid.into_bytes());
                 let value: Option<String> = None;
 
-                match resources.session.execute_unpaged(
-                    &resources.insert_row_keys,
-                    (metric_name, table_name, row_time, data_type, tags_map, mtime, value)
-                ).await {
+                match resources
+                    .session
+                    .execute_unpaged(
+                        &resources.insert_row_keys,
+                        (
+                            metric_name,
+                            table_name,
+                            row_time,
+                            data_type,
+                            tags_map,
+                            mtime,
+                            value,
+                        ),
+                    )
+                    .await
+                {
                     Ok(_) => {
                         stats.total_queries.fetch_add(1, Ordering::Relaxed);
                         stats.index_writes.fetch_add(1, Ordering::Relaxed);
@@ -542,7 +633,10 @@ impl MultiWorkerCassandraClient {
                     Err(e) => {
                         stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                         stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
-                        return Err(KairosError::cassandra(format!("Failed to write row_keys: {}", e)));
+                        return Err(KairosError::cassandra(format!(
+                            "Failed to write row_keys: {}",
+                            e
+                        )));
                     }
                 }
             }
@@ -551,7 +645,7 @@ impl MultiWorkerCassandraClient {
         // NOTE: Java KairosDB does NOT write tag_names or tag_values during ingestion
         // Only metric_names are written to string_index during ingestion
         // Commenting out tag index writes to match Java KairosDB behavior exactly
-        
+
         // // Write tag name indexes (with bloom filter deduplication)
         // for tag_name in tag_names {
         //     let bloom_key = format!("tag_name:{}", tag_name);
@@ -562,7 +656,7 @@ impl MultiWorkerCassandraClient {
         //     }
         // }
 
-        // // Write tag value indexes (with bloom filter deduplication)  
+        // // Write tag value indexes (with bloom filter deduplication)
         // for tag_value in tag_values {
         //     let bloom_key = format!("tag_value:{}", tag_value);
         //     if bloom_manager.should_write_index(&bloom_key) {
@@ -586,10 +680,14 @@ impl MultiWorkerCassandraClient {
         let column_name = entry.index_column();
         let value_bytes = vec![0u8]; // Empty value for string index
 
-        match resources.session.execute_unpaged(
-            &resources.insert_string_index,
-            (key_bytes, column_name, value_bytes)
-        ).await {
+        match resources
+            .session
+            .execute_unpaged(
+                &resources.insert_string_index,
+                (key_bytes, column_name, value_bytes),
+            )
+            .await
+        {
             Ok(_) => {
                 stats.total_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_writes.fetch_add(1, Ordering::Relaxed);
@@ -598,7 +696,10 @@ impl MultiWorkerCassandraClient {
             Err(e) => {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
-                Err(KairosError::cassandra(format!("Failed to write string index: {}", e)))
+                Err(KairosError::cassandra(format!(
+                    "Failed to write string index: {}",
+                    e
+                )))
             }
         }
     }
@@ -613,14 +714,18 @@ impl MultiWorkerCassandraClient {
         let metric_name = row_key.metric.as_str();
         let table_name = "data_points"; // Always data_points table
         let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
-        
+
         // Java KairosDB stores null in the value column - the presence of the row is what matters
         let value: Option<String> = None;
 
-        match resources.session.execute_unpaged(
-            &resources.insert_row_key_time_index,
-            (metric_name, table_name, row_time, value)
-        ).await {
+        match resources
+            .session
+            .execute_unpaged(
+                &resources.insert_row_key_time_index,
+                (metric_name, table_name, row_time, value),
+            )
+            .await
+        {
             Ok(_) => {
                 stats.total_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_writes.fetch_add(1, Ordering::Relaxed);
@@ -629,11 +734,13 @@ impl MultiWorkerCassandraClient {
             Err(e) => {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
-                Err(KairosError::cassandra(format!("Failed to write row_key_time_index: {}", e)))
+                Err(KairosError::cassandra(format!(
+                    "Failed to write row_key_time_index: {}",
+                    e
+                )))
             }
         }
     }
-
 }
 
 #[async_trait]
@@ -648,12 +755,15 @@ impl CassandraClient for MultiWorkerCassandraClient {
             queue_key: queue_key.clone(),
         };
 
-        trace!("MultiWorker: Sending batch of {} points to worker pool", batch.points.len());
+        trace!(
+            "MultiWorker: Sending batch of {} points to worker pool",
+            batch.points.len()
+        );
 
         // Send work item to worker pool via MPMC channel
-        self.work_tx.send(work_item).map_err(|_| {
-            KairosError::cassandra("Worker pool unavailable")
-        })?;
+        self.work_tx
+            .send(work_item)
+            .map_err(|_| KairosError::cassandra("Worker pool unavailable"))?;
 
         // Wait for response from worker via response channel
         loop {
@@ -688,45 +798,54 @@ impl CassandraClient for MultiWorkerCassandraClient {
 
     fn get_stats(&self) -> CassandraStats {
         let bloom_stats = BloomManager::new().get_stats(); // Placeholder
-        
+
         // Calculate averages
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
         let index_writes = self.stats.index_writes.load(Ordering::Relaxed);
         let total_batches = self.stats.batches_processed.load(Ordering::Relaxed).max(1);
-        
+
         let avg_datapoint_write_time_ms = if datapoint_writes > 0 {
-            (self.stats.total_datapoint_write_time_ns.load(Ordering::Relaxed) as f64) / (datapoint_writes as f64) / 1_000_000.0
+            (self
+                .stats
+                .total_datapoint_write_time_ns
+                .load(Ordering::Relaxed) as f64)
+                / (datapoint_writes as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         let avg_index_write_time_ms = if index_writes > 0 {
-            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64) / (index_writes as f64) / 1_000_000.0
+            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (index_writes as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         let avg_batch_write_time_ms = if total_batches > 0 {
-            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64) / (total_batches as f64) / 1_000_000.0
+            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (total_batches as f64)
+                / 1_000_000.0
         } else {
             0.0
         };
-        
+
         CassandraStats {
             total_queries: self.stats.total_queries.load(Ordering::Relaxed),
             failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
             total_datapoints_written: self.stats.total_datapoints.load(Ordering::Relaxed),
-            avg_batch_size: if total_batches > 0 { 
-                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64 
-            } else { 
-                0.0 
+            avg_batch_size: if total_batches > 0 {
+                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64
+            } else {
+                0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
             bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
             bloom_filter_expected_items: bloom_stats.expected_items,
             bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
-            
+
             // Detailed operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
             datapoint_write_errors: self.stats.datapoint_write_errors.load(Ordering::Relaxed),
@@ -734,12 +853,12 @@ impl CassandraClient for MultiWorkerCassandraClient {
             index_write_errors: self.stats.index_write_errors.load(Ordering::Relaxed),
             prepared_statement_cache_hits: 0, // Not applicable to multi-worker model
             prepared_statement_cache_misses: 0,
-            
+
             // Worker-specific metrics instead of concurrency
             current_concurrent_requests: self.stats.active_workers.load(Ordering::Relaxed),
             max_concurrent_requests_reached: self.stats.active_workers.load(Ordering::Relaxed),
             avg_semaphore_wait_time_ms: 0.0, // Not applicable - workers consume sequentially
-            
+
             // Timing metrics
             avg_datapoint_write_time_ms,
             avg_index_write_time_ms,

@@ -711,7 +711,7 @@ mod service_integration_tests {
         // Test datastore initialization
         // Set Cassandra contact points to localhost for tests (Tilt port forward)
         std::env::set_var("KAIROSDB_CASSANDRA_CONTACT_POINTS", "localhost:9042");
-        
+
         let datastore = CassandraLegacyStore::new("kairosdb".to_string())
             .await
             .expect("Failed to create datastore");

@@ -42,23 +42,28 @@ impl PerfTestReporter {
     pub fn print_results(&self, results: &PerfTestResults) {
         println!("\n🚀 Performance Test Results: {}", self.test_name);
         println!("═══════════════════════════════════════════════════════");
-        
+
         // Overview
         println!("\n📊 Overview:");
         println!("  Duration: {:.1}s", results.test_duration.as_secs_f64());
         println!("  Total Requests: {}", results.total_requests);
-        println!("  Successful: {} ({:.1}%)", 
+        println!(
+            "  Successful: {} ({:.1}%)",
             results.successful_requests,
             (results.successful_requests as f64 / results.total_requests as f64) * 100.0
         );
-        println!("  Failed: {} ({:.1}%)", 
+        println!(
+            "  Failed: {} ({:.1}%)",
             results.failed_requests,
             (results.failed_requests as f64 / results.total_requests as f64) * 100.0
         );
 
         // Throughput
         println!("\n📈 Throughput:");
-        println!("  Datapoints/sec: {:.0}", results.throughput_datapoints_per_sec);
+        println!(
+            "  Datapoints/sec: {:.0}",
+            results.throughput_datapoints_per_sec
+        );
         println!("  Requests/sec: {:.1}", results.throughput_requests_per_sec);
         println!("  Total Datapoints: {}", results.total_datapoints_sent);
 
@@ -74,8 +79,12 @@ impl PerfTestReporter {
         // Configuration
         println!("\n⚙️  Configuration:");
         println!("  Metrics: {}", self.config.metrics_count);
-        println!("  Tag combinations/metric: {}", self.config.tag_combinations_per_metric);
-        println!("  Histogram samples: {}-{}", 
+        println!(
+            "  Tag combinations/metric: {}",
+            self.config.tag_combinations_per_metric
+        );
+        println!(
+            "  Histogram samples: {}-{}",
             self.config.histogram_samples_per_datapoint.0,
             self.config.histogram_samples_per_datapoint.1
         );
@@ -85,7 +94,8 @@ impl PerfTestReporter {
         // Errors (if any)
         if !results.error_details.is_empty() {
             println!("\n❌ Errors ({} total):", results.error_details.len());
-            let unique_errors: std::collections::HashSet<_> = results.error_details.iter().collect();
+            let unique_errors: std::collections::HashSet<_> =
+                results.error_details.iter().collect();
             for (i, error) in unique_errors.iter().take(5).enumerate() {
                 println!("  {}: {}", i + 1, error);
             }
@@ -102,28 +112,36 @@ impl PerfTestReporter {
     }
 
     /// Save detailed results to JSON file
-    pub fn save_to_file(&self, results: &PerfTestResults, output_dir: &Path) -> anyhow::Result<String> {
+    pub fn save_to_file(
+        &self,
+        results: &PerfTestResults,
+        output_dir: &Path,
+    ) -> anyhow::Result<String> {
         let report = self.generate_report(results);
-        
+
         // Ensure output directory exists
         fs::create_dir_all(output_dir)?;
-        
+
         let filename = format!(
             "perf_{}_{}.json",
             self.test_name.replace(' ', "_"),
             self.start_time.format("%Y%m%d_%H%M%S")
         );
-        
+
         let file_path = output_dir.join(&filename);
         let json_data = serde_json::to_string_pretty(&report)?;
-        
+
         fs::write(&file_path, json_data)?;
-        
+
         Ok(file_path.to_string_lossy().to_string())
     }
 
     /// Generate CSV summary for trending analysis
-    pub fn save_csv_summary(&self, results: &PerfTestResults, output_path: &Path) -> anyhow::Result<()> {
+    pub fn save_csv_summary(
+        &self,
+        results: &PerfTestResults,
+        output_path: &Path,
+    ) -> anyhow::Result<()> {
         let header_exists = output_path.exists();
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -136,7 +154,8 @@ impl PerfTestReporter {
         }
 
         let efficiency = self.calculate_efficiency_score(results);
-        writeln!(file, 
+        writeln!(
+            file,
             "{},{},{:.1},{},{},{},{:.0},{:.1},{:.1},{:.1},{:.1},{:.1}",
             self.start_time.format("%Y-%m-%d %H:%M:%S"),
             self.test_name,
@@ -159,7 +178,7 @@ impl PerfTestReporter {
         let success_rate = results.successful_requests as f64 / results.total_requests as f64;
         let latency_score = (1000.0 - results.latency_stats.p95_ms.min(1000.0)) / 1000.0;
         let throughput_score = (results.throughput_datapoints_per_sec / 10000.0).min(1.0);
-        
+
         (success_rate * 0.4 + latency_score * 0.3 + throughput_score * 0.3) * 100.0
     }
 
@@ -196,24 +215,32 @@ impl PerfTestReporter {
 
         let error_rate = results.failed_requests as f64 / results.total_requests as f64;
         if error_rate > 0.05 {
-            recommendations.push("Investigate high error rate - check logs and system resources".to_string());
+            recommendations
+                .push("Investigate high error rate - check logs and system resources".to_string());
         }
 
         if results.latency_stats.p95_ms > 1000.0 {
-            recommendations.push("Consider optimizing database queries or adding connection pooling".to_string());
+            recommendations.push(
+                "Consider optimizing database queries or adding connection pooling".to_string(),
+            );
         }
 
         if results.throughput_datapoints_per_sec < 5000.0 {
-            recommendations.push("Consider increasing batch size or concurrent connections".to_string());
+            recommendations
+                .push("Consider increasing batch size or concurrent connections".to_string());
         }
 
-        let cpu_estimate = self.config.concurrent_batches as f64 * 100.0 / results.throughput_requests_per_sec;
+        let cpu_estimate =
+            self.config.concurrent_batches as f64 * 100.0 / results.throughput_requests_per_sec;
         if cpu_estimate > 50.0 {
-            recommendations.push("High CPU utilization estimated - consider scaling horizontally".to_string());
+            recommendations
+                .push("High CPU utilization estimated - consider scaling horizontally".to_string());
         }
 
         if recommendations.is_empty() {
-            recommendations.push("Performance looks good! Consider stress testing with higher loads".to_string());
+            recommendations.push(
+                "Performance looks good! Consider stress testing with higher loads".to_string(),
+            );
         }
 
         recommendations
@@ -234,14 +261,17 @@ impl PerfTestReporter {
         // Throughput rating
         let throughput_rating = match results.throughput_datapoints_per_sec as u64 {
             0..=1000 => "🐌 Slow",
-            1001..=5000 => "🚶 Moderate", 
+            1001..=5000 => "🚶 Moderate",
             5001..=15000 => "🏃 Good",
             15001..=50000 => "🚀 Excellent",
             _ => "⚡ Outstanding",
         };
-        println!("  Throughput: {} ({:.0} dp/s)", throughput_rating, results.throughput_datapoints_per_sec);
+        println!(
+            "  Throughput: {} ({:.0} dp/s)",
+            throughput_rating, results.throughput_datapoints_per_sec
+        );
 
-        // Latency rating  
+        // Latency rating
         let latency_rating = match results.latency_stats.p95_ms as u64 {
             0..=50 => "⚡ Excellent",
             51..=200 => "🚀 Good",
@@ -249,13 +279,17 @@ impl PerfTestReporter {
             501..=1000 => "🚶 Slow",
             _ => "🐌 Poor",
         };
-        println!("  Latency: {} (P95: {:.1}ms)", latency_rating, results.latency_stats.p95_ms);
+        println!(
+            "  Latency: {} (P95: {:.1}ms)",
+            latency_rating, results.latency_stats.p95_ms
+        );
 
         // Success rate
-        let success_rate = (results.successful_requests as f64 / results.total_requests as f64) * 100.0;
+        let success_rate =
+            (results.successful_requests as f64 / results.total_requests as f64) * 100.0;
         let success_rating = match success_rate as u64 {
             99..=100 => "✅ Excellent",
-            95..=98 => "👍 Good", 
+            95..=98 => "👍 Good",
             90..=94 => "⚠️  Moderate",
             _ => "❌ Poor",
         };
@@ -306,7 +340,7 @@ mod tests {
         let config = PerfTestConfig::default();
         let reporter = PerfTestReporter::new("test".to_string(), config);
         let results = create_test_results();
-        
+
         let score = reporter.calculate_efficiency_score(&results);
         assert!(score > 0.0 && score <= 100.0);
     }
@@ -316,7 +350,7 @@ mod tests {
         let config = PerfTestConfig::default();
         let reporter = PerfTestReporter::new("test".to_string(), config);
         let results = create_test_results();
-        
+
         let bottlenecks = reporter.identify_bottlenecks(&results);
         assert!(!bottlenecks.is_empty());
     }

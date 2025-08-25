@@ -211,7 +211,7 @@ impl Default for IngestionConfig {
             enable_validation: true,
             max_request_size: 100 * 1024 * 1024, // 100MB
             performance_mode: PerformanceMode::ParseAndStoreMode, // Default to normal operation
-            default_sync: false, // Default to fast mode for performance
+            default_sync: false,                 // Default to fast mode for performance
         }
     }
 }

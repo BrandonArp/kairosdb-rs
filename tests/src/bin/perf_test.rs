@@ -105,7 +105,10 @@ fn parse_scenario(s: &str) -> Result<String, String> {
     if TestScenarios::by_name(s).is_some() {
         Ok(s.to_string())
     } else {
-        Err(format!("Unknown scenario: {}. Use 'list' command to see available scenarios.", s))
+        Err(format!(
+            "Unknown scenario: {}. Use 'list' command to see available scenarios.",
+            s
+        ))
     }
 }
 
@@ -114,16 +117,14 @@ fn parse_sample_range(s: &str) -> Result<(usize, usize), String> {
     if parts.len() != 2 {
         return Err("Sample range must be in format 'min,max'".to_string());
     }
-    
-    let min = parts[0].parse::<usize>()
-        .map_err(|_| "Invalid min value")?;
-    let max = parts[1].parse::<usize>()
-        .map_err(|_| "Invalid max value")?;
-    
+
+    let min = parts[0].parse::<usize>().map_err(|_| "Invalid min value")?;
+    let max = parts[1].parse::<usize>().map_err(|_| "Invalid max value")?;
+
     if min >= max {
         return Err("Min must be less than max".to_string());
     }
-    
+
     Ok((min, max))
 }
 
@@ -132,19 +133,21 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Setup logging
-    let level = if cli.verbose { Level::DEBUG } else { Level::INFO };
-    tracing_subscriber::fmt()
-        .with_max_level(level)
-        .init();
+    let level = if cli.verbose {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
+    tracing_subscriber::fmt().with_max_level(level).init();
 
     // Create output directory
     std::fs::create_dir_all(&cli.output_dir)?;
 
     match cli.command {
-        Commands::Run { 
-            scenario, 
-            metrics, 
-            tags, 
+        Commands::Run {
+            scenario,
+            metrics,
+            tags,
             samples,
             batch_size,
             concurrent,
@@ -152,8 +155,8 @@ async fn main() -> Result<()> {
             performance_mode,
         } => {
             run_single_scenario(
-                &scenario, 
-                &cli.url, 
+                &scenario,
+                &cli.url,
                 &cli.output_dir,
                 ScenarioOverrides {
                     ingest_url: Some(cli.url.clone()),
@@ -165,25 +168,24 @@ async fn main() -> Result<()> {
                     duration_seconds: duration,
                     performance_mode,
                     ..Default::default()
-                }
-            ).await
-        },
-        
+                },
+            )
+            .await
+        }
+
         Commands::Suite { skip, only } => {
             run_test_suite(&cli.url, &cli.output_dir, skip, only).await
-        },
-        
-        Commands::List => {
-            list_scenarios()
-        },
-        
-        Commands::Config => {
-            generate_config_file()
-        },
-        
-        Commands::Monitor { interval, iterations, scenario } => {
-            run_monitoring(&scenario, &cli.url, &cli.output_dir, interval, iterations).await
-        },
+        }
+
+        Commands::List => list_scenarios(),
+
+        Commands::Config => generate_config_file(),
+
+        Commands::Monitor {
+            interval,
+            iterations,
+            scenario,
+        } => run_monitoring(&scenario, &cli.url, &cli.output_dir, interval, iterations).await,
     }
 }
 
@@ -194,7 +196,7 @@ async fn run_single_scenario(
     overrides: ScenarioOverrides,
 ) -> Result<()> {
     info!("Running performance test scenario: {}", scenario_name);
-    
+
     let config = TestScenarios::custom(scenario_name, overrides)
         .ok_or_else(|| anyhow::anyhow!("Unknown scenario: {}", scenario_name))?;
 
@@ -221,16 +223,16 @@ async fn run_test_suite(
     only: Option<String>,
 ) -> Result<()> {
     info!("Running performance test suite");
-    
+
     let mut suite = PerfTestSuite::new(output_dir);
-    
+
     let skip_list: Vec<String> = skip
         .unwrap_or_default()
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-        
+
     let only_list: Vec<String> = only
         .unwrap_or_default()
         .split(',')
@@ -243,12 +245,12 @@ async fn run_test_suite(
             info!("Skipping scenario: {}", name);
             continue;
         }
-        
+
         if !only_list.is_empty() && !only_list.contains(&name.to_string()) {
             info!("Skipping scenario (not in only list): {}", name);
             continue;
         }
-        
+
         config.ingest_url = url.to_string();
         suite.add_scenario(name.to_string(), config);
     }
@@ -257,25 +259,28 @@ async fn run_test_suite(
     suite.print_suite_summary(&results);
 
     println!("\n📄 Individual reports saved to: {}", output_dir.display());
-    println!("📊 Trending data: {}/performance_trends.csv", output_dir.display());
+    println!(
+        "📊 Trending data: {}/performance_trends.csv",
+        output_dir.display()
+    );
 
     Ok(())
 }
 
 fn list_scenarios() -> Result<()> {
     println!("📋 Available Performance Test Scenarios:\n");
-    
+
     for (i, scenario) in TestScenarios::list_scenarios().iter().enumerate() {
         println!("{}. {}", i + 1, scenario);
     }
-    
+
     println!("\n💡 Usage examples:");
     println!("  perf_test run small_scale                    # Run quick test");
     println!("  perf_test run large_scale --duration 600     # Run 10-minute load test");
     println!("  perf_test run stress_test --url http://prod-kairosdb:8081");
     println!("  perf_test suite --skip stress_test           # Run all except stress test");
     println!("  perf_test monitor --interval 300 medium_scale # Monitor every 5 minutes");
-    
+
     Ok(())
 }
 
@@ -307,10 +312,10 @@ concurrent_batches = 5
 
     let config_path = "perf_test_config.toml";
     std::fs::write(config_path, config_example)?;
-    
+
     println!("📄 Sample configuration file generated: {}", config_path);
     println!("Edit this file and use --config to load custom settings");
-    
+
     Ok(())
 }
 
@@ -322,41 +327,46 @@ async fn run_monitoring(
     max_iterations: u32,
 ) -> Result<()> {
     info!("Starting continuous performance monitoring");
-    info!("Scenario: {}, Interval: {}s", scenario_name, interval_seconds);
-    
+    info!(
+        "Scenario: {}, Interval: {}s",
+        scenario_name, interval_seconds
+    );
+
     let mut config = TestScenarios::by_name(scenario_name)
         .ok_or_else(|| anyhow::anyhow!("Unknown scenario: {}", scenario_name))?;
     config.ingest_url = url.to_string();
-    
+
     let mut iteration = 0;
-    
+
     loop {
         iteration += 1;
         if max_iterations > 0 && iteration > max_iterations {
             break;
         }
-        
-        println!("\n🔄 Monitoring iteration {} at {}", 
-            iteration, 
+
+        println!(
+            "\n🔄 Monitoring iteration {} at {}",
+            iteration,
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
         );
-        
+
         let mut runner = PerfTestRunner::new(config.clone());
-        
+
         match runner.run().await {
             Ok(results) => {
                 let reporter = PerfTestReporter::new(
-                    format!("{}_monitor_{}", scenario_name, iteration), 
-                    config.clone()
+                    format!("{}_monitor_{}", scenario_name, iteration),
+                    config.clone(),
                 );
-                
+
                 // Quick summary for monitoring
-                println!("✅ Success: {:.1}%, DP/s: {:.0}, P95: {:.1}ms",
+                println!(
+                    "✅ Success: {:.1}%, DP/s: {:.0}, P95: {:.1}ms",
                     (results.successful_requests as f64 / results.total_requests as f64) * 100.0,
                     results.throughput_datapoints_per_sec,
                     results.latency_stats.p95_ms
                 );
-                
+
                 // Save to trending data
                 let csv_path = output_dir.join("monitoring_trends.csv");
                 if let Err(e) = reporter.save_csv_summary(&results, &csv_path) {
@@ -367,12 +377,12 @@ async fn run_monitoring(
                 eprintln!("❌ Monitoring iteration {} failed: {}", iteration, e);
             }
         }
-        
+
         if max_iterations == 0 || iteration < max_iterations {
             tokio::time::sleep(tokio::time::Duration::from_secs(interval_seconds)).await;
         }
     }
-    
+
     println!("\n✅ Monitoring completed after {} iterations", iteration);
     Ok(())
 }

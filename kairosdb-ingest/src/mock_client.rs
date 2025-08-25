@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use kairosdb_core::{datapoint::DataPointBatch, error::KairosResult};
-use tracing::trace;
 use std::{
     collections::HashMap,
     sync::{
@@ -13,6 +12,7 @@ use std::{
         Arc, Mutex,
     },
 };
+use tracing::trace;
 use tracing::{debug, info};
 
 use crate::cassandra::{CassandraClient, CassandraStats};
@@ -195,7 +195,7 @@ impl CassandraClient for MockCassandraClient {
             bloom_filter_primary_age_seconds: 0,
             bloom_filter_expected_items: 0,
             bloom_filter_false_positive_rate: 0.0,
-            
+
             // Mock detailed metrics (all zeros since mock doesn't track them)
             datapoint_writes: total_datapoints,
             datapoint_write_errors: 0,
@@ -203,12 +203,12 @@ impl CassandraClient for MockCassandraClient {
             index_write_errors: 0,
             prepared_statement_cache_hits: total_queries,
             prepared_statement_cache_misses: 0,
-            
+
             // Mock concurrency metrics (no actual concurrency in mock)
             current_concurrent_requests: 0,
             max_concurrent_requests_reached: 1,
             avg_semaphore_wait_time_ms: 0.0,
-            
+
             // Mock timing metrics (all zeros for mock)
             avg_datapoint_write_time_ms: 0.0,
             avg_index_write_time_ms: 0.0,

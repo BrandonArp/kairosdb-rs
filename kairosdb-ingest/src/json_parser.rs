@@ -14,7 +14,7 @@ use kairosdb_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{debug, trace};
+use tracing::trace;
 use validator::Validate;
 
 /// JSON request format for KairosDB data point ingestion

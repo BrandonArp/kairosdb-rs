@@ -22,7 +22,8 @@ async fn create_test_app_with_mock() -> axum::Router {
     config.ingestion.max_queue_size = 100000;
     let config = Arc::new(config);
 
-    let ingestion_service = IngestionService::new(config.clone())
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let ingestion_service = IngestionService::new(config.clone(), shutdown_token)
         .await
         .expect("Failed to create ingestion service for testing");
 
@@ -43,7 +44,8 @@ async fn create_test_app() -> axum::Router {
     config.ingestion.max_queue_size = 100000;
     let config = Arc::new(config);
 
-    let ingestion_service = IngestionService::new(config.clone())
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let ingestion_service = IngestionService::new(config.clone(), shutdown_token)
         .await
         .expect("Failed to create ingestion service for testing");
 
@@ -604,7 +606,8 @@ mod service_integration_tests {
         config.ingestion.max_queue_size = 100000; // High queue limit for tests
         let config = Arc::new(config);
 
-        let service = IngestionService::new(config).await.unwrap();
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let service = IngestionService::new(config, shutdown_token).await.unwrap();
 
         // Test service creation
         assert!(service.health_check().await.is_ok());

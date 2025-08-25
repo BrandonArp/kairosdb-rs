@@ -17,7 +17,7 @@ impl TestScenarios {
             tag_cardinality_limit: 5,
             warmup_seconds: 5,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -34,7 +34,7 @@ impl TestScenarios {
             tag_cardinality_limit: 15,
             warmup_seconds: 10,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -51,7 +51,7 @@ impl TestScenarios {
             tag_cardinality_limit: 25,
             warmup_seconds: 15,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -68,7 +68,7 @@ impl TestScenarios {
             tag_cardinality_limit: 50,
             warmup_seconds: 30,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -85,7 +85,7 @@ impl TestScenarios {
             tag_cardinality_limit: 100,
             warmup_seconds: 10,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -102,7 +102,7 @@ impl TestScenarios {
             tag_cardinality_limit: 8,
             warmup_seconds: 10,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -119,7 +119,7 @@ impl TestScenarios {
             tag_cardinality_limit: 15,
             warmup_seconds: 15,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -136,7 +136,7 @@ impl TestScenarios {
             tag_cardinality_limit: 20,
             warmup_seconds: 20,
             performance_mode: None, // Use server default
-            producer_tasks: 8, // Multiple producers for better generation throughput
+            producer_tasks: 8,      // Multiple producers for better generation throughput
         }
     }
 
@@ -174,7 +174,7 @@ impl TestScenarios {
         vec![
             "small_scale - Quick local test (50 metrics, 30s)",
             "medium_scale - CI/staging test (500 metrics, 2m)",
-            "large_scale - Production load test (2k metrics, 5m)", 
+            "large_scale - Production load test (2k metrics, 5m)",
             "stress_test - Breaking point test (5k metrics, 10m)",
             "high_cardinality - Tag explosion test (100 metrics, 1k tags)",
             "high_frequency - Many small batches test",
@@ -186,7 +186,7 @@ impl TestScenarios {
     /// Create custom scenario with overrides
     pub fn custom(base_scenario: &str, overrides: ScenarioOverrides) -> Option<PerfTestConfig> {
         let mut config = Self::by_name(base_scenario)?;
-        
+
         if let Some(url) = overrides.ingest_url {
             config.ingest_url = url;
         }
@@ -263,21 +263,21 @@ impl PerfTestSuite {
 
     pub async fn run_all(&mut self) -> anyhow::Result<Vec<(String, PerfTestResults)>> {
         let mut results = Vec::new();
-        
+
         for (name, config) in &self.scenarios {
             println!("\n🎯 Running scenario: {}", name);
-            
+
             let mut runner = PerfTestRunner::new(config.clone());
             let result = runner.run().await?;
-            
+
             // Generate and save report
             let reporter = PerfTestReporter::new(name.clone(), config.clone());
             reporter.print_results(&result);
-            
+
             if let Err(e) = reporter.save_to_file(&result, &self.output_dir) {
                 tracing::warn!("Failed to save report for {}: {}", name, e);
             }
-            
+
             // Save to trending CSV
             let csv_path = self.output_dir.join("performance_trends.csv");
             if let Err(e) = reporter.save_csv_summary(&result, &csv_path) {
@@ -285,7 +285,7 @@ impl PerfTestSuite {
             }
 
             results.push((name.clone(), result));
-            
+
             // Brief pause between scenarios
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
@@ -296,15 +296,20 @@ impl PerfTestSuite {
     pub fn print_suite_summary(&self, results: &[(String, PerfTestResults)]) {
         println!("\n📋 Performance Test Suite Summary");
         println!("═══════════════════════════════════════════════════════");
-        println!("{:<20} {:>12} {:>12} {:>12} {:>12}", "Scenario", "DP/sec", "Success%", "P95 (ms)", "Score");
+        println!(
+            "{:<20} {:>12} {:>12} {:>12} {:>12}",
+            "Scenario", "DP/sec", "Success%", "P95 (ms)", "Score"
+        );
         println!("───────────────────────────────────────────────────────");
 
         for (name, result) in results {
-            let success_rate = (result.successful_requests as f64 / result.total_requests as f64) * 100.0;
+            let success_rate =
+                (result.successful_requests as f64 / result.total_requests as f64) * 100.0;
             let reporter = PerfTestReporter::new(name.clone(), PerfTestConfig::default());
             let score = reporter.calculate_efficiency_score(result);
-            
-            println!("{:<20} {:>12.0} {:>11.1}% {:>12.1} {:>12.1}",
+
+            println!(
+                "{:<20} {:>12.0} {:>11.1}% {:>12.1} {:>12.1}",
                 name,
                 result.throughput_datapoints_per_sec,
                 success_rate,
@@ -312,7 +317,7 @@ impl PerfTestSuite {
                 score
             );
         }
-        
+
         println!("───────────────────────────────────────────────────────");
     }
 }
@@ -332,7 +337,7 @@ mod tests {
     fn test_scenario_by_name() {
         let config = TestScenarios::by_name("small_scale");
         assert!(config.is_some());
-        
+
         let config = config.unwrap();
         assert_eq!(config.metrics_count, 50);
         assert_eq!(config.duration_seconds, 30);
@@ -345,10 +350,10 @@ mod tests {
             duration_seconds: Some(60),
             ..Default::default()
         };
-        
+
         let config = TestScenarios::custom("small_scale", overrides);
         assert!(config.is_some());
-        
+
         let config = config.unwrap();
         assert_eq!(config.metrics_count, 1000); // overridden
         assert_eq!(config.duration_seconds, 60); // overridden
