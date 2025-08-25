@@ -7,6 +7,7 @@
 //! - Metrics collection and monitoring
 
 use anyhow::{Context, Result};
+use tokio_util::sync::CancellationToken;
 // Removed unused imports
 use kairosdb_core::{
     datapoint::DataPointBatch,
@@ -102,7 +103,7 @@ pub struct IngestionService {
 
 impl IngestionService {
     /// Create a new ingestion service
-    pub async fn new(config: Arc<IngestConfig>) -> Result<Self> {
+    pub async fn new(config: Arc<IngestConfig>, shutdown_token: CancellationToken) -> Result<Self> {
         config.validate().context("Invalid configuration")?;
 
         info!("Initializing ingestion service");
@@ -129,7 +130,8 @@ impl IngestionService {
             work_tx.clone(),
             work_rx,
             response_tx,
-            response_rx.clone()
+            response_rx.clone(),
+            shutdown_token.clone()
         )
         .await
         .context("Failed to initialize multi-worker Cassandra client")?;
@@ -181,10 +183,8 @@ impl IngestionService {
             backpressure_active,
         };
 
-        // Start background queue processing task
-        info!("About to start queue processor task");
-        let _queue_processor = service.start_queue_processor().await;
-        info!("Queue processor task started successfully");
+        // Queue processor will be started in main.rs with proper shutdown handling
+        info!("Ingestion service initialized, queue processor will be started with shutdown token");
         
         info!(
             "Ingestion service initialized with {} worker threads and persistent queue processor",
@@ -337,7 +337,7 @@ impl IngestionService {
     }
 
     /// Start the background queue processor task
-    async fn start_queue_processor(&self) -> tokio::task::JoinHandle<()> {
+    pub async fn start_queue_processor(&self, shutdown_token: tokio_util::sync::CancellationToken) -> tokio::task::JoinHandle<()> {
         let persistent_queue = self.persistent_queue.clone();
         let cassandra_client = self.cassandra_client.clone();
         let cassandra_work_tx = self.cassandra_work_tx.clone();
@@ -364,7 +364,8 @@ impl IngestionService {
                 work_tx,
                 response_rx,
                 config,
-                metrics
+                metrics,
+                shutdown_token
             ).await;
         })
     }
@@ -376,6 +377,7 @@ impl IngestionService {
         response_rx: flume::Receiver<WorkResponse>,
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
+        shutdown_token: CancellationToken,
     ) {
         info!("Starting separate response processor and work sender tasks");
         
@@ -383,8 +385,9 @@ impl IngestionService {
         let response_task = {
             let queue = persistent_queue.clone();
             let metrics = metrics.clone();
+            let shutdown_token_clone = shutdown_token.clone();
             tokio::spawn(async move {
-                Self::run_response_processor(queue, response_rx, metrics).await;
+                Self::run_response_processor(queue, response_rx, metrics, shutdown_token_clone).await;
             })
         };
         
@@ -393,22 +396,26 @@ impl IngestionService {
             let queue = persistent_queue.clone();
             let config = config.clone();
             let metrics_clone = metrics.clone();
+            let shutdown_token_clone = shutdown_token.clone();
             tokio::spawn(async move {
-                Self::run_work_sender(queue, work_tx, config, metrics_clone).await;
+                Self::run_work_sender(queue, work_tx, config, metrics_clone, shutdown_token_clone).await;
             })
         };
         
-        // Wait for either task to complete (shouldn't happen under normal conditions)
+        // Wait for shutdown signal or task completion
         tokio::select! {
+            _ = shutdown_token.cancelled() => {
+                info!("Shutdown requested, stopping queue processor tasks");
+            }
             result = response_task => {
-                error!("Response processor task completed unexpectedly: {:?}", result);
+                warn!("Response processor task completed unexpectedly: {:?}", result);
             }
             result = work_task => {
-                error!("Work sender task completed unexpectedly: {:?}", result);
+                warn!("Work sender task completed unexpectedly: {:?}", result);
             }
         }
         
-        error!("Bidirectional processor exiting - this should not happen");
+        info!("Queue processor shutdown complete");
     }
     
     /// Dedicated response processing task - processes responses with batched queue operations
@@ -416,6 +423,7 @@ impl IngestionService {
         persistent_queue: Arc<PersistentQueue>,
         response_rx: flume::Receiver<WorkResponse>,
         metrics: IngestionMetrics,
+        shutdown_token: CancellationToken,
     ) {
         info!("Response processor task started with batched queue operations");
         
@@ -423,6 +431,11 @@ impl IngestionService {
         let mut failed_unclaims = Vec::new();
         
         loop {
+            // Check for shutdown signal
+            if shutdown_token.is_cancelled() {
+                info!("Response processor received shutdown signal, exiting");
+                break;
+            }
             // Record response channel utilization BEFORE collecting responses
             let response_channel_len = response_rx.len();
             let response_channel_capacity = response_rx.capacity().unwrap_or(1000);
@@ -549,12 +562,18 @@ impl IngestionService {
         work_tx: flume::Sender<WorkItem>,
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
+        shutdown_token: CancellationToken,
     ) {
         let full_channel_delay = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
         
         info!("Work sender task started with no delays (except {}ms when channel full)", config.ingestion.batch_timeout_ms);
         
         loop {
+            // Check for shutdown signal
+            if shutdown_token.is_cancelled() {
+                info!("Work sender received shutdown signal, exiting");
+                break;
+            }
             // Check how much room is available in the work channel
             let work_channel_len = work_tx.len();
             let work_channel_capacity = work_tx.capacity().unwrap_or(1000);

@@ -19,6 +19,7 @@ use std::{
     },
 };
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 // ScyllaDB Rust driver imports
@@ -102,6 +103,7 @@ impl MultiWorkerCassandraClient {
         work_rx: Receiver<WorkItem>,
         response_tx: Sender<WorkResponse>,
         response_rx: Receiver<WorkResponse>,
+        shutdown_token: tokio_util::sync::CancellationToken,
     ) -> KairosResult<Self> {
         let config = Arc::new(config);
         let num_workers = num_workers.unwrap_or(200); // Default to 200 workers for high concurrency
@@ -132,6 +134,7 @@ impl MultiWorkerCassandraClient {
                 response_tx.clone(),
                 shared_resources.clone(),
                 stats.clone(),
+                shutdown_token.clone(),
             );
             worker_handles.push(worker_handle);
         }
@@ -182,7 +185,9 @@ impl MultiWorkerCassandraClient {
         // Create MPMC channels for work distribution and responses
         let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
         let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
-        Self::new_with_channels(config, num_workers, work_tx, work_rx, response_tx, response_rx).await
+        // Create a cancellation token for this instance
+        let shutdown_token = CancellationToken::new();
+        Self::new_with_channels(config, num_workers, work_tx, work_rx, response_tx, response_rx, shutdown_token).await
     }
 
     /// Create ScyllaDB session
@@ -283,12 +288,29 @@ impl MultiWorkerCassandraClient {
         response_tx: Sender<WorkResponse>,
         shared_resources: SharedCassandraResources,
         stats: Arc<MultiWorkerStats>,
+        shutdown_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             // info!("Worker {} started", worker_id);
             let mut bloom_manager = BloomManager::new(); // Each worker gets its own bloom filter
 
-            while let Ok(work_item) = work_rx.recv_async().await {
+            loop {
+                let work_item = tokio::select! {
+                    result = work_rx.recv_async() => {
+                        match result {
+                            Ok(item) => item,
+                            Err(_) => {
+                                // Channel closed, worker should exit
+                                break;
+                            }
+                        }
+                    }
+                    _ = shutdown_token.cancelled() => {
+                        // Shutdown requested
+                        trace!("Worker {} received shutdown signal", worker_id);
+                        break;
+                    }
+                };
                 let batch_start = std::time::Instant::now();
                 let batch_size = work_item.batch.points.len();
 
