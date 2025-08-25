@@ -82,12 +82,30 @@ impl KairosSchema {
         )
     }
 
+    /// Generate CQL for creating the row_key_time_index table
+    pub fn create_row_key_time_index_table_cql(&self) -> String {
+        format!(
+            "CREATE TABLE IF NOT EXISTS {}.row_key_time_index (
+                metric text,
+                table_name text,
+                row_time timestamp,
+                value text,
+                PRIMARY KEY (metric, table_name, row_time)
+            ) WITH CLUSTERING ORDER BY (table_name ASC, row_time ASC)
+            AND compression = {{'class': 'LZ4Compressor'}}
+            AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
+            AND gc_grace_seconds = 864000;",
+            self.keyspace
+        )
+    }
+
     /// Generate all CQL statements for schema creation
     pub fn create_schema_cql(&self) -> Vec<String> {
         vec![
             self.create_keyspace_cql(),
             self.create_data_points_table_cql(),
             self.create_row_key_index_table_cql(),
+            self.create_row_key_time_index_table_cql(),
             self.create_string_index_table_cql(),
         ]
     }
@@ -376,7 +394,7 @@ mod tests {
         assert!(schema.validate().is_ok());
 
         let cql_statements = schema.create_schema_cql();
-        assert_eq!(cql_statements.len(), 4); // keyspace + 3 tables
+        assert_eq!(cql_statements.len(), 5); // keyspace + 4 tables
 
         // Check keyspace creation
         assert!(cql_statements[0].contains("CREATE KEYSPACE"));

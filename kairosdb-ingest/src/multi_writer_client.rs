@@ -54,6 +54,7 @@ struct SharedCassandraResources {
     session: Arc<Session>,
     config: Arc<CassandraConfig>,
     insert_data_point: PreparedStatement,
+    insert_row_key_time_index: PreparedStatement,
     insert_string_index: PreparedStatement,
 }
 
@@ -163,7 +164,7 @@ impl MultiWorkerCassandraClient {
         // Execute table creation statements
         let statements = vec![
             schema.create_data_points_table_cql(),
-            schema.create_row_key_index_table_cql(),
+            schema.create_row_key_time_index_table_cql(),
             schema.create_string_index_table_cql(),
         ];
         
@@ -235,6 +236,15 @@ impl MultiWorkerCassandraClient {
             KairosError::cassandra(format!("Failed to prepare data point statement: {}", e))
         })?;
 
+        // Prepare row_key_time_index insert
+        let row_key_time_index_query = format!(
+            "INSERT INTO {}.row_key_time_index (metric, table_name, row_time, value) VALUES (?, ?, ?, ?)",
+            config.keyspace
+        );
+        let insert_row_key_time_index = session.prepare(row_key_time_index_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare row_key_time_index statement: {}", e))
+        })?;
+
         // Prepare string index insert
         let string_index_query = format!(
             "INSERT INTO {}.string_index (key, column1, value) VALUES (?, ?, ?)",
@@ -250,6 +260,7 @@ impl MultiWorkerCassandraClient {
             session,
             config,
             insert_data_point,
+            insert_row_key_time_index,
             insert_string_index,
         })
     }
@@ -351,9 +362,10 @@ impl MultiWorkerCassandraClient {
             let column_key_bytes = column_name.to_bytes();
             let value_bytes = &cassandra_value.bytes;
 
+            // Write to data_points table
             match resources.session.execute_unpaged(
                 &resources.insert_data_point,
-                (row_key_bytes, column_key_bytes, value_bytes.clone())
+                (row_key_bytes.clone(), column_key_bytes, value_bytes.clone())
             ).await {
                 Ok(_) => {
                     stats.total_queries.fetch_add(1, Ordering::Relaxed);
@@ -365,6 +377,9 @@ impl MultiWorkerCassandraClient {
                     return Err(KairosError::cassandra(format!("Failed to write data point: {}", e)));
                 }
             }
+
+            // Write to row_key_time_index table for time-based queries
+            Self::write_row_key_time_index_entry(resources, &row_key, stats).await?;
         }
 
         let datapoints_duration = datapoints_start.elapsed();
@@ -471,6 +486,37 @@ impl MultiWorkerCassandraClient {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
                 Err(KairosError::cassandra(format!("Failed to write string index: {}", e)))
+            }
+        }
+    }
+
+    /// Write a row key time index entry for time-based queries
+    async fn write_row_key_time_index_entry(
+        resources: &SharedCassandraResources,
+        row_key: &RowKey,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        // Extract values for row_key_time_index table
+        let metric_name = row_key.metric.as_str();
+        let table_name = "data_points"; // Always data_points table
+        let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
+        
+        // Java KairosDB stores null in the value column - the presence of the row is what matters
+        let value: Option<String> = None;
+
+        match resources.session.execute_unpaged(
+            &resources.insert_row_key_time_index,
+            (metric_name, table_name, row_time, value)
+        ).await {
+            Ok(_) => {
+                stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                Err(KairosError::cassandra(format!("Failed to write row_key_time_index: {}", e)))
             }
         }
     }
