@@ -36,7 +36,7 @@ hyper = { version = "1.0", features = ["full"] }
 
 # Cassandra driver
 scylla = "1.2"
-uuid = { version = "1.6", features = ["v4", "serde"] }
+uuid = { version = "1.6", features = ["v1", "v4", "serde"] }
 
 # Serialization and configuration
 serde = { version = "1.0", features = ["derive"] }

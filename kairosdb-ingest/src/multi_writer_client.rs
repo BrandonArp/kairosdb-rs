@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use flume::{Receiver, Sender};
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
-    datapoint::DataPointBatch,
+    datapoint::{DataPoint, DataPointBatch, DataPointValue},
     error::{KairosError, KairosResult},
     schema::StringIndexEntry,
 };
@@ -55,6 +55,7 @@ struct SharedCassandraResources {
     config: Arc<CassandraConfig>,
     insert_data_point: PreparedStatement,
     insert_row_key_time_index: PreparedStatement,
+    insert_row_keys: PreparedStatement,
     insert_string_index: PreparedStatement,
 }
 
@@ -245,6 +246,15 @@ impl MultiWorkerCassandraClient {
             KairosError::cassandra(format!("Failed to prepare row_key_time_index statement: {}", e))
         })?;
 
+        // Prepare row_keys insert
+        let row_keys_query = format!(
+            "INSERT INTO {}.row_keys (metric, table_name, row_time, data_type, tags, mtime, value) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            config.keyspace
+        );
+        let insert_row_keys = session.prepare(row_keys_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare row_keys statement: {}", e))
+        })?;
+
         // Prepare string index insert
         let string_index_query = format!(
             "INSERT INTO {}.string_index (key, column1, value) VALUES (?, ?, ?)",
@@ -261,6 +271,7 @@ impl MultiWorkerCassandraClient {
             config,
             insert_data_point,
             insert_row_key_time_index,
+            insert_row_keys,
             insert_string_index,
         })
     }
@@ -380,6 +391,9 @@ impl MultiWorkerCassandraClient {
 
             // Write to row_key_time_index table for time-based queries
             Self::write_row_key_time_index_entry(resources, &row_key, stats).await?;
+            
+            // Write to row_keys table for query metadata
+            Self::write_row_keys_entry(resources, &row_key, data_point, stats).await?;
         }
 
         let datapoints_duration = datapoints_start.elapsed();
@@ -439,25 +453,29 @@ impl MultiWorkerCassandraClient {
             }
         }
 
-        // Write tag name indexes (with bloom filter deduplication)
-        for tag_name in tag_names {
-            let bloom_key = format!("tag_name:{}", tag_name);
-            if bloom_manager.should_write_index(&bloom_key) {
-                let entry = StringIndexEntry::tag_name(tag_name);
-                Self::write_string_index_sequentially(resources, &entry, stats).await?;
-                indexes_written += 1;
-            }
-        }
+        // NOTE: Java KairosDB does NOT write tag_names or tag_values during ingestion
+        // Only metric_names are written to string_index during ingestion
+        // Commenting out tag index writes to match Java KairosDB behavior exactly
+        
+        // // Write tag name indexes (with bloom filter deduplication)
+        // for tag_name in tag_names {
+        //     let bloom_key = format!("tag_name:{}", tag_name);
+        //     if bloom_manager.should_write_index(&bloom_key) {
+        //         let entry = StringIndexEntry::tag_name(tag_name);
+        //         Self::write_string_index_sequentially(resources, &entry, stats).await?;
+        //         indexes_written += 1;
+        //     }
+        // }
 
-        // Write tag value indexes (with bloom filter deduplication)
-        for tag_value in tag_values {
-            let bloom_key = format!("tag_value:{}", tag_value);
-            if bloom_manager.should_write_index(&bloom_key) {
-                let entry = StringIndexEntry::tag_value(tag_value);
-                Self::write_string_index_sequentially(resources, &entry, stats).await?;
-                indexes_written += 1;
-            }
-        }
+        // // Write tag value indexes (with bloom filter deduplication)  
+        // for tag_value in tag_values {
+        //     let bloom_key = format!("tag_value:{}", tag_value);
+        //     if bloom_manager.should_write_index(&bloom_key) {
+        //         let entry = StringIndexEntry::tag_value(tag_value);
+        //         Self::write_string_index_sequentially(resources, &entry, stats).await?;
+        //         indexes_written += 1;
+        //     }
+        // }
 
         trace!("All {} indexes written successfully", indexes_written);
         Ok(indexes_written)
@@ -517,6 +535,60 @@ impl MultiWorkerCassandraClient {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
                 Err(KairosError::cassandra(format!("Failed to write row_key_time_index: {}", e)))
+            }
+        }
+    }
+
+    /// Write a row keys entry for query metadata  
+    async fn write_row_keys_entry(
+        resources: &SharedCassandraResources,
+        row_key: &RowKey,
+        data_point: &DataPoint,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        use std::collections::HashMap;
+        
+        // Extract values for row_keys table
+        let metric_name = row_key.metric.as_str();
+        let table_name = "data_points"; // Always data_points table
+        let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
+        
+        // Convert data point value to KairosDB data type string
+        let data_type = match &data_point.value {
+            DataPointValue::Long(_) => "kairos_long",
+            DataPointValue::Double(_) => "kairos_double", 
+            DataPointValue::Text(_) => "kairos_string",
+            DataPointValue::Complex { .. } => "kairos_complex",
+            DataPointValue::Binary(_) => "kairos_binary",
+            DataPointValue::Histogram(_) => "kairos_histogram",
+        };
+        
+        // Convert tags to HashMap<String, String> for Cassandra frozen map
+        let tags: HashMap<String, String> = data_point.tags.iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+            .collect();
+            
+        // Generate a timeuuid for mtime (modification time)
+        // Use proper time-based UUID v1 for CQL timeuuid
+        let uuid = uuid::Uuid::now_v1(&[1, 2, 3, 4, 5, 6]); // MAC address placeholder
+        let mtime = scylla::value::CqlTimeuuid::from_bytes(uuid.into_bytes());
+        
+        // Java KairosDB stores null in the value column
+        let value: Option<String> = None;
+
+        match resources.session.execute_unpaged(
+            &resources.insert_row_keys,
+            (metric_name, table_name, row_time, data_type, tags, mtime, value)
+        ).await {
+            Ok(_) => {
+                stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                Err(KairosError::cassandra(format!("Failed to write row_keys: {}", e)))
             }
         }
     }
