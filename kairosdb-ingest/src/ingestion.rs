@@ -7,6 +7,7 @@
 //! - Metrics collection and monitoring
 
 use anyhow::{Context, Result};
+// Removed unused imports
 use kairosdb_core::{
     datapoint::DataPointBatch,
     error::{KairosError, KairosResult},
@@ -26,7 +27,7 @@ use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
     config::IngestConfig,
     mock_client::MockCassandraClient,
-    multi_writer_client::MultiWorkerCassandraClient,
+    multi_writer_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     persistent_queue::PersistentQueue,
 };
 
@@ -73,6 +74,12 @@ pub struct IngestionService {
 
     /// Cassandra client for data persistence
     cassandra_client: BoxedCassandraClient,
+    
+    /// Direct channel to Cassandra workers (bypasses client interface)
+    cassandra_work_tx: Option<flume::Sender<WorkItem>>,
+    
+    /// Response channel from Cassandra workers
+    cassandra_response_rx: Option<flume::Receiver<WorkResponse>>,
 
     /// Metrics collection
     metrics: IngestionMetrics,
@@ -96,32 +103,38 @@ impl IngestionService {
                 .context("Failed to initialize persistent queue")?
         );
 
-        // Initialize Cassandra client based on environment
-        let cassandra_client: BoxedCassandraClient = if std::env::var("USE_MOCK_CASSANDRA")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-        {
-            info!("Using mock Cassandra client for testing");
-            Arc::new(MockCassandraClient::new())
-        } else {
-            info!("Using production multi-worker Cassandra client");
-            let num_workers = config.cassandra.max_concurrent_requests;
-            let client = MultiWorkerCassandraClient::new(config.cassandra.clone(), num_workers)
-                .await
-                .context("Failed to initialize multi-worker Cassandra client")?;
+        // Always use multi-worker Cassandra client with bidirectional channels
+        info!("Using production multi-worker Cassandra client with bidirectional channels");
+        let num_workers = config.cassandra.max_concurrent_requests;
+        
+        // Create shared MPMC channels for bidirectional communication
+        let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
+        let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
+        
+        let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
+            config.cassandra.clone(), 
+            num_workers,
+            work_tx.clone(),
+            work_rx,
+            response_tx,
+            response_rx.clone()
+        )
+        .await
+        .context("Failed to initialize multi-worker Cassandra client")?;
 
-            // Ensure schema exists
-            info!("Ensuring KairosDB schema exists");
-            client
-                .ensure_schema()
-                .await
-                .context("Failed to ensure Cassandra schema")?;
+        // Ensure schema exists
+        info!("Ensuring KairosDB schema exists");
+        cassandra_client
+            .ensure_schema()
+            .await
+            .context("Failed to ensure Cassandra schema")?;
 
-            info!("Multi-worker Cassandra client ready with {} workers", 
-                  num_workers.unwrap_or(50));
+        info!("Multi-worker Cassandra client ready with {} workers and bidirectional channels", 
+              num_workers.unwrap_or(200));
 
-            Arc::new(client)
-        };
+        let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
+        let cassandra_work_tx = work_tx;
+        let cassandra_response_rx = response_rx;
 
         // Initialize Prometheus metrics
         let prometheus_metrics = PrometheusMetrics::new()?;
@@ -146,6 +159,8 @@ impl IngestionService {
             config: config.clone(),
             persistent_queue,
             cassandra_client,
+            cassandra_work_tx: Some(cassandra_work_tx),
+            cassandra_response_rx: Some(cassandra_response_rx),
             metrics,
             backpressure_active,
         };
@@ -202,6 +217,8 @@ impl IngestionService {
             config,
             persistent_queue,
             cassandra_client,
+            cassandra_work_tx: None,  // Mock client doesn't use direct channel
+            cassandra_response_rx: None,  // Mock client doesn't use response channel
             metrics,
             backpressure_active,
         };
@@ -303,6 +320,8 @@ impl IngestionService {
     async fn start_queue_processor(&self) -> tokio::task::JoinHandle<()> {
         let persistent_queue = self.persistent_queue.clone();
         let cassandra_client = self.cassandra_client.clone();
+        let cassandra_work_tx = self.cassandra_work_tx.clone();
+        let cassandra_response_rx = self.cassandra_response_rx.clone();
         let config = self.config.clone();
         let metrics = self.metrics.clone();
         
@@ -313,100 +332,159 @@ impl IngestionService {
             info!("Creating interval timer with duration: {:?}", interval_duration);
             let mut interval = tokio::time::interval(interval_duration);
             
-            info!("Starting persistent queue processor main loop with {}ms interval", config.ingestion.batch_timeout_ms);
+            info!("Starting persistent queue processor with bidirectional MPMC channels");
             
-            loop {
-                // Continuously drain the queue until empty using new status tracking
-                let mut batches_processed_this_cycle = 0;
-                let current_queue_size = persistent_queue.size();
-                if current_queue_size > 0 {
-                    info!("Starting queue processing cycle, queue size: {}", current_queue_size);
-                } else {
-                    trace!("Starting queue processing cycle, queue size: {}", current_queue_size);
-                }
-                loop {
-                    // Peek at the next work item without removing it
-                    match persistent_queue.peek_next_work_item() {
-                        Ok(Some(work_item)) => {
-                            let batch_size = work_item.entry.batch.points.len();
-                            trace!("Processing work item with {} points from queue", batch_size);
-                            batches_processed_this_cycle += 1;
-                            
-                            // Write to Cassandra with timing
-                            let cassandra_start = std::time::Instant::now();
-                            trace!("Writing batch of {} points to Cassandra", batch_size);
-                            
-                            match cassandra_client.write_batch(&work_item.entry.batch).await {
-                                Ok(_) => {
-                                    let cassandra_duration = cassandra_start.elapsed();
-                                    trace!("Successfully wrote batch of {} points to Cassandra in {:?}", batch_size, cassandra_duration);
-                                    
-                                    // Only remove from queue after successful Cassandra write
-                                    match persistent_queue.remove_processed_item(&work_item.queue_key) {
-                                        Ok(_) => {
-                                            trace!("Successfully removed processed item from queue");
-                                            // Update success metrics
-                                            metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to remove processed item from queue (data was written to Cassandra): {}", e);
-                                            // This is concerning but not fatal - Cassandra write succeeded
-                                        }
-                                    }
+            // Use bidirectional processor only
+            let work_tx = cassandra_work_tx.expect("Multi-worker client should provide work channel");
+            let response_rx = cassandra_response_rx.expect("Multi-worker client should provide response channel");
+            
+            info!("Starting optimized bidirectional channel mode");
+            Self::run_bidirectional_processor(
+                persistent_queue,
+                work_tx,
+                response_rx,
+                config,
+                metrics
+            ).await;
+        })
+    }
+    
+    /// Run the optimized bidirectional processor
+    async fn run_bidirectional_processor(
+        persistent_queue: Arc<PersistentQueue>,
+        work_tx: flume::Sender<WorkItem>,
+        response_rx: flume::Receiver<WorkResponse>,
+        config: Arc<IngestConfig>,
+        metrics: IngestionMetrics,
+    ) {
+        let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
+        let mut interval = tokio::time::interval(interval_duration);
+        let mut _responses_processed = 0;
+        
+        loop {
+            // Process up to 10 responses, then force work sending
+            let mut responses_this_cycle = 0;
+            
+            // Try to drain responses with timeout to prevent starvation
+            while responses_this_cycle < 10 {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(5), // Small timeout
+                    response_rx.recv_async()
+                ).await {
+                    Ok(Ok(work_response)) => {
+                        // info!("Queue processor received response for {}", work_response.queue_key);
+                        match work_response.result {
+                            Ok(batch_size) => {
+                                // Successful Cassandra write - remove from queue
+                                if let Err(e) = persistent_queue.remove_processed_item(&work_response.queue_key, batch_size) {
+                                    error!("Failed to remove successful item from queue: {}", e);
+                                } else {
+                                    metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
+                                    // info!("Removed successful item {} ({} points) from queue",
+                                    //        work_response.queue_key, batch_size);
                                 }
-                                Err(e) => {
-                                    let cassandra_duration = cassandra_start.elapsed();
-                                    error!("Failed to write batch to Cassandra after {:?}: {}", cassandra_duration, e);
-                                    metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
-                                    
-                                    // Item stays in queue for retry - implement exponential backoff here
-                                    warn!("Item remains in queue for retry (queue key: {})", work_item.queue_key);
-                                    
-                                    // Break to avoid tight retry loop - will retry on next interval
-                                    break;
+                            }
+                            Err(error_msg) => {
+                                // Cassandra failure - unclaim for retry
+                                metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
+                                if let Err(e) = persistent_queue.mark_item_failed(&work_response.queue_key) {
+                                    error!("Failed to unclaim failed item: {}", e);
+                                } else {
+                                    warn!("Unclaimed failed item {} for retry: {}", 
+                                          work_response.queue_key, error_msg);
                                 }
                             }
                         }
-                        Ok(None) => {
-                            // Queue is empty, break from inner loop
-                            if batches_processed_this_cycle > 0 {
-                                info!("Queue drained: processed {} batches this cycle", batches_processed_this_cycle);
-                            } else {
-                                trace!("Persistent queue is empty");
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            error!("Failed to peek at next work item from persistent queue: {}", e);
-                            metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
-                            break; // Exit inner loop on error
-                        }
+                        responses_this_cycle += 1;
+                        _responses_processed += 1;
                     }
-                }
-                
-                // Queue metrics are tracked by PersistentQueue internally
-                
-                // Update disk usage metric periodically
-                if let Ok(disk_usage) = persistent_queue.get_disk_usage_bytes() {
-                    persistent_queue.metrics().disk_usage_bytes.set(disk_usage as f64);
-                }
-                
-                // Wait before checking queue again (queue is empty or error occurred)
-                if batches_processed_this_cycle > 0 {
-                    info!("Queue processing cycle complete, waiting for next interval tick");
-                } else {
-                    trace!("Queue processing cycle complete, waiting for next interval tick");
-                }
-                interval.tick().await;
-                if persistent_queue.size() > 0 {
-                    info!("Interval tick received, starting next cycle");
-                } else {
-                    trace!("Interval tick received, starting next cycle");
+                    Ok(Err(e)) => {
+                        error!("Response channel error: {}", e);
+                        return;
+                    }
+                    Err(_) => {
+                        // Timeout - no more responses available, break to send work
+                        break;
+                    }
                 }
             }
             
-            error!("Queue processor task terminated unexpectedly!");
-        })
+            // ALWAYS send work after processing responses (or timeout) - batched approach
+            // Check how much room is available in the work channel
+            let work_channel_len = work_tx.len();
+            let work_channel_capacity = work_tx.capacity().unwrap_or(1000);
+            let available_slots = work_channel_capacity.saturating_sub(work_channel_len);
+            
+            // Only claim what we can actually send to avoid unclaiming issues
+            let batch_size = available_slots.min(100); // Cap at 100 for reasonable batch size
+            
+            let work_items = if batch_size > 0 {
+                match persistent_queue.claim_work_items_batch(30000, batch_size) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        error!("Failed to claim work items from queue: {}", e);
+                        continue;
+                    }
+                }
+            } else {
+                Vec::new() // Channel is full, don't claim anything
+            };
+            
+            let mut items_sent = 0;
+            for work_item in work_items {
+                let cassandra_work = WorkItem {
+                    batch: work_item.entry.batch.clone(),
+                    queue_key: work_item.queue_key.clone(),
+                };
+                
+                // Since we calculated available slots, try_send should always succeed
+                // But handle the edge case where another thread filled the channel
+                match work_tx.try_send(cassandra_work) {
+                    Ok(_) => {
+                        items_sent += 1;
+                    }
+                    Err(flume::TrySendError::Full(_)) => {
+                        // Unexpected - channel filled between our check and send
+                        warn!("Work channel unexpectedly full, unclaiming remaining {} items", work_items.len() - items_sent);
+                        // Unclaim this and all remaining items
+                        for remaining_item in work_items.into_iter().skip(items_sent) {
+                            if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
+                                error!("Failed to unclaim item after unexpected full: {}", unclaim_err);
+                            }
+                        }
+                        break;
+                    }
+                    Err(flume::TrySendError::Disconnected(_)) => {
+                        error!("Work channel disconnected");
+                        // Unclaim this and all remaining items
+                        for remaining_item in work_items.into_iter().skip(items_sent) {
+                            if let Err(unclaim_err) = persistent_queue.mark_item_failed(&remaining_item.queue_key) {
+                                error!("Failed to unclaim item after disconnect: {}", unclaim_err);
+                            }
+                        }
+                        return; // Exit processor
+                    }
+                }
+            }
+            
+            if items_sent > 0 || available_slots == 0 {
+                let current_channel_len = work_tx.len();
+                let work_channel_fullness = (current_channel_len as f32 / work_channel_capacity as f32 * 100.0) as u32;
+                
+                if items_sent > 0 {
+                    info!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, had {} slots available)", 
+                          items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, available_slots);
+                } else {
+                    info!("Work channel full ({}/{} items, {}% full), skipping work claiming this cycle", 
+                          current_channel_len, work_channel_capacity, work_channel_fullness);
+                }
+            }
+            
+            // If no responses and no work sent, wait briefly to avoid busy loop
+            if responses_this_cycle == 0 && items_sent == 0 {
+                interval.tick().await;
+            }
+        }
     }
 
     /// Get current metrics snapshot

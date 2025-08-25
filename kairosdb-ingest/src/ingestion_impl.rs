@@ -56,7 +56,7 @@ impl IngestionService {
         backpressure: Arc<AtomicU64>,
         batch_receiver: &mut Receiver<DataPointBatch>,
     ) {
-        info!("Worker {} started", worker_id);
+        // info!("Worker {} started", worker_id);
         
         while let Some(batch) = batch_receiver.recv().await {
             // Acquire semaphore permit for processing

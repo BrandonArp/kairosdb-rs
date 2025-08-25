@@ -44,7 +44,7 @@ impl KairosSchema {
                 value blob,
                 PRIMARY KEY (key, column1)
             ) WITH COMPACT STORAGE
-            AND compression = {{'sstable_compression': 'LZ4Compressor'}}
+            AND compression = {{'class': 'LZ4Compressor'}}
             AND compaction = {{'class': 'LeveledCompactionStrategy'}}
             AND gc_grace_seconds = 864000;",
             self.keyspace
@@ -60,7 +60,7 @@ impl KairosSchema {
                 value blob,
                 PRIMARY KEY (key, column1)
             ) WITH COMPACT STORAGE
-            AND compression = {{'sstable_compression': 'LZ4Compressor'}}
+            AND compression = {{'class': 'LZ4Compressor'}}
             AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
             AND gc_grace_seconds = 864000;",
             self.keyspace
@@ -75,7 +75,7 @@ impl KairosSchema {
                 column1 varchar,
                 value blob,
                 PRIMARY KEY (key, column1)
-            ) WITH compression = {{'sstable_compression': 'LZ4Compressor'}}
+            ) WITH compression = {{'class': 'LZ4Compressor'}}
             AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
             AND gc_grace_seconds = 864000;",
             self.keyspace

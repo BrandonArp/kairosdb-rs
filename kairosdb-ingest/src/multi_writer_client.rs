@@ -37,7 +37,15 @@ use crate::config::CassandraConfig;
 #[derive(Debug)]
 pub struct WorkItem {
     pub batch: DataPointBatch,
-    pub response_tx: oneshot::Sender<KairosResult<()>>,
+    pub queue_key: String,  // Key to identify the queue item for completion
+}
+
+/// Response sent back from Cassandra workers to queue processor
+#[derive(Debug, Clone)]
+pub struct WorkResponse {
+    pub queue_key: String,
+    pub result: Result<usize, String>, // Ok(batch_size) or Err(error_message)
+    pub processing_duration_ns: u64,
 }
 
 /// Shared session and prepared statements for all workers
@@ -77,27 +85,38 @@ struct MultiWorkerStats {
 /// Multi-worker Cassandra client with MPMC channels
 pub struct MultiWorkerCassandraClient {
     work_tx: Sender<WorkItem>,
+    response_rx: Receiver<WorkResponse>,  // For backward compatibility with write_batch
     stats: Arc<MultiWorkerStats>,
+    shared_resources: SharedCassandraResources,  // Keep for schema operations
     _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
 }
 
 impl MultiWorkerCassandraClient {
-    /// Create a new multi-worker Cassandra client
-    pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+    /// Create a new multi-worker Cassandra client with external channels
+    pub async fn new_with_channels(
+        config: CassandraConfig, 
+        num_workers: Option<usize>,
+        work_tx: Sender<WorkItem>,
+        work_rx: Receiver<WorkItem>,
+        response_tx: Sender<WorkResponse>,
+        response_rx: Receiver<WorkResponse>,
+    ) -> KairosResult<Self> {
         let config = Arc::new(config);
-        let num_workers = num_workers.unwrap_or(50); // Default to 50 workers
+        let num_workers = num_workers.unwrap_or(200); // Default to 200 workers for high concurrency
 
         info!("Initializing Multi-Worker Cassandra Client with {} workers", num_workers);
 
-        // Build session with contact points
+        // Build session with contact points (ONE session for all workers)
         let session = Self::create_session(&config).await?;
         let session = Arc::new(session);
 
+        // Create schema BEFORE creating workers
+        info!("Creating KairosDB schema if needed");
+        Self::ensure_schema_with_session(&session, &config).await?;
+        info!("KairosDB schema creation completed");
+
         // Prepare shared statements
         let shared_resources = Self::prepare_shared_resources(session, config).await?;
-
-        // Create MPMC channel for work distribution
-        let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
 
         // Create shared stats
         let stats = Arc::new(MultiWorkerStats::default());
@@ -108,6 +127,7 @@ impl MultiWorkerCassandraClient {
             let worker_handle = Self::spawn_worker(
                 worker_id,
                 work_rx.clone(),
+                response_tx.clone(),
                 shared_resources.clone(),
                 stats.clone(),
             );
@@ -120,9 +140,47 @@ impl MultiWorkerCassandraClient {
 
         Ok(Self {
             work_tx,
+            response_rx,
             stats,
+            shared_resources: shared_resources.clone(),
             _worker_handles: worker_handles,
         })
+    }
+    
+    /// Create schema using a specific session and config
+    async fn ensure_schema_with_session(
+        session: &Arc<Session>, 
+        config: &Arc<CassandraConfig>
+    ) -> KairosResult<()> {
+        use kairosdb_core::schema::KairosSchema;
+        
+        let schema = KairosSchema::new(config.keyspace.clone(), 1);
+        
+        // Execute keyspace creation
+        session.query_unpaged(schema.create_keyspace_cql(), ()).await
+            .map_err(|e| KairosError::cassandra(format!("Failed to create keyspace: {}", e)))?;
+        
+        // Execute table creation statements
+        let statements = vec![
+            schema.create_data_points_table_cql(),
+            schema.create_row_key_index_table_cql(),
+            schema.create_string_index_table_cql(),
+        ];
+        
+        for statement in statements {
+            session.query_unpaged(statement, ()).await
+                .map_err(|e| KairosError::cassandra(format!("Failed to execute schema statement: {}", e)))?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Create a new multi-worker Cassandra client (creates its own channels)
+    pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+        // Create MPMC channels for work distribution and responses
+        let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
+        let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
+        Self::new_with_channels(config, num_workers, work_tx, work_rx, response_tx, response_rx).await
     }
 
     /// Create ScyllaDB session
@@ -200,18 +258,19 @@ impl MultiWorkerCassandraClient {
     fn spawn_worker(
         worker_id: usize,
         work_rx: Receiver<WorkItem>,
+        response_tx: Sender<WorkResponse>,
         shared_resources: SharedCassandraResources,
         stats: Arc<MultiWorkerStats>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            info!("Worker {} started", worker_id);
+            // info!("Worker {} started", worker_id);
             let mut bloom_manager = BloomManager::new(); // Each worker gets its own bloom filter
 
             while let Ok(work_item) = work_rx.recv_async().await {
                 let batch_start = std::time::Instant::now();
                 let batch_size = work_item.batch.points.len();
 
-                trace!("Worker {} processing batch of {} points", worker_id, batch_size);
+                // info!("Worker {} processing batch of {} points", worker_id, batch_size);
 
                 // Process the batch sequentially in this worker
                 let result = Self::process_batch_sequentially(
@@ -225,21 +284,39 @@ impl MultiWorkerCassandraClient {
                 stats.total_batch_write_time_ns.fetch_add(batch_duration.as_nanos() as u64, Ordering::Relaxed);
                 stats.total_work_items_processed.fetch_add(1, Ordering::Relaxed);
 
-                match &result {
+                // Create response for queue processor
+                let response = match &result {
                     Ok(_) => {
                         trace!("Worker {} completed batch of {} points successfully in {:?}", 
                                worker_id, batch_size, batch_duration);
                         stats.batches_processed.fetch_add(1, Ordering::Relaxed);
+                        
+                        WorkResponse {
+                            queue_key: work_item.queue_key.clone(),
+                            result: Ok(batch_size),
+                            processing_duration_ns: batch_duration.as_nanos() as u64,
+                        }
                     }
                     Err(e) => {
                         error!("Worker {} failed to process batch of {} points after {:?}: {}", 
                                worker_id, batch_size, batch_duration, e);
                         stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                        
+                        WorkResponse {
+                            queue_key: work_item.queue_key.clone(),
+                            result: Err(e.to_string()),
+                            processing_duration_ns: batch_duration.as_nanos() as u64,
+                        }
                     }
-                }
+                };
 
-                // Send result back to caller
-                let _ = work_item.response_tx.send(result);
+                // Send response back via MPMC channel (BLOCKING - must not drop responses)
+                // info!("Worker {} sending response for batch {}", worker_id, work_item.queue_key);
+                if let Err(e) = response_tx.send(response) {
+                    error!("Worker {} failed to send response (channel disconnected): {}", worker_id, e);
+                    break; // Channel disconnected, worker should exit
+                }
+                // info!("Worker {} successfully sent response for {}", worker_id, work_item.queue_key);
             }
 
             info!("Worker {} shutting down", worker_id);
@@ -404,13 +481,11 @@ impl CassandraClient for MultiWorkerCassandraClient {
     async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
         let start = std::time::Instant::now();
 
-        // Create oneshot channel for response
-        let (response_tx, response_rx) = oneshot::channel();
-
-        // Create work item
+        // Create work item with a unique queue key for response tracking
+        let queue_key = format!("direct_{}", uuid::Uuid::new_v4());
         let work_item = WorkItem {
             batch: batch.clone(),
-            response_tx,
+            queue_key: queue_key.clone(),
         };
 
         trace!("MultiWorker: Sending batch of {} points to worker pool", batch.points.len());
@@ -420,14 +495,29 @@ impl CassandraClient for MultiWorkerCassandraClient {
             KairosError::cassandra("Worker pool unavailable")
         })?;
 
-        // Wait for response from worker
-        let result = response_rx.await.map_err(|_| {
-            KairosError::cassandra("Worker response lost")
-        })?;
+        // Wait for response from worker via response channel
+        loop {
+            match self.response_rx.recv_async().await {
+                Ok(response) if response.queue_key == queue_key => {
+                    // Found our response
+                    match response.result {
+                        Ok(_) => break Ok(()),
+                        Err(e) => break Err(KairosError::cassandra(e)),
+                    }
+                }
+                Ok(_) => {
+                    // Not our response, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    break Err(KairosError::cassandra("Response channel closed"));
+                }
+            }
+        }?;
 
         let duration = start.elapsed();
         trace!("MultiWorker: Batch write completed in {:?}", duration);
-        result
+        Ok(())
     }
 
     async fn health_check(&self) -> KairosResult<bool> {
@@ -498,8 +588,8 @@ impl CassandraClient for MultiWorkerCassandraClient {
     }
 
     async fn ensure_schema(&self) -> KairosResult<()> {
-        // Schema operations could be handled by a dedicated worker or separately
-        info!("Schema assumed to be present (multi-worker client)");
+        // Schema already created during initialization
+        info!("Schema already ensured during client initialization");
         Ok(())
     }
 }

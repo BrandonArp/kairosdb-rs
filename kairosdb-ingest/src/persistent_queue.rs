@@ -23,6 +23,8 @@ pub struct QueueEntry {
     pub id: String,
     pub timestamp_ns: u64,
     pub batch: DataPointBatch,
+    pub in_flight_since: Option<u64>,  // Timestamp when claimed, None if available
+    pub processing_attempts: u32,      // Number of processing attempts
 }
 
 /// A work item that includes the queue entry and its key for status tracking
@@ -41,6 +43,8 @@ impl QueueEntry {
                 .unwrap_or_default()
                 .as_nanos() as u64,
             batch,
+            in_flight_since: None,
+            processing_attempts: 0,
         }
     }
 
@@ -321,63 +325,215 @@ impl PersistentQueue {
         Ok(())
     }
     
-    /// Peek at the next batch without removing it from the queue (for status tracking)
-    pub fn peek_next_work_item(&self) -> KairosResult<Option<QueueWorkItem>> {
+    /// Claim the next available work item (marks it as in-flight atomically)
+    /// This prevents race conditions and ensures crash safety
+    pub fn claim_next_work_item(&self, timeout_ms: u64) -> KairosResult<Option<QueueWorkItem>> {
         let start_time = Instant::now();
-        
-        // Get the first entry from the queue
-        let mut iter = self.partition.iter();
-        let item = match iter.next() {
-            Some(item) => item,
-            None => {
-                // Queue is empty
-                self.metrics.oldest_entry_age_seconds.set(0.0);
-                return Ok(None);
-            }
-        };
-        
-        let (key, value) = item
-            .map_err(|e| {
-                self.metrics.dequeue_errors.inc();
-                KairosError::internal(format!("Failed to read from queue: {}", e))
-            })?;
-            
-        // Deserialize the entry using MessagePack
-        let entry: QueueEntry = match rmp_serde::from_slice(&value) {
-            Ok(entry) => entry,
-            Err(e) => {
-                self.metrics.dequeue_errors.inc();
-                // Remove corrupted entry
-                debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
-                self.partition.remove(key)
-                    .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
-                self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
-                // Try again with the next entry
-                return self.peek_next_work_item();
-            }
-        };
-        
-        // Update oldest entry age
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos() as u64;
-        let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
-        self.metrics.oldest_entry_age_seconds.set(age_seconds);
         
-        let batch_size = entry.batch.points.len();
-        trace!("Peeked at next work item with {} points in {:?}", batch_size, start_time.elapsed());
+        // Iterate through queue to find an available item
+        let mut iter = self.partition.iter();
+        loop {
+            let item = match iter.next() {
+                Some(item) => item,
+                None => {
+                    // Queue is empty
+                    self.metrics.oldest_entry_age_seconds.set(0.0);
+                    return Ok(None);
+                }
+            };
+            
+            let (key, value) = item
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to read from queue: {}", e))
+                })?;
+                
+            // Deserialize the entry using MessagePack
+            let mut entry: QueueEntry = match rmp_serde::from_slice(&value) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.metrics.dequeue_errors.inc();
+                    // Remove corrupted entry
+                    debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
+                    self.partition.remove(key)
+                        .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
+                    self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                    self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
+                    continue; // Try next entry
+                }
+            };
+            
+            // Check if item is available or timed out
+            let is_available = match entry.in_flight_since {
+                None => true,  // Available
+                Some(in_flight_time) => {
+                    // Check if timed out (crashed worker)
+                    let age_ms = (now_ns.saturating_sub(in_flight_time)) / 1_000_000;
+                    if age_ms > timeout_ms {
+                        warn!("Found timed-out in-flight item ({}ms old), reclaiming", age_ms);
+                        true  // Reclaim timed-out item
+                    } else {
+                        false  // Still being processed
+                    }
+                }
+            };
+            
+            if is_available {
+                // Extract the queue key string before moving the key
+                let queue_key_string = String::from_utf8_lossy(&key).to_string();
+                
+                // Claim this item atomically by marking it in-flight
+                entry.in_flight_since = Some(now_ns);
+                entry.processing_attempts += 1;
+                
+                // Serialize and update the entry in queue
+                let updated_data = rmp_serde::to_vec(&entry).map_err(|e| {
+                    KairosError::validation(format!("Failed to serialize updated entry: {}", e))
+                })?;
+                
+                self.partition.insert(key, updated_data).map_err(|e| {
+                    KairosError::validation(format!("Failed to update claimed entry: {}", e))
+                })?;
+                
+                // Update oldest entry age
+                let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
+                self.metrics.oldest_entry_age_seconds.set(age_seconds);
+                
+                let batch_size = entry.batch.points.len();
+                trace!("Claimed work item with {} points (attempt {}) in {:?}", 
+                       batch_size, entry.processing_attempts, start_time.elapsed());
+                
+                return Ok(Some(QueueWorkItem {
+                    entry,
+                    queue_key: queue_key_string,
+                }));
+            }
+            
+            // This item is in-flight, continue to next
+        }
+    }
+    
+    /// Claim multiple work items for batch processing (up to batch_size items)
+    pub fn claim_work_items_batch(&self, timeout_ms: u64, batch_size: usize) -> KairosResult<Vec<QueueWorkItem>> {
+        let start_time = Instant::now();
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
         
-        Ok(Some(QueueWorkItem {
-            entry,
-            queue_key: String::from_utf8_lossy(&key).to_string(),
-        }))
+        let mut claimed_items = Vec::new();
+        let mut iter = self.partition.iter();
+        
+        // Process items until we have enough or run out
+        while claimed_items.len() < batch_size {
+            let item = match iter.next() {
+                Some(item) => item,
+                None => {
+                    // Queue is empty
+                    if claimed_items.is_empty() {
+                        self.metrics.oldest_entry_age_seconds.set(0.0);
+                    }
+                    break; // No more items
+                }
+            };
+            
+            let (key, value) = item
+                .map_err(|e| {
+                    self.metrics.dequeue_errors.inc();
+                    KairosError::internal(format!("Failed to read from queue: {}", e))
+                })?;
+                
+            // Deserialize the entry using MessagePack
+            let mut entry: QueueEntry = match rmp_serde::from_slice(&value) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.metrics.dequeue_errors.inc();
+                    // Remove corrupted entry
+                    debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
+                    self.partition.remove(key)
+                        .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
+                    self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                    self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
+                    continue; // Try next entry
+                }
+            };
+            
+            // Check if item is available or timed out
+            let is_available = match entry.in_flight_since {
+                None => true,  // Available
+                Some(in_flight_time) => {
+                    // Check if timed out (crashed worker)
+                    let age_ms = (now_ns.saturating_sub(in_flight_time)) / 1_000_000;
+                    if age_ms > timeout_ms {
+                        warn!("Found timed-out in-flight item ({}ms old), reclaiming", age_ms);
+                        true  // Reclaim timed-out item
+                    } else {
+                        false  // Still being processed
+                    }
+                }
+            };
+            
+            if is_available {
+                // Extract the queue key string before moving the key
+                let queue_key_string = String::from_utf8_lossy(&key).to_string();
+                
+                // Claim this item atomically by marking it in-flight
+                entry.in_flight_since = Some(now_ns);
+                
+                // Serialize and update the entry
+                let updated_data = rmp_serde::to_vec(&entry).map_err(|e| {
+                    KairosError::validation(format!("Failed to serialize updated entry: {}", e))
+                })?;
+                
+                self.partition.insert(key, updated_data).map_err(|e| {
+                    KairosError::validation(format!("Failed to update in-flight entry: {}", e))
+                })?;
+                
+                // Update metrics for oldest entry age
+                let entry_age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
+                self.metrics.oldest_entry_age_seconds.set(entry_age_seconds);
+                
+                claimed_items.push(QueueWorkItem {
+                    entry,
+                    queue_key: queue_key_string,
+                });
+            }
+        }
+        
+        let duration = start_time.elapsed();
+        self.metrics.dequeue_duration.observe(duration.as_secs_f64());
+        
+        if !claimed_items.is_empty() {
+            trace!("Claimed {} work items from persistent queue in {:?}", claimed_items.len(), duration);
+        }
+        
+        Ok(claimed_items)
     }
     
     /// Remove a specific item from the queue after successful processing
-    pub fn remove_processed_item(&self, queue_key: &str) -> KairosResult<()> {
+    pub fn remove_processed_item(&self, queue_key: &str, batch_size: usize) -> KairosResult<()> {
         let start_time = Instant::now();
+        
+        // Check if the item actually exists before trying to remove it
+        match self.partition.get(queue_key.as_bytes()) {
+            Ok(Some(_)) => {
+                // Item exists, proceed with removal
+            }
+            Ok(None) => {
+                // Item doesn't exist - likely already removed
+                warn!("Attempted to remove non-existent queue item '{}'", queue_key);
+                return Ok(()); // Not an error - item is already gone
+            }
+            Err(e) => {
+                // Error accessing item
+                warn!("Failed to check queue item '{}': {}", queue_key, e);
+                return Ok(()); // Treat as already gone
+            }
+        }
         
         // Remove the processed entry by its key
         self.partition.remove(queue_key.as_bytes())
@@ -386,12 +542,59 @@ impl PersistentQueue {
                 KairosError::internal(format!("Failed to remove processed entry: {}", e))
             })?;
         
-        // Update metrics
-        self.queue_size.fetch_sub(1, Ordering::Relaxed);
+        // Update metrics including dequeue_total for the data points processed
+        // Use saturating_sub to prevent underflow
+        let old_size = self.queue_size.load(Ordering::Relaxed);
+        if old_size > 0 {
+            self.queue_size.fetch_sub(1, Ordering::Relaxed);
+        } else {
+            error!("Queue size already at 0, cannot decrement");
+        }
         self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
         self.metrics.dequeue_duration.observe(start_time.elapsed().as_secs_f64());
+        self.metrics.dequeue_total.inc_by(batch_size as f64);  // Track dequeued data points
+        self.metrics.batch_size.observe(batch_size as f64);     // Track batch size
         
-        trace!("Removed processed item '{}' from queue in {:?}", queue_key, start_time.elapsed());
+        trace!("Removed processed item '{}' with {} points from queue in {:?}", 
+               queue_key, batch_size, start_time.elapsed());
+        Ok(())
+    }
+    
+    /// Mark an item as failed (unclaim it for retry)
+    pub fn mark_item_failed(&self, queue_key: &str) -> KairosResult<()> {
+        let start_time = Instant::now();
+        
+        // Get the current entry
+        let value = match self.partition.get(queue_key.as_bytes()) {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                warn!("Attempted to unclaim non-existent queue item '{}'", queue_key);
+                return Ok(()); // Item doesn't exist, nothing to do
+            }
+            Err(e) => {
+                warn!("Failed to get queue item '{}': {}", queue_key, e);
+                return Ok(()); // Item doesn't exist, nothing to do
+            }
+        };
+        
+        // Deserialize the entry
+        let mut entry: QueueEntry = rmp_serde::from_slice(&value).map_err(|e| {
+            KairosError::validation(format!("Failed to deserialize entry for unclaiming: {}", e))
+        })?;
+        
+        // Unclaim the item (make it available for retry)
+        entry.in_flight_since = None;
+        
+        // Serialize and update
+        let updated_data = rmp_serde::to_vec(&entry).map_err(|e| {
+            KairosError::validation(format!("Failed to serialize unclaimed entry: {}", e))
+        })?;
+        
+        self.partition.insert(queue_key.as_bytes(), updated_data).map_err(|e| {
+            KairosError::validation(format!("Failed to update unclaimed entry: {}", e))
+        })?;
+        
+        trace!("Unclaimed item '{}' for retry in {:?}", queue_key, start_time.elapsed());
         Ok(())
     }
     
