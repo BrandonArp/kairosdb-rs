@@ -423,6 +423,21 @@ impl IngestionService {
         let mut failed_unclaims = Vec::new();
         
         loop {
+            // Record response channel utilization BEFORE collecting responses
+            let response_channel_len = response_rx.len();
+            let response_channel_capacity = response_rx.capacity().unwrap_or(1000);
+            let response_channel_fullness = (response_channel_len as f32 / response_channel_capacity as f32 * 100.0) as u64;
+            
+            // Update response channel metrics
+            metrics.response_channel_utilization.store(response_channel_fullness, Ordering::Relaxed);
+            metrics.prometheus_metrics.response_channel_utilization_gauge.set(response_channel_fullness as f64);
+            
+            // Update rolling average for response channel
+            let old_avg = metrics.response_channel_avg_utilization.load(Ordering::Relaxed);
+            let new_avg = ((old_avg as f64 * 0.9) + (response_channel_fullness as f64 * 0.1)) as u64;
+            metrics.response_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
+            metrics.prometheus_metrics.response_channel_avg_utilization_gauge.set(new_avg as f64);
+            
             // Collect responses in batches - process immediately available ones
             let mut responses_collected = 0;
             
@@ -455,21 +470,6 @@ impl IngestionService {
                     }
                 }
             }
-            
-            // Record response channel utilization AFTER collecting responses
-            let response_channel_len = response_rx.len();
-            let response_channel_capacity = response_rx.capacity().unwrap_or(1000);
-            let response_channel_fullness = (response_channel_len as f32 / response_channel_capacity as f32 * 100.0) as u64;
-            
-            // Update response channel metrics
-            metrics.response_channel_utilization.store(response_channel_fullness, Ordering::Relaxed);
-            metrics.prometheus_metrics.response_channel_utilization_gauge.set(response_channel_fullness as f64);
-            
-            // Update rolling average for response channel
-            let old_avg = metrics.response_channel_avg_utilization.load(Ordering::Relaxed);
-            let new_avg = ((old_avg as f64 * 0.9) + (response_channel_fullness as f64 * 0.1)) as u64;
-            metrics.response_channel_avg_utilization.store(new_avg, Ordering::Relaxed);
-            metrics.prometheus_metrics.response_channel_avg_utilization_gauge.set(new_avg as f64);
             
             // Process batched removals
             if !successful_removals.is_empty() {
