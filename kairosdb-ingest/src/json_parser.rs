@@ -481,8 +481,9 @@ impl JsonParser {
             prev_count = cumulative_count;
         }
 
-        // Convert to bins format and create histogram
-        let bins: Vec<(f64, u64)> = boundaries.into_iter().zip(individual_counts).collect();
+        // Create bins and ensure they're sorted by boundary
+        let mut bins: Vec<(f64, u64)> = boundaries.into_iter().zip(individual_counts).collect();
+        bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let histogram =
             HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
@@ -637,8 +638,9 @@ impl JsonParser {
             }
         }
 
-        // Convert to bins format and create histogram
-        let bins: Vec<(f64, u64)> = boundaries.into_iter().zip(counts).collect();
+        // Create bins and ensure they're sorted by boundary
+        let mut bins: Vec<(f64, u64)> = boundaries.into_iter().zip(counts).collect();
+        bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         let histogram =
             HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
@@ -1046,6 +1048,50 @@ mod tests {
             assert_eq!(hist.counts, vec![5, 10, 10, 5]); // Individual bucket counts, not cumulative
             assert_eq!(hist.total_count(), 30);
             assert_eq!(hist.sum, 45.5);
+        }
+    }
+
+    #[test]
+    fn test_parse_failing_e2e_histogram() {
+        let parser = JsonParser::default();
+
+        // Test with the exact boundaries from the failing end-to-end test
+        let json = json!({
+            "name": "test.histogram",
+            "datapoints": [[
+                1634567890000i64,
+                {
+                    "boundaries": [0.1, 0.5, 1.0, 5.0],
+                    "counts": [15, 30, 20, 5],
+                    "total_count": 70,
+                    "sum": 55.5
+                }
+            ]],
+            "tags": {"service": "rust-histogram-test"}
+        })
+        .to_string();
+
+        let (batch, warnings) = parser.parse_json(&json).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(warnings.is_empty());
+
+        let point = &batch.points[0];
+        assert_eq!(point.metric.as_str(), "test.histogram");
+
+        if let DataPointValue::Histogram(hist) = &point.value {
+            // Verify boundaries are sorted
+            for i in 1..hist.boundaries.len() {
+                assert!(
+                    hist.boundaries[i] > hist.boundaries[i - 1],
+                    "Boundaries not sorted after JSON parsing: {:?}",
+                    hist.boundaries
+                );
+            }
+
+            assert_eq!(hist.counts, vec![15, 30, 20, 5]);
+            assert_eq!(hist.sum, 55.5);
+        } else {
+            panic!("Expected histogram value");
         }
     }
 

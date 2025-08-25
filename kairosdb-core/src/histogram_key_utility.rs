@@ -23,12 +23,19 @@ static KEY_UTILITY_MAP: LazyLock<Mutex<HashMap<u8, HistogramKeyUtility>>> =
 impl HistogramKeyUtility {
     const MANTISSA_BITS: u8 = 52;
     const EXPONENT_BITS: u8 = 11;
-    const BASE_MASK: u64 =
-        (1u64 << (Self::MANTISSA_BITS + Self::EXPONENT_BITS)) >> Self::EXPONENT_BITS;
 
     /// Create a new HistogramKeyUtility for the given precision
     fn new(precision: u8) -> Self {
-        let truncate_mask = Self::BASE_MASK >> precision;
+        // Keep the sign bit, exponent bits, and top `precision` mantissa bits
+        // Zero out the bottom (52 - precision) mantissa bits
+        let mantissa_keep_bits = precision;
+        let mantissa_zero_bits = Self::MANTISSA_BITS - mantissa_keep_bits;
+
+        // Create mask that preserves sign + exponent + top mantissa bits
+        // Format: SEEEEEEEEEEMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
+        // We want: SEEEEEEEEEE[precision bits]00000000000000000000000
+        let truncate_mask = !((1u64 << mantissa_zero_bits) - 1);
+
         let pack_mask = (1u64 << (precision + Self::EXPONENT_BITS + 1)) - 1;
         let shift = Self::MANTISSA_BITS - precision;
 
@@ -136,6 +143,91 @@ mod tests {
         // Should be close after truncation
         let truncated = utility.truncate_to_double(original);
         assert_eq!(unpacked, truncated);
+    }
+
+    #[test]
+    fn test_small_values_pack_unpack() {
+        let utility = HistogramKeyUtility::get_instance(7);
+
+        // Test the values from our failing test
+        let values = [0.1, 0.5, 1.0, 5.0];
+
+        for &val in &values {
+            let truncated = utility.truncate_to_double(val);
+            let packed = utility.pack(val);
+            let unpacked = utility.unpack(packed);
+
+            assert_eq!(
+                unpacked, truncated,
+                "Pack/unpack should match truncated value for {}",
+                val
+            );
+            assert!(
+                unpacked > 0.0,
+                "Value {} should not become zero after pack/unpack",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_wide_range_values_pack_unpack() {
+        let utility = HistogramKeyUtility::get_instance(7);
+
+        // Test a wide range of values including very small and very large
+        let values = [
+            0.001,
+            0.01,
+            0.1,
+            0.5,
+            1.0,
+            5.0,
+            10.0,
+            100.0,
+            1000.0,
+            1e-10,
+            1e-5,
+            1e5,
+            1e10,
+            std::f64::consts::PI,
+            std::f64::consts::E,
+            f64::MIN_POSITIVE,
+            1e-100,
+            1e100,
+        ];
+
+        for &val in &values {
+            let truncated = utility.truncate_to_double(val);
+            let packed = utility.pack(val);
+            let unpacked = utility.unpack(packed);
+
+            // The unpacked value should match the truncated value
+            assert_eq!(
+                unpacked, truncated,
+                "Pack/unpack should match truncated value for {}",
+                val
+            );
+
+            // For positive values, unpacked should also be positive
+            if val > 0.0 {
+                assert!(
+                    unpacked > 0.0,
+                    "Positive value {} should remain positive after pack/unpack",
+                    val
+                );
+            }
+
+            // Verify the unpacked value maintains the same order of magnitude (approximately)
+            if val >= 1e-50 && val <= 1e50 {
+                let ratio = unpacked / val;
+                assert!(
+                    ratio > 1e-3 && ratio < 1e3,
+                    "Pack/unpack should preserve order of magnitude for {} (ratio: {})",
+                    val,
+                    ratio
+                );
+            }
+        }
     }
 
     #[test]

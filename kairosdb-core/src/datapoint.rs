@@ -836,4 +836,27 @@ mod tests {
         assert_eq!(hist.max, 45.0);
         assert_eq!(hist.mean(), 15.0);
     }
+
+    #[test]
+    fn test_histogram_failing_e2e_boundaries() {
+        // Test the exact boundaries from the failing end-to-end test
+        let bins = vec![(0.1, 15), (0.5, 30), (1.0, 20), (5.0, 5)];
+        let hist = HistogramData::from_bins(bins, 55.5, 0.1, 5.0, None).unwrap();
+
+        // Test V2 serialization round-trip
+        let v2_bytes = hist.to_v2_bytes();
+        let deserialized = HistogramData::from_v2_bytes(&v2_bytes).unwrap();
+
+        // Check if counts are preserved
+        assert_eq!(deserialized.counts, vec![15, 30, 20, 5]);
+
+        // Verify they're still sorted
+        for i in 1..deserialized.boundaries.len() {
+            assert!(
+                deserialized.boundaries[i] > deserialized.boundaries[i - 1],
+                "Boundaries not sorted after deserialization: {:?}",
+                deserialized.boundaries
+            );
+        }
+    }
 }

@@ -81,9 +81,11 @@ pub async fn query_handler(
         }
         Err(err) => {
             error!("Query execution failed: {}", err);
-            let status_code = if err.to_string().contains("validation") {
+            let error_msg = err.to_string();
+            let error_lower = error_msg.to_lowercase();
+            let status_code = if error_lower.contains("validation") {
                 StatusCode::BAD_REQUEST
-            } else if err.to_string().contains("timeout") {
+            } else if error_lower.contains("timeout") {
                 StatusCode::REQUEST_TIMEOUT
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
