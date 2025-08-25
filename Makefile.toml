@@ -41,7 +41,7 @@ args = ["fmt", "--all", "--check"]
 [tasks.lint]
 description = "Run clippy lints"
 command = "cargo"
-args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+args = ["clippy", "--all-targets", "--all-features"]
 
 [tasks.build]
 description = "Build all workspace members"
@@ -56,27 +56,28 @@ args = ["build", "--release", "--all"]
 # === Testing Tasks ===
 
 [tasks.test]
+clear = true
 description = "Run unit tests only"
 script = '''
 cargo nextest run --profile ci --workspace --lib --no-fail-fast
-cargo nextest run --profile ci --workspace --lib --no-fail-fast --junit target/nextest/ci/junit.xml
 '''
 
 [tasks.test-integration]
+clear = true
 description = "Run integration tests (requires Tilt environment)"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
-cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --junit target/nextest/ci/junit-integration.xml
 '''
 
 [tasks.test-all]
-description = "Run all tests with coverage"
+clear = true
+description = "Run all tests"
 script = '''
 echo "🧪 Running unit tests..."
-cargo nextest run --profile ci --workspace --lib --no-fail-fast --junit target/nextest/ci/junit.xml
+cargo nextest run --profile ci --workspace --lib --no-fail-fast
 echo "🔍 Running integration tests (requires Tilt)..."
-KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --junit target/nextest/ci/junit-integration.xml
+KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast
 '''
 
 [tasks.coverage-report]

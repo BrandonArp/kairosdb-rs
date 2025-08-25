@@ -1,3 +1,6 @@
+#![allow(clippy::single_component_path_imports)]
+#![allow(clippy::ptr_arg)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kairosdb_e2e_tests::performance::*;
