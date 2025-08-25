@@ -390,66 +390,147 @@ impl IngestionService {
         error!("Bidirectional processor exiting - this should not happen");
     }
     
-    /// Dedicated response processing task - processes responses as fast as possible
+    /// Dedicated response processing task - processes responses with batched queue operations
     async fn run_response_processor(
         persistent_queue: Arc<PersistentQueue>,
         response_rx: flume::Receiver<WorkResponse>,
         metrics: IngestionMetrics,
     ) {
-        info!("Response processor task started");
+        info!("Response processor task started with batched queue operations");
         
-        while let Ok(work_response) = response_rx.recv_async().await {
-            match work_response.result {
-                Ok(batch_size) => {
-                    // Successful Cassandra write - remove from queue
-                    if let Err(e) = persistent_queue.remove_processed_item(&work_response.queue_key, batch_size) {
-                        error!("Failed to remove successful item from queue: {}", e);
-                    } else {
-                        metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
-                    }
+        let mut successful_removals = Vec::new();
+        let mut failed_unclaims = Vec::new();
+        
+        loop {
+            // Collect responses in batches - process immediately available ones
+            let mut responses_collected = 0;
+            
+            // Always get at least one response (blocking)
+            match response_rx.recv_async().await {
+                Ok(work_response) => {
+                    Self::collect_response(&mut successful_removals, &mut failed_unclaims, work_response);
+                    responses_collected += 1;
                 }
-                Err(error_msg) => {
-                    // Cassandra failure - unclaim for retry
-                    metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
-                    if let Err(e) = persistent_queue.mark_item_failed(&work_response.queue_key) {
-                        error!("Failed to unclaim failed item: {}", e);
-                    } else {
-                        warn!("Unclaimed failed item {} for retry: {}", 
-                              work_response.queue_key, error_msg);
+                Err(_) => {
+                    error!("Response processor exiting - response channel closed");
+                    break;
+                }
+            }
+            
+            // Then collect all immediately available responses (non-blocking)
+            while responses_collected < 100 {
+                match response_rx.try_recv() {
+                    Ok(work_response) => {
+                        Self::collect_response(&mut successful_removals, &mut failed_unclaims, work_response);
+                        responses_collected += 1;
+                    }
+                    Err(flume::TryRecvError::Empty) => {
+                        // No more responses available right now, process what we have
+                        break;
+                    }
+                    Err(flume::TryRecvError::Disconnected) => {
+                        error!("Response processor exiting - response channel closed");
+                        break;
                     }
                 }
             }
+            
+            // Process batched removals
+            if !successful_removals.is_empty() {
+                let total_points = Self::process_successful_batch(&persistent_queue, &mut successful_removals, &metrics).await;
+                if responses_collected == 1 {
+                    // Single response - don't log batch info
+                } else {
+                    info!("Processed batch of {} successful responses ({} total points)", 
+                          successful_removals.len(), total_points);
+                }
+                successful_removals.clear();
+            }
+            
+            // Process batched unclaims
+            if !failed_unclaims.is_empty() {
+                Self::process_failed_batch(&persistent_queue, &mut failed_unclaims, &metrics).await;
+                failed_unclaims.clear();
+            }
         }
-        
-        error!("Response processor exiting - response channel closed");
     }
     
-    /// Dedicated work sending task - sends work items based on channel capacity
+    /// Collect a response into the appropriate batch
+    fn collect_response(
+        successful_removals: &mut Vec<(String, usize)>,
+        failed_unclaims: &mut Vec<(String, String)>,
+        work_response: WorkResponse,
+    ) {
+        match work_response.result {
+            Ok(batch_size) => {
+                successful_removals.push((work_response.queue_key, batch_size));
+            }
+            Err(error_msg) => {
+                failed_unclaims.push((work_response.queue_key, error_msg));
+            }
+        }
+    }
+    
+    /// Process a batch of successful responses
+    async fn process_successful_batch(
+        persistent_queue: &Arc<PersistentQueue>,
+        successful_removals: &mut Vec<(String, usize)>,
+        metrics: &IngestionMetrics,
+    ) -> u64 {
+        let mut total_points = 0;
+        
+        for (queue_key, batch_size) in successful_removals.iter() {
+            if let Err(e) = persistent_queue.remove_processed_item(queue_key, *batch_size) {
+                error!("Failed to remove successful item from queue: {}", e);
+            } else {
+                metrics.datapoints_ingested.fetch_add(*batch_size as u64, Ordering::Relaxed);
+                total_points += *batch_size as u64;
+            }
+        }
+        
+        total_points
+    }
+    
+    /// Process a batch of failed responses  
+    async fn process_failed_batch(
+        persistent_queue: &Arc<PersistentQueue>,
+        failed_unclaims: &mut Vec<(String, String)>,
+        metrics: &IngestionMetrics,
+    ) {
+        for (queue_key, error_msg) in failed_unclaims.iter() {
+            metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = persistent_queue.mark_item_failed(queue_key) {
+                error!("Failed to unclaim failed item: {}", e);
+            } else {
+                warn!("Unclaimed failed item {} for retry: {}", queue_key, error_msg);
+            }
+        }
+    }
+    
+    /// Dedicated work sending task - sends work items as fast as possible
     async fn run_work_sender(
         persistent_queue: Arc<PersistentQueue>,
         work_tx: flume::Sender<WorkItem>,
         config: Arc<IngestConfig>,
     ) {
-        let interval_duration = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
-        let mut interval = tokio::time::interval(interval_duration);
+        let full_channel_delay = std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
         
-        info!("Work sender task started with {}ms intervals", config.ingestion.batch_timeout_ms);
+        info!("Work sender task started with no delays (except {}ms when channel full)", config.ingestion.batch_timeout_ms);
         
         loop {
-            interval.tick().await;
-            
             // Check how much room is available in the work channel
             let work_channel_len = work_tx.len();
             let work_channel_capacity = work_tx.capacity().unwrap_or(1000);
             let available_slots = work_channel_capacity.saturating_sub(work_channel_len);
             
             if available_slots == 0 {
-                // Channel is completely full - workers are busy, skip this cycle
+                // Channel is completely full - workers are busy, wait before checking again
+                tokio::time::sleep(full_channel_delay).await;
                 continue;
             }
             
-            // Only claim what we can actually send to avoid unclaiming issues
-            let batch_size = available_slots.min(100); // Cap at 100 for reasonable batch size
+            // Use large batches to fill channel efficiently
+            let batch_size = available_slots.min(500); // Up to 500 items per batch
             
             let work_items = match persistent_queue.claim_work_items_batch(30000, batch_size) {
                 Ok(items) => items,
@@ -507,6 +588,8 @@ impl IngestionService {
                 info!("Sent {} work items to Cassandra workers (work channel: {}/{} items, {}% full, had {} slots available)", 
                       items_sent, current_channel_len, work_channel_capacity, work_channel_fullness, available_slots);
             }
+            
+            // No delay - loop immediately to check for more work
         }
     }
 
