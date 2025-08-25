@@ -578,7 +578,9 @@ impl IngestionService {
             };
             
             if work_items.is_empty() {
-                continue; // No work available
+                // No work available - add small delay to prevent CPU spinning
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                continue;
             }
             
             let mut items_sent = 0;
