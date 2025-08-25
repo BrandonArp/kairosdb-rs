@@ -84,7 +84,7 @@ KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci 
 description = "Generate test coverage report"
 script = '''
 echo "📊 Generating coverage report..."
-cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml --junit target/nextest/ci/junit.xml
+cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml
 echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
 echo "JUnit report generated at: target/nextest/ci/junit.xml"
 '''

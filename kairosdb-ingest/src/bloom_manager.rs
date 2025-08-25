@@ -202,6 +202,18 @@ impl BloomManager {
         let primary_age = state.primary_created.elapsed();
         let secondary_age = state.secondary_created.map(|created| created.elapsed());
 
+        // Calculate memory usage for bloom filters
+        let primary_memory_bytes = calculate_bloom_memory_bytes(
+            state.config.expected_items,
+            state.config.false_positive_rate,
+        );
+        let secondary_memory_bytes = if state.secondary.is_some() {
+            Some(primary_memory_bytes) // Secondary has same configuration as primary
+        } else {
+            None
+        };
+        let total_memory_bytes = primary_memory_bytes + secondary_memory_bytes.unwrap_or(0);
+
         BloomStats {
             primary_age_seconds: primary_age.as_secs(),
             secondary_age_seconds: secondary_age.map(|age| age.as_secs()),
@@ -210,6 +222,9 @@ impl BloomManager {
             secondary_seed: state.secondary_seed,
             expected_items: state.config.expected_items,
             false_positive_rate: state.config.false_positive_rate,
+            primary_memory_bytes,
+            secondary_memory_bytes,
+            total_memory_bytes,
         }
     }
 }
@@ -230,6 +245,12 @@ pub struct BloomStats {
     pub secondary_seed: u64,
     pub expected_items: u64,
     pub false_positive_rate: f64,
+    /// Estimated memory usage in bytes for the primary bloom filter
+    pub primary_memory_bytes: u64,
+    /// Estimated memory usage in bytes for the secondary bloom filter (if active)
+    pub secondary_memory_bytes: Option<u64>,
+    /// Total estimated memory usage in bytes
+    pub total_memory_bytes: u64,
 }
 
 /// Create a bloom filter with specific configuration and hash seed
@@ -237,6 +258,21 @@ fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> BloomFilter<String> 
     // Create bloom filter with calculated optimal size and hash count
     // Note: Using default hasher, seed is used for future rotation logic
     BloomFilter::new(config.expected_items as usize, config.false_positive_rate)
+}
+
+/// Calculate estimated memory usage of a bloom filter in bytes
+/// This is based on the mathematical formula for optimal bloom filter size
+fn calculate_bloom_memory_bytes(expected_items: u64, false_positive_rate: f64) -> u64 {
+    // Calculate optimal bit array size: m = -n * ln(p) / (ln(2))^2
+    // where n = expected_items, p = false_positive_rate
+    let ln2 = std::f64::consts::LN_2;
+    let optimal_bits = (-(expected_items as f64) * false_positive_rate.ln()) / (ln2 * ln2);
+
+    // Convert bits to bytes (round up to nearest byte)
+    let bytes = (optimal_bits / 8.0).ceil() as u64;
+
+    // Add overhead for data structure (estimated 64 bytes for metadata, vectors, etc.)
+    bytes + 64
 }
 
 /// Generate a random seed for hash functions
@@ -318,5 +354,55 @@ mod tests {
 
         // Seeds should be different after rotation
         assert_ne!(initial_stats.primary_seed, final_stats.primary_seed);
+    }
+
+    #[test]
+    fn test_bloom_memory_calculation() {
+        let manager = BloomManager::new();
+        let stats = manager.get_stats();
+
+        // Check that memory calculations are reasonable
+        assert!(stats.primary_memory_bytes > 0);
+        assert!(stats.total_memory_bytes > 0);
+        assert_eq!(stats.total_memory_bytes, stats.primary_memory_bytes);
+        assert!(stats.secondary_memory_bytes.is_none());
+
+        // For default config (1M items, 0.000001 FP rate), should be around 3.6MB
+        // Allow some variance due to overhead calculation
+        assert!(stats.primary_memory_bytes > 2_000_000); // At least 2MB
+        assert!(stats.primary_memory_bytes < 5_000_000); // Less than 5MB
+    }
+
+    #[test]
+    fn test_bloom_memory_during_overlap() {
+        let config = BloomConfig {
+            rotation_interval: Duration::from_millis(100),
+            overlap_period: Duration::from_millis(50),
+            expected_items: 1000, // Smaller for testing
+            false_positive_rate: 0.01,
+        };
+
+        let manager = BloomManager::with_config(config);
+        let initial_stats = manager.get_stats();
+
+        // Initially only primary filter
+        assert!(initial_stats.secondary_memory_bytes.is_none());
+        let initial_memory = initial_stats.total_memory_bytes;
+
+        // Add item to trigger maintenance and start overlap
+        assert!(manager.should_write_index("test.metric"));
+        sleep(Duration::from_millis(60));
+        manager.maybe_maintain();
+
+        let overlap_stats = manager.get_stats();
+        assert!(overlap_stats.in_overlap_period);
+        assert!(overlap_stats.secondary_memory_bytes.is_some());
+
+        // Total memory should be roughly double during overlap
+        assert!(overlap_stats.total_memory_bytes > initial_memory);
+        assert_eq!(
+            overlap_stats.total_memory_bytes,
+            overlap_stats.primary_memory_bytes + overlap_stats.secondary_memory_bytes.unwrap()
+        );
     }
 }

@@ -60,6 +60,8 @@ pub struct IngestionMetrics {
     pub work_channel_avg_utilization: Arc<AtomicU64>,
     /// Rolling average of response channel utilization (simple exponential)
     pub response_channel_avg_utilization: Arc<AtomicU64>,
+    /// Bloom filter memory usage in bytes
+    pub bloom_memory_usage: Arc<AtomicU64>,
     /// Prometheus metrics
     pub prometheus_metrics: PrometheusMetrics,
 }
@@ -76,6 +78,7 @@ pub struct PrometheusMetrics {
     pub response_channel_utilization_gauge: Gauge,
     pub work_channel_avg_utilization_gauge: Gauge,
     pub response_channel_avg_utilization_gauge: Gauge,
+    pub bloom_memory_usage_gauge: Gauge,
 }
 
 /// Main ingestion service that handles data point processing
@@ -176,6 +179,7 @@ impl IngestionService {
             response_channel_utilization: Arc::new(AtomicU64::new(0)),
             work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            bloom_memory_usage: Arc::new(AtomicU64::new(0)),
             prometheus_metrics,
         };
 
@@ -237,6 +241,7 @@ impl IngestionService {
             response_channel_utilization: Arc::new(AtomicU64::new(0)),
             work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            bloom_memory_usage: Arc::new(AtomicU64::new(0)),
             prometheus_metrics,
         };
 
@@ -763,8 +768,33 @@ impl IngestionService {
         }
     }
 
+    /// Update bloom filter memory usage metrics
+    fn update_bloom_memory_metrics(&self) {
+        use crate::bloom_manager::BloomManager;
+
+        // Create a sample bloom manager to calculate memory usage
+        // In a production system, this should be collected from actual workers
+        let sample_bloom = BloomManager::new();
+        let bloom_stats = sample_bloom.get_stats();
+
+        // Update atomic metrics
+        self.metrics.bloom_memory_usage.store(
+            bloom_stats.total_memory_bytes,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
+        // Update Prometheus metrics
+        self.metrics
+            .prometheus_metrics
+            .bloom_memory_usage_gauge
+            .set(bloom_stats.total_memory_bytes as f64);
+    }
+
     /// Get current metrics snapshot
     pub fn get_metrics_snapshot(&self) -> IngestionMetricsSnapshot {
+        // Update bloom memory metrics when snapshot is requested
+        self.update_bloom_memory_metrics();
+
         IngestionMetricsSnapshot {
             datapoints_ingested: self.metrics.datapoints_ingested.load(Ordering::Relaxed),
             batches_processed: self.metrics.batches_processed.load(Ordering::Relaxed),
@@ -773,6 +803,7 @@ impl IngestionService {
             cassandra_errors: self.metrics.cassandra_errors.load(Ordering::Relaxed),
             queue_size: self.persistent_queue.size() as usize,
             memory_usage: self.metrics.memory_usage.load(Ordering::Relaxed),
+            bloom_memory_usage: self.metrics.bloom_memory_usage.load(Ordering::Relaxed),
             avg_batch_time_ms: self.metrics.avg_batch_time_ms.load(Ordering::Relaxed),
             last_batch_time: *self.metrics.last_batch_time.read(),
             backpressure_active: self.backpressure_active.load(Ordering::Relaxed) > 0,
@@ -781,6 +812,9 @@ impl IngestionService {
 
     /// Health check for the ingestion service
     pub async fn health_check(&self) -> Result<HealthStatus> {
+        // Update bloom memory metrics during health check
+        self.update_bloom_memory_metrics();
+
         let cassandra_healthy = self.cassandra_client.health_check().await.unwrap_or(false);
         let backpressure_active = self.backpressure_active.load(Ordering::Relaxed) > 0;
         let queue_size = self.persistent_queue.size() as usize;
@@ -875,6 +909,12 @@ impl PrometheusMetrics {
         )
         .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge6", "test").unwrap());
 
+        let bloom_memory_usage_gauge = register_gauge!(
+            format!("kairosdb_bloom_memory_usage_bytes{}", suffix),
+            "Bloom filter memory usage in bytes"
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge7", "test").unwrap());
+
         Ok(Self {
             datapoints_total,
             batches_total,
@@ -885,6 +925,7 @@ impl PrometheusMetrics {
             response_channel_utilization_gauge,
             work_channel_avg_utilization_gauge,
             response_channel_avg_utilization_gauge,
+            bloom_memory_usage_gauge,
         })
     }
 }
@@ -907,6 +948,7 @@ impl Default for IngestionMetrics {
             response_channel_utilization: Arc::new(AtomicU64::new(0)),
             work_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
             response_channel_avg_utilization: Arc::new(AtomicU64::new(0)),
+            bloom_memory_usage: Arc::new(AtomicU64::new(0)),
             last_batch_time: Arc::new(RwLock::new(None)),
             prometheus_metrics: PrometheusMetrics::new_with_prefix(&format!("test_{}", id))
                 .unwrap(),
@@ -924,6 +966,7 @@ pub struct IngestionMetricsSnapshot {
     pub cassandra_errors: u64,
     pub queue_size: usize,
     pub memory_usage: u64,
+    pub bloom_memory_usage: u64,
     pub avg_batch_time_ms: u64,
     #[serde(skip)]
     pub last_batch_time: Option<Instant>,
@@ -998,5 +1041,46 @@ mod tests {
         let metrics = IngestionMetrics::default();
         // This would normally require actual metrics values
         assert_eq!(metrics.datapoints_ingested.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn test_bloom_memory_metrics() {
+        // Set environment variable to use mock Cassandra client
+        std::env::set_var("USE_MOCK_CASSANDRA", "true");
+
+        let config = Arc::new(IngestConfig::default());
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let service = IngestionService::new(config, shutdown_token).await.unwrap();
+
+        // Get initial metrics snapshot
+        let metrics = service.get_metrics_snapshot();
+
+        // Bloom memory usage should be calculated and non-zero
+        assert!(
+            metrics.bloom_memory_usage > 0,
+            "Bloom memory usage should be non-zero"
+        );
+        assert!(
+            metrics.bloom_memory_usage > 2_000_000,
+            "Bloom memory should be at least 2MB"
+        );
+        assert!(
+            metrics.bloom_memory_usage < 10_000_000,
+            "Bloom memory should be less than 10MB"
+        );
+
+        // Test that Prometheus metrics are also updated
+        let prometheus_value = service
+            .metrics
+            .prometheus_metrics
+            .bloom_memory_usage_gauge
+            .get();
+        assert_eq!(
+            prometheus_value as u64, metrics.bloom_memory_usage,
+            "Prometheus metric should match atomic metric"
+        );
+
+        // Clean up environment variable
+        std::env::remove_var("USE_MOCK_CASSANDRA");
     }
 }
