@@ -31,7 +31,6 @@ use crate::{
     persistent_queue::PersistentQueue,
 };
 
-#[cfg(test)]
 use crate::mock_client::MockCassandraClient;
 
 /// Comprehensive metrics for monitoring ingestion service
@@ -118,41 +117,47 @@ impl IngestionService {
                 .context("Failed to initialize persistent queue")?,
         );
 
-        // Always use multi-worker Cassandra client with bidirectional channels
-        info!("Using production multi-worker Cassandra client with bidirectional channels");
-        let num_workers = config.cassandra.max_concurrent_requests;
+        // Check if we should use mock client for testing
+        let (cassandra_client, cassandra_work_tx, cassandra_response_rx) =
+            if std::env::var("USE_MOCK_CASSANDRA").unwrap_or_default() == "true" {
+                info!("Using mock Cassandra client for testing");
+                let mock_client = Arc::new(MockCassandraClient::new()) as BoxedCassandraClient;
+                (mock_client, None, None)
+            } else {
+                info!("Using production multi-worker Cassandra client with bidirectional channels");
+                let num_workers = config.cassandra.max_concurrent_requests;
 
-        // Create shared MPMC channels for bidirectional communication
-        let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
-        let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
+                // Create shared MPMC channels for bidirectional communication
+                let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
+                let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
 
-        let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
-            config.cassandra.clone(),
-            num_workers,
-            work_tx.clone(),
-            work_rx,
-            response_tx,
-            response_rx.clone(),
-            shutdown_token.clone(),
-        )
-        .await
-        .context("Failed to initialize multi-worker Cassandra client")?;
+                let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
+                    config.cassandra.clone(),
+                    num_workers,
+                    work_tx.clone(),
+                    work_rx,
+                    response_tx,
+                    response_rx.clone(),
+                    shutdown_token.clone(),
+                )
+                .await
+                .context("Failed to initialize multi-worker Cassandra client")?;
 
-        // Ensure schema exists
-        info!("Ensuring KairosDB schema exists");
-        cassandra_client
-            .ensure_schema()
-            .await
-            .context("Failed to ensure Cassandra schema")?;
+                // Ensure schema exists
+                info!("Ensuring KairosDB schema exists");
+                cassandra_client
+                    .ensure_schema()
+                    .await
+                    .context("Failed to ensure Cassandra schema")?;
 
-        info!(
-            "Multi-worker Cassandra client ready with {} workers and bidirectional channels",
-            num_workers.unwrap_or(200)
-        );
+                info!(
+                "Multi-worker Cassandra client ready with {} workers and bidirectional channels",
+                num_workers.unwrap_or(200)
+            );
 
-        let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
-        let cassandra_work_tx = work_tx;
-        let cassandra_response_rx = response_rx;
+                let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
+                (cassandra_client, Some(work_tx), Some(response_rx))
+            };
 
         // Initialize Prometheus metrics
         let prometheus_metrics = PrometheusMetrics::new()?;
@@ -181,8 +186,8 @@ impl IngestionService {
             config: config.clone(),
             persistent_queue,
             cassandra_client,
-            cassandra_work_tx: Some(cassandra_work_tx),
-            cassandra_response_rx: Some(cassandra_response_rx),
+            cassandra_work_tx,
+            cassandra_response_rx,
             metrics,
             backpressure_active,
         };
