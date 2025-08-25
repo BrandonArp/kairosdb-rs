@@ -15,19 +15,19 @@ use parking_lot::RwLock;
 use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 use std::{
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     time::Instant,
 };
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
     config::IngestConfig,
     mock_client::MockCassandraClient,
+    multi_writer_client::MultiWorkerCassandraClient,
     persistent_queue::PersistentQueue,
-    single_writer_client::SingleWriterCassandraClient,
 };
 
 /// Comprehensive metrics for monitoring ingestion service
@@ -104,10 +104,11 @@ impl IngestionService {
             info!("Using mock Cassandra client for testing");
             Arc::new(MockCassandraClient::new())
         } else {
-            info!("Using production Cassandra client");
-            let client = SingleWriterCassandraClient::new(config.cassandra.clone())
+            info!("Using production multi-worker Cassandra client");
+            let num_workers = config.cassandra.max_concurrent_requests;
+            let client = MultiWorkerCassandraClient::new(config.cassandra.clone(), num_workers)
                 .await
-                .context("Failed to initialize single writer Cassandra client")?;
+                .context("Failed to initialize multi-worker Cassandra client")?;
 
             // Ensure schema exists
             info!("Ensuring KairosDB schema exists");
@@ -116,8 +117,8 @@ impl IngestionService {
                 .await
                 .context("Failed to ensure Cassandra schema")?;
 
-            // Single writer client handles statement preparation internally
-            info!("Single writer Cassandra client ready");
+            info!("Multi-worker Cassandra client ready with {} workers", 
+                  num_workers.unwrap_or(50));
 
             Arc::new(client)
         };
@@ -315,7 +316,7 @@ impl IngestionService {
             info!("Starting persistent queue processor main loop with {}ms interval", config.ingestion.batch_timeout_ms);
             
             loop {
-                // Continuously drain the queue until empty
+                // Continuously drain the queue until empty using new status tracking
                 let mut batches_processed_this_cycle = 0;
                 let current_queue_size = persistent_queue.size();
                 if current_queue_size > 0 {
@@ -324,29 +325,45 @@ impl IngestionService {
                     trace!("Starting queue processing cycle, queue size: {}", current_queue_size);
                 }
                 loop {
-                    match persistent_queue.dequeue_batch(config.ingestion.max_batch_size) {
-                        Ok(Some(batch)) => {
-                            trace!("Processing batch of {} points from queue", batch.points.len());
+                    // Peek at the next work item without removing it
+                    match persistent_queue.peek_next_work_item() {
+                        Ok(Some(work_item)) => {
+                            let batch_size = work_item.entry.batch.points.len();
+                            trace!("Processing work item with {} points from queue", batch_size);
                             batches_processed_this_cycle += 1;
                             
                             // Write to Cassandra with timing
                             let cassandra_start = std::time::Instant::now();
-                            trace!("Writing batch of {} points to Cassandra", batch.points.len());
-                            match cassandra_client.write_batch(&batch).await {
+                            trace!("Writing batch of {} points to Cassandra", batch_size);
+                            
+                            match cassandra_client.write_batch(&work_item.entry.batch).await {
                                 Ok(_) => {
                                     let cassandra_duration = cassandra_start.elapsed();
-                                    trace!("Successfully wrote batch of {} points to Cassandra in {:?}", batch.points.len(), cassandra_duration);
-                                    // Note: metrics are already updated when items are enqueued for immediate response
+                                    trace!("Successfully wrote batch of {} points to Cassandra in {:?}", batch_size, cassandra_duration);
+                                    
+                                    // Only remove from queue after successful Cassandra write
+                                    match persistent_queue.remove_processed_item(&work_item.queue_key) {
+                                        Ok(_) => {
+                                            trace!("Successfully removed processed item from queue");
+                                            // Update success metrics
+                                            metrics.datapoints_ingested.fetch_add(batch_size as u64, Ordering::Relaxed);
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to remove processed item from queue (data was written to Cassandra): {}", e);
+                                            // This is concerning but not fatal - Cassandra write succeeded
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     let cassandra_duration = cassandra_start.elapsed();
-                                    error!("Failed to write batch to Cassandra after {:?}, will retry: {}", cassandra_duration, e);
+                                    error!("Failed to write batch to Cassandra after {:?}: {}", cassandra_duration, e);
                                     metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
                                     
-                                    // For now, we lose the batch. In production, we'd want to:
-                                    // 1. Re-enqueue with exponential backoff
-                                    // 2. Dead letter queue after max retries
-                                    // 3. Circuit breaker pattern
+                                    // Item stays in queue for retry - implement exponential backoff here
+                                    warn!("Item remains in queue for retry (queue key: {})", work_item.queue_key);
+                                    
+                                    // Break to avoid tight retry loop - will retry on next interval
+                                    break;
                                 }
                             }
                         }
@@ -360,7 +377,7 @@ impl IngestionService {
                             break;
                         }
                         Err(e) => {
-                            error!("Failed to dequeue batch from persistent queue: {}", e);
+                            error!("Failed to peek at next work item from persistent queue: {}", e);
                             metrics.ingestion_errors.fetch_add(1, Ordering::Relaxed);
                             break; // Exit inner loop on error
                         }
@@ -570,7 +587,7 @@ mod tests {
             .add_point(DataPoint::new_long("test.metric", Timestamp::now(), 42))
             .unwrap();
 
-        let result = service.ingest_batch(batch).await;
+        let result = service.ingest_batch(batch);
         assert!(result.is_ok(), "Batch ingestion failed: {:?}", result.err());
 
         let metrics = service.get_metrics_snapshot();

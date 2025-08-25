@@ -25,6 +25,13 @@ pub struct QueueEntry {
     pub batch: DataPointBatch,
 }
 
+/// A work item that includes the queue entry and its key for status tracking
+#[derive(Debug, Clone)]
+pub struct QueueWorkItem {
+    pub entry: QueueEntry,
+    pub queue_key: String,
+}
+
 impl QueueEntry {
     pub fn new_from_batch(batch: DataPointBatch) -> Self {
         Self {
@@ -314,7 +321,82 @@ impl PersistentQueue {
         Ok(())
     }
     
-    /// Dequeue a batch of data points for processing
+    /// Peek at the next batch without removing it from the queue (for status tracking)
+    pub fn peek_next_work_item(&self) -> KairosResult<Option<QueueWorkItem>> {
+        let start_time = Instant::now();
+        
+        // Get the first entry from the queue
+        let mut iter = self.partition.iter();
+        let item = match iter.next() {
+            Some(item) => item,
+            None => {
+                // Queue is empty
+                self.metrics.oldest_entry_age_seconds.set(0.0);
+                return Ok(None);
+            }
+        };
+        
+        let (key, value) = item
+            .map_err(|e| {
+                self.metrics.dequeue_errors.inc();
+                KairosError::internal(format!("Failed to read from queue: {}", e))
+            })?;
+            
+        // Deserialize the entry using MessagePack
+        let entry: QueueEntry = match rmp_serde::from_slice(&value) {
+            Ok(entry) => entry,
+            Err(e) => {
+                self.metrics.dequeue_errors.inc();
+                // Remove corrupted entry
+                debug!("Failed to deserialize queue entry, removing corrupted entry: {}", e);
+                self.partition.remove(key)
+                    .map_err(|e| KairosError::internal(format!("Failed to remove corrupted entry: {}", e)))?;
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
+                // Try again with the next entry
+                return self.peek_next_work_item();
+            }
+        };
+        
+        // Update oldest entry age
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let age_seconds = (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
+        self.metrics.oldest_entry_age_seconds.set(age_seconds);
+        
+        let batch_size = entry.batch.points.len();
+        trace!("Peeked at next work item with {} points in {:?}", batch_size, start_time.elapsed());
+        
+        Ok(Some(QueueWorkItem {
+            entry,
+            queue_key: String::from_utf8_lossy(&key).to_string(),
+        }))
+    }
+    
+    /// Remove a specific item from the queue after successful processing
+    pub fn remove_processed_item(&self, queue_key: &str) -> KairosResult<()> {
+        let start_time = Instant::now();
+        
+        // Remove the processed entry by its key
+        self.partition.remove(queue_key.as_bytes())
+            .map_err(|e| {
+                self.metrics.dequeue_errors.inc();
+                KairosError::internal(format!("Failed to remove processed entry: {}", e))
+            })?;
+        
+        // Update metrics
+        self.queue_size.fetch_sub(1, Ordering::Relaxed);
+        self.metrics.current_size.set(self.queue_size.load(Ordering::Relaxed) as f64);
+        self.metrics.dequeue_duration.observe(start_time.elapsed().as_secs_f64());
+        
+        trace!("Removed processed item '{}' from queue in {:?}", queue_key, start_time.elapsed());
+        Ok(())
+    }
+    
+    /// DEPRECATED: Dequeue a batch of data points for processing (removes immediately)
+    /// Use peek_next_work_item() + remove_processed_item() for proper status tracking
     pub fn dequeue_batch(&self, _max_size: usize) -> KairosResult<Option<DataPointBatch>> {
         let start_time = Instant::now();
         
@@ -480,7 +562,7 @@ mod tests {
         
         // Enqueue multiple points
         for i in 0..5 {
-            let data_point = DataPoint::new_long(&format!("test.metric.{}", i), Timestamp::now(), i);
+            let data_point = DataPoint::new_long(format!("test.metric.{}", i), Timestamp::now(), i);
             queue.enqueue(data_point).unwrap();
             // Small delay to ensure different timestamps
             tokio::time::sleep(std::time::Duration::from_nanos(1)).await;

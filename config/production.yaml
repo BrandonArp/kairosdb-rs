@@ -1,0 +1,55 @@
+# KairosDB Rust Ingestion Service Production Configuration
+
+# HTTP server configuration
+bind_address: "0.0.0.0:8080"
+
+# Cassandra configuration
+cassandra:
+  contact_points:
+    - "127.0.0.1:9042"
+  keyspace: "kairosdb"
+  connection_timeout_ms: 5000
+  query_timeout_ms: 30000
+  max_connections: 100   # Higher for production load
+  max_concurrent_requests_per_connection: 200  
+  max_concurrent_requests: 50  # Conservative limit for stability
+  replication_factor: 3  # Production replication
+  cassandra_health_query: "SELECT now() FROM system.local"
+
+# Ingestion configuration
+ingestion:
+  max_batch_size: 5000   # Smaller batches for better latency
+  batch_timeout_ms: 100  # More frequent queue checks
+  worker_threads: 8      # More workers for production
+  max_queue_size: 50000000    # 50M items
+  max_queue_disk_bytes: 10737418240  # 10GB maximum disk usage for queue
+  enable_validation: true
+  max_request_size: 10485760  # 10MB
+  performance_mode: "parse_and_store_mode"
+  default_sync: true     # Default to durable mode for production - can be overridden with ?sync=false
+
+# Performance configuration
+performance:
+  max_memory_mb: 4096    # 4GB production limit
+  max_concurrent_requests: 500
+  request_timeout_ms: 30000
+  enable_compression: true
+  max_decompressed_size: 52428800  # 50MB
+  keep_alive_timeout_seconds: 75
+
+# Health check configuration
+health:
+  health_path: "/health"
+  readiness_path: "/ready"
+  liveness_path: "/live"
+  check_timeout_ms: 5000
+  cassandra_health_query: "SELECT now() FROM system.local"
+
+# Metrics configuration
+metrics:
+  enable_prometheus: true
+  metrics_path: "/metrics"
+  enable_detailed_metrics: true   # Enable for production monitoring
+  collection_interval_seconds: 30 # More frequent collection
+  enable_memory_metrics: true
+  enable_per_metric_rates: true   # Enable for production insights

@@ -1,0 +1,505 @@
+//! Multi-Worker Cassandra Client with MPMC Channels
+//!
+//! This implementation uses Flume MPMC channels with dedicated worker tasks
+//! for highly concurrent Cassandra writes with proper status tracking.
+
+use async_trait::async_trait;
+use flume::{Receiver, Sender};
+use kairosdb_core::{
+    cassandra::{CassandraValue, ColumnName, RowKey},
+    datapoint::DataPointBatch,
+    error::{KairosError, KairosResult},
+    schema::StringIndexEntry,
+};
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
+use tokio::sync::oneshot;
+use tracing::{debug, error, info, trace, warn};
+
+// ScyllaDB Rust driver imports
+use scylla::client::execution_profile::ExecutionProfile;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use scylla::client::PoolSize;
+use scylla::statement::prepared::PreparedStatement;
+use scylla::statement::Consistency;
+
+use crate::bloom_manager::BloomManager;
+use crate::cassandra::{CassandraClient, CassandraStats};
+use crate::config::CassandraConfig;
+
+/// Work item sent to worker tasks via MPMC channel
+#[derive(Debug)]
+pub struct WorkItem {
+    pub batch: DataPointBatch,
+    pub response_tx: oneshot::Sender<KairosResult<()>>,
+}
+
+/// Shared session and prepared statements for all workers
+#[derive(Clone)]
+struct SharedCassandraResources {
+    session: Arc<Session>,
+    config: Arc<CassandraConfig>,
+    insert_data_point: PreparedStatement,
+    insert_string_index: PreparedStatement,
+}
+
+/// Statistics for the multi-worker client
+#[derive(Debug, Default)]
+struct MultiWorkerStats {
+    total_queries: AtomicU64,
+    failed_queries: AtomicU64,
+    total_datapoints: AtomicU64,
+    connection_errors: AtomicU64,
+    batches_processed: AtomicU64,
+    
+    // Detailed operation metrics
+    datapoint_writes: AtomicU64,
+    datapoint_write_errors: AtomicU64,
+    index_writes: AtomicU64,
+    index_write_errors: AtomicU64,
+    
+    // Worker metrics
+    active_workers: AtomicU64,
+    total_work_items_processed: AtomicU64,
+    
+    // Timing metrics (in nanoseconds)
+    total_datapoint_write_time_ns: AtomicU64,
+    total_index_write_time_ns: AtomicU64,
+    total_batch_write_time_ns: AtomicU64,
+}
+
+/// Multi-worker Cassandra client with MPMC channels
+pub struct MultiWorkerCassandraClient {
+    work_tx: Sender<WorkItem>,
+    stats: Arc<MultiWorkerStats>,
+    _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
+}
+
+impl MultiWorkerCassandraClient {
+    /// Create a new multi-worker Cassandra client
+    pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+        let config = Arc::new(config);
+        let num_workers = num_workers.unwrap_or(50); // Default to 50 workers
+
+        info!("Initializing Multi-Worker Cassandra Client with {} workers", num_workers);
+
+        // Build session with contact points
+        let session = Self::create_session(&config).await?;
+        let session = Arc::new(session);
+
+        // Prepare shared statements
+        let shared_resources = Self::prepare_shared_resources(session, config).await?;
+
+        // Create MPMC channel for work distribution
+        let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
+
+        // Create shared stats
+        let stats = Arc::new(MultiWorkerStats::default());
+
+        // Spawn worker tasks
+        let mut worker_handles = Vec::with_capacity(num_workers);
+        for worker_id in 0..num_workers {
+            let worker_handle = Self::spawn_worker(
+                worker_id,
+                work_rx.clone(),
+                shared_resources.clone(),
+                stats.clone(),
+            );
+            worker_handles.push(worker_handle);
+        }
+
+        stats.active_workers.store(num_workers as u64, Ordering::Relaxed);
+
+        info!("Multi-worker Cassandra client started with {} workers", num_workers);
+
+        Ok(Self {
+            work_tx,
+            stats,
+            _worker_handles: worker_handles,
+        })
+    }
+
+    /// Create ScyllaDB session
+    async fn create_session(config: &CassandraConfig) -> KairosResult<Session> {
+        let mut session_builder = SessionBuilder::new();
+
+        for contact_point in &config.contact_points {
+            session_builder = session_builder.known_node(contact_point);
+        }
+
+        // Add authentication if configured
+        if let (Some(username), Some(password)) = (&config.username, &config.password) {
+            session_builder = session_builder.user(username, password);
+        }
+
+        // Configure connection pool and settings
+        session_builder = session_builder
+            .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
+            .pool_size(PoolSize::PerHost(
+                std::num::NonZero::new(config.max_connections)
+                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap())
+            ))
+            .default_execution_profile_handle(
+                ExecutionProfile::builder()
+                    .consistency(Consistency::LocalQuorum)
+                    .request_timeout(Some(std::time::Duration::from_millis(config.query_timeout_ms)))
+                    .build()
+                    .into_handle()
+            );
+
+        let session = session_builder.build().await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to create ScyllaDB session: {}", e))
+        })?;
+
+        info!("ScyllaDB session established successfully");
+        Ok(session)
+    }
+
+    /// Prepare shared statements for all workers
+    async fn prepare_shared_resources(
+        session: Arc<Session>,
+        config: Arc<CassandraConfig>,
+    ) -> KairosResult<SharedCassandraResources> {
+        debug!("Preparing shared CQL statements for workers");
+
+        // Prepare data point insert
+        let data_point_query = format!(
+            "INSERT INTO {}.data_points (key, column1, value) VALUES (?, ?, ?)",
+            config.keyspace
+        );
+        let insert_data_point = session.prepare(data_point_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare data point statement: {}", e))
+        })?;
+
+        // Prepare string index insert
+        let string_index_query = format!(
+            "INSERT INTO {}.string_index (key, column1, value) VALUES (?, ?, ?)",
+            config.keyspace
+        );
+        let insert_string_index = session.prepare(string_index_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare string index statement: {}", e))
+        })?;
+
+        info!("All shared CQL statements prepared successfully");
+
+        Ok(SharedCassandraResources {
+            session,
+            config,
+            insert_data_point,
+            insert_string_index,
+        })
+    }
+
+    /// Spawn a worker task that processes batches sequentially
+    fn spawn_worker(
+        worker_id: usize,
+        work_rx: Receiver<WorkItem>,
+        shared_resources: SharedCassandraResources,
+        stats: Arc<MultiWorkerStats>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            info!("Worker {} started", worker_id);
+            let mut bloom_manager = BloomManager::new(); // Each worker gets its own bloom filter
+
+            while let Ok(work_item) = work_rx.recv_async().await {
+                let batch_start = std::time::Instant::now();
+                let batch_size = work_item.batch.points.len();
+
+                trace!("Worker {} processing batch of {} points", worker_id, batch_size);
+
+                // Process the batch sequentially in this worker
+                let result = Self::process_batch_sequentially(
+                    &shared_resources,
+                    &work_item.batch,
+                    &mut bloom_manager,
+                    &stats,
+                ).await;
+
+                let batch_duration = batch_start.elapsed();
+                stats.total_batch_write_time_ns.fetch_add(batch_duration.as_nanos() as u64, Ordering::Relaxed);
+                stats.total_work_items_processed.fetch_add(1, Ordering::Relaxed);
+
+                match &result {
+                    Ok(_) => {
+                        trace!("Worker {} completed batch of {} points successfully in {:?}", 
+                               worker_id, batch_size, batch_duration);
+                        stats.batches_processed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        error!("Worker {} failed to process batch of {} points after {:?}: {}", 
+                               worker_id, batch_size, batch_duration, e);
+                        stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+
+                // Send result back to caller
+                let _ = work_item.response_tx.send(result);
+            }
+
+            info!("Worker {} shutting down", worker_id);
+        })
+    }
+
+    /// Process a batch sequentially (called by individual workers)
+    async fn process_batch_sequentially(
+        resources: &SharedCassandraResources,
+        batch: &DataPointBatch,
+        bloom_manager: &mut BloomManager,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        if batch.points.is_empty() {
+            trace!("Empty batch, nothing to write");
+            return Ok(());
+        }
+
+        let internal_start = std::time::Instant::now();
+        trace!("Sequential worker processing batch of {} data points", batch.points.len());
+        
+        stats.total_datapoints.fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+
+        // Write all data points sequentially
+        let datapoints_start = std::time::Instant::now();
+        for data_point in &batch.points {
+            let row_key = RowKey::from_data_point(data_point);
+            let column_name = ColumnName::from_timestamp(data_point.timestamp);
+            let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
+
+            let row_key_bytes = row_key.to_bytes();
+            let column_key_bytes = column_name.to_bytes();
+            let value_bytes = &cassandra_value.bytes;
+
+            match resources.session.execute_unpaged(
+                &resources.insert_data_point,
+                (row_key_bytes, column_key_bytes, value_bytes.clone())
+            ).await {
+                Ok(_) => {
+                    stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                    stats.datapoint_writes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                    stats.datapoint_write_errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(KairosError::cassandra(format!("Failed to write data point: {}", e)));
+                }
+            }
+        }
+
+        let datapoints_duration = datapoints_start.elapsed();
+        stats.total_datapoint_write_time_ns.fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!("Successfully wrote {} data points to Cassandra in {:?}", batch.points.len(), datapoints_duration);
+
+        // Write indexes sequentially with bloom filter deduplication
+        let indexes_start = std::time::Instant::now();
+        let index_count = Self::write_indexes_sequentially(resources, batch, bloom_manager, stats).await?;
+        let indexes_duration = indexes_start.elapsed();
+        
+        stats.total_index_write_time_ns.fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!("Completed writing {} indexes in {:?}", index_count, indexes_duration);
+
+        let total_duration = internal_start.elapsed();
+        trace!("Sequential worker batch completed successfully in {:?} total", total_duration);
+        Ok(())
+    }
+
+    /// Write indexes sequentially with bloom filter deduplication
+    async fn write_indexes_sequentially(
+        resources: &SharedCassandraResources,
+        batch: &DataPointBatch,
+        bloom_manager: &mut BloomManager,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<u64> {
+        let mut metric_names = HashSet::new();
+        let mut tag_names = HashSet::new();
+        let mut tag_values = HashSet::new();
+
+        // Collect all unique metric names and tags
+        for data_point in &batch.points {
+            metric_names.insert(data_point.metric.as_str());
+
+            for (tag_key, tag_value) in data_point.tags.iter() {
+                tag_names.insert(tag_key.as_str());
+                tag_values.insert(tag_value.as_str());
+            }
+        }
+
+        trace!(
+            "Writing indexes for {} metrics, {} tag keys, {} tag values",
+            metric_names.len(),
+            tag_names.len(),
+            tag_values.len()
+        );
+
+        let mut indexes_written = 0u64;
+
+        // Write metric name indexes (with bloom filter deduplication)
+        for metric_name in metric_names {
+            let bloom_key = format!("metric_name:{}", metric_name);
+            if bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::metric_name(metric_name);
+                Self::write_string_index_sequentially(resources, &entry, stats).await?;
+                indexes_written += 1;
+            }
+        }
+
+        // Write tag name indexes (with bloom filter deduplication)
+        for tag_name in tag_names {
+            let bloom_key = format!("tag_name:{}", tag_name);
+            if bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::tag_name(tag_name);
+                Self::write_string_index_sequentially(resources, &entry, stats).await?;
+                indexes_written += 1;
+            }
+        }
+
+        // Write tag value indexes (with bloom filter deduplication)
+        for tag_value in tag_values {
+            let bloom_key = format!("tag_value:{}", tag_value);
+            if bloom_manager.should_write_index(&bloom_key) {
+                let entry = StringIndexEntry::tag_value(tag_value);
+                Self::write_string_index_sequentially(resources, &entry, stats).await?;
+                indexes_written += 1;
+            }
+        }
+
+        trace!("All {} indexes written successfully", indexes_written);
+        Ok(indexes_written)
+    }
+
+    /// Write a string index entry sequentially
+    async fn write_string_index_sequentially(
+        resources: &SharedCassandraResources,
+        entry: &StringIndexEntry,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        let key_bytes = entry.key().to_bytes();
+        let column_name = entry.index_column();
+        let value_bytes = vec![0u8]; // Empty value for string index
+
+        match resources.session.execute_unpaged(
+            &resources.insert_string_index,
+            (key_bytes, column_name, value_bytes)
+        ).await {
+            Ok(_) => {
+                stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                Err(KairosError::cassandra(format!("Failed to write string index: {}", e)))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl CassandraClient for MultiWorkerCassandraClient {
+    async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
+        let start = std::time::Instant::now();
+
+        // Create oneshot channel for response
+        let (response_tx, response_rx) = oneshot::channel();
+
+        // Create work item
+        let work_item = WorkItem {
+            batch: batch.clone(),
+            response_tx,
+        };
+
+        trace!("MultiWorker: Sending batch of {} points to worker pool", batch.points.len());
+
+        // Send work item to worker pool via MPMC channel
+        self.work_tx.send(work_item).map_err(|_| {
+            KairosError::cassandra("Worker pool unavailable")
+        })?;
+
+        // Wait for response from worker
+        let result = response_rx.await.map_err(|_| {
+            KairosError::cassandra("Worker response lost")
+        })?;
+
+        let duration = start.elapsed();
+        trace!("MultiWorker: Batch write completed in {:?}", duration);
+        result
+    }
+
+    async fn health_check(&self) -> KairosResult<bool> {
+        // Check if worker pool is available and active
+        let active_workers = self.stats.active_workers.load(Ordering::Relaxed);
+        Ok(active_workers > 0 && !self.work_tx.is_disconnected())
+    }
+
+    fn get_stats(&self) -> CassandraStats {
+        let bloom_stats = BloomManager::new().get_stats(); // Placeholder
+        
+        // Calculate averages
+        let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
+        let index_writes = self.stats.index_writes.load(Ordering::Relaxed);
+        let total_batches = self.stats.batches_processed.load(Ordering::Relaxed).max(1);
+        
+        let avg_datapoint_write_time_ms = if datapoint_writes > 0 {
+            (self.stats.total_datapoint_write_time_ns.load(Ordering::Relaxed) as f64) / (datapoint_writes as f64) / 1_000_000.0
+        } else {
+            0.0
+        };
+        
+        let avg_index_write_time_ms = if index_writes > 0 {
+            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64) / (index_writes as f64) / 1_000_000.0
+        } else {
+            0.0
+        };
+        
+        let avg_batch_write_time_ms = if total_batches > 0 {
+            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64) / (total_batches as f64) / 1_000_000.0
+        } else {
+            0.0
+        };
+        
+        CassandraStats {
+            total_queries: self.stats.total_queries.load(Ordering::Relaxed),
+            failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
+            total_datapoints_written: self.stats.total_datapoints.load(Ordering::Relaxed),
+            avg_batch_size: if total_batches > 0 { 
+                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64 
+            } else { 
+                0.0 
+            },
+            connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
+            bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
+            bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
+            bloom_filter_expected_items: bloom_stats.expected_items,
+            bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
+            
+            // Detailed operation metrics
+            datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
+            datapoint_write_errors: self.stats.datapoint_write_errors.load(Ordering::Relaxed),
+            index_writes: self.stats.index_writes.load(Ordering::Relaxed),
+            index_write_errors: self.stats.index_write_errors.load(Ordering::Relaxed),
+            prepared_statement_cache_hits: 0, // Not applicable to multi-worker model
+            prepared_statement_cache_misses: 0,
+            
+            // Worker-specific metrics instead of concurrency
+            current_concurrent_requests: self.stats.active_workers.load(Ordering::Relaxed),
+            max_concurrent_requests_reached: self.stats.active_workers.load(Ordering::Relaxed),
+            avg_semaphore_wait_time_ms: 0.0, // Not applicable - workers consume sequentially
+            
+            // Timing metrics
+            avg_datapoint_write_time_ms,
+            avg_index_write_time_ms,
+            avg_batch_write_time_ms,
+        }
+    }
+
+    async fn ensure_schema(&self) -> KairosResult<()> {
+        // Schema operations could be handled by a dedicated worker or separately
+        info!("Schema assumed to be present (multi-worker client)");
+        Ok(())
+    }
+}

@@ -81,6 +81,9 @@ fjall = "2.6"
 bincode = "1.3"
 rmp-serde = "1.1"  # MessagePack for queue serialization
 
+# Multi-producer multi-consumer channels
+flume = "0.11"
+
 # CPU profiling support
 pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"], optional = true }
 
