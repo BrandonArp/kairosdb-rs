@@ -137,9 +137,6 @@ pipeline {
       // Archive artifacts
       archiveArtifacts artifacts: 'target/debug/*.json, target/doc/**, tilt.log', fingerprint: true, allowEmptyArchive: true
       
-      // JUnit test results
-      junit 'target/nextest/ci/junit.xml'
-      
       // Coverage reporting
       recordCoverage(ignoreParsingErrors: true, tools: [[parser: 'COBERTURA', pattern: '**/target/llvm-cov-target/cobertura.xml']])
       
