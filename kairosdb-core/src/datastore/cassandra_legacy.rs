@@ -400,7 +400,9 @@ impl TimeSeriesStore for CassandraLegacyStore {
         time_range: TimeRange,
     ) -> KairosResult<Vec<DataPoint>> {
         // Phase 1: Query row_keys table to find all series for this metric
-        let row_keys = self.query_row_keys_for_metric(metric, time_range.clone()).await?;
+        let row_keys = self
+            .query_row_keys_for_metric(metric, time_range.clone())
+            .await?;
 
         // Phase 2: Filter row keys by tag criteria
         let filtered_keys: Vec<_> = row_keys
