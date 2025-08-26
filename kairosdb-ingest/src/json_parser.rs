@@ -563,28 +563,11 @@ impl JsonParser {
         obj: &serde_json::Map<String, Value>,
         boundaries_value: &Value,
     ) -> KairosResult<DataPointValue> {
-        // Parse boundaries
+        // Get arrays upfront with early validation
         let boundaries_array = boundaries_value
             .as_array()
             .ok_or_else(|| KairosError::validation("Histogram 'boundaries' must be an array"))?;
 
-        let mut boundaries = Vec::new();
-        for (i, boundary_val) in boundaries_array.iter().enumerate() {
-            let boundary = boundary_val.as_f64().ok_or_else(|| {
-                KairosError::validation(format!("Boundary {} must be a number", i))
-            })?;
-
-            if !boundary.is_finite() {
-                return Err(KairosError::validation(format!(
-                    "Boundary {} must be finite",
-                    i
-                )));
-            }
-
-            boundaries.push(boundary);
-        }
-
-        // Parse counts
         let counts_value = obj
             .get("counts")
             .ok_or_else(|| KairosError::validation("Histogram missing 'counts' field"))?;
@@ -593,57 +576,53 @@ impl JsonParser {
             .as_array()
             .ok_or_else(|| KairosError::validation("Histogram 'counts' must be an array"))?;
 
-        let mut counts = Vec::new();
-        for (i, count_val) in counts_array.iter().enumerate() {
-            let count = count_val.as_u64().ok_or_else(|| {
-                KairosError::validation(format!("Count {} must be a non-negative integer", i))
-            })?;
-
-            counts.push(count);
-        }
-
-        // Validate boundaries and counts have same length
-        if boundaries.len() != counts.len() {
+        // Early length check to avoid partial processing
+        if boundaries_array.len() != counts_array.len() {
             return Err(KairosError::validation(
                 "Histogram boundaries and counts must have same length",
             ));
         }
 
-        // Get total count (can be calculated or explicit)
-        let _total_count = obj
-            .get("total_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| counts.iter().sum());
+        // Pre-allocate with known capacity and parse both arrays in single pass
+        let len = boundaries_array.len();
+        let mut bins = Vec::with_capacity(len);
 
-        // Get sum
-        let sum = obj.get("sum").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        for (boundary_val, count_val) in boundaries_array.iter().zip(counts_array.iter()) {
+            let boundary = boundary_val
+                .as_f64()
+                .filter(|&f| f.is_finite())
+                .ok_or_else(|| KairosError::validation("Boundary must be a finite number"))?;
 
-        if !sum.is_finite() {
-            return Err(KairosError::validation("Histogram 'sum' must be finite"));
+            let count = count_val
+                .as_u64()
+                .ok_or_else(|| KairosError::validation("Count must be a non-negative integer"))?;
+
+            bins.push((boundary, count));
         }
 
-        // Optional min/max
-        let min = obj.get("min").and_then(|v| v.as_f64());
-        let max = obj.get("max").and_then(|v| v.as_f64());
-
-        // Validate min/max are finite if present
-        if let Some(min_val) = min {
-            if !min_val.is_finite() {
-                return Err(KairosError::validation("Histogram 'min' must be finite"));
-            }
-        }
-        if let Some(max_val) = max {
-            if !max_val.is_finite() {
-                return Err(KairosError::validation("Histogram 'max' must be finite"));
-            }
-        }
-
-        // Create bins and ensure they're sorted by boundary
-        let mut bins: Vec<(f64, u64)> = boundaries.into_iter().zip(counts).collect();
+        // Sort bins by boundary (only once, and only the references we need)
         bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let histogram =
-            HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
+        // Parse remaining fields with consolidated validation
+        let sum = obj
+            .get("sum")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let min = obj
+            .get("min")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let max = obj
+            .get("max")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let histogram = HistogramData::from_bins(bins, sum, min, max, None)?;
         Ok(DataPointValue::Histogram(histogram))
     }
 

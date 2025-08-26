@@ -26,9 +26,6 @@ tracing-subscriber = "0.3"
 # Local dependencies
 kairosdb-core = { path = "../kairosdb-core" }
 
-# CPU profiling support (not needed in tests - profiling is in the service)
-# pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"] }
-
 [[bin]]
 name = "perf_test"
 path = "src/bin/perf_test.rs"
