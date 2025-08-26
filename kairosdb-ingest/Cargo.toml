@@ -92,11 +92,6 @@ pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"], optiona
 profiling = ["pprof"]
 
 [dev-dependencies]
-tokio-test = "0.4"
-testcontainers = "0.15"
-testcontainers-modules = { version = "0.3" }
-criterion = { version = "0.5", features = ["html_reports"] }
-proptest = "1.4"
 tempfile = "3.8"
 
 # Library target for integration tests
