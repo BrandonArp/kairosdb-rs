@@ -6,7 +6,7 @@ slow-timeout = { period = "60s" }
 fail-fast = true
 
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
 report-name = "nextest-run"
 
 # E2E test ordering - single-threaded for stability
