@@ -221,21 +221,16 @@ impl BloomManager {
 
         // Calculate memory usage for bloom filters
         let primary_memory_bytes = calculate_bloom_memory_bytes(&state.primary);
-        let secondary_memory_bytes = if let Some(ref secondary) = state.secondary {
-            Some(calculate_bloom_memory_bytes(secondary))
-        } else {
-            None
-        };
+        let secondary_memory_bytes = state.secondary.as_ref().map(calculate_bloom_memory_bytes);
         let total_memory_bytes = primary_memory_bytes + secondary_memory_bytes.unwrap_or(0);
 
         // Calculate ones count only if requested (expensive operation)
         let (primary_ones_count, secondary_ones_count) = if include_ones_count {
             let primary_ones = Some(state.primary.count_ones() as u64);
-            let secondary_ones = if let Some(ref secondary) = state.secondary {
-                Some(secondary.count_ones() as u64)
-            } else {
-                None
-            };
+            let secondary_ones = state
+                .secondary
+                .as_ref()
+                .map(|secondary| secondary.count_ones() as u64);
             (primary_ones, secondary_ones)
         } else {
             (None, None)
@@ -307,7 +302,7 @@ fn calculate_bloom_memory_bytes(bloom_filter: &ScalableBloomFilter<String>) -> u
     let num_bits = bloom_filter.len() as u64;
 
     // Convert bits to bytes (round up to nearest byte)
-    let bit_vector_bytes = (num_bits + 7) / 8; // Equivalent to ceiling division
+    let bit_vector_bytes = num_bits.div_ceil(8);
 
     // Total memory = struct size + bit vector + some overhead for Vec metadata
     struct_size + bit_vector_bytes + 64
