@@ -147,7 +147,7 @@ pipeline {
       recordIssues(
         enabledForFailure: true, aggregatingResults: true,
         tools: [
-          junitParser(pattern: '**/target/nextest/ci/junit.xml'), 
+          junitParser(pattern: '**/target/nextest/ci/junit*.xml'),
           cargo(pattern: '**/target/debug/*.json')
         ]
       )

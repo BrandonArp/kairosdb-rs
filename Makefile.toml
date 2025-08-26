@@ -61,6 +61,7 @@ description = "Run unit tests only"
 script = '''
 mkdir -p target/nextest/ci
 cargo nextest run --profile ci --workspace --lib --no-fail-fast --target-dir target/nextest/ci
+if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml target/nextest/ci/junit-unit.xml; fi
 '''
 
 [tasks.test-integration]
