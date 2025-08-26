@@ -1,101 +1,225 @@
-//! Production-grade Cassandra client for KairosDB using ScyllaDB Rust driver
+//! Production Cassandra Client Implementation
 //!
-//! This client provides robust, high-performance data persistence using the ScyllaDB Rust driver
-//! with proper error handling, connection management, and KairosDB schema compatibility.
+//! This is the main Cassandra client used in production. It uses multiple worker
+//! tasks with Flume MPMC channels for highly concurrent writes with proper status
+//! tracking. All workers share a single bloom filter for deduplication.
 
 use async_trait::async_trait;
-use tokio::sync::{mpsc, oneshot};
-use futures::future::join_all;
+use flume::{Receiver, Sender};
 use kairosdb_core::{
     cassandra::{CassandraValue, ColumnName, RowKey},
-    datapoint::DataPointBatch,
+    datapoint::{DataPointBatch, DataPointValue},
     error::{KairosError, KairosResult},
-    schema::{RowKeyIndexEntry, StringIndexEntry},
+    schema::StringIndexEntry,
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
-use tracing::{debug, error, info, trace, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace};
 
 // ScyllaDB Rust driver imports
+use scylla::client::execution_profile::ExecutionProfile;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::client::PoolSize;
-use scylla::response::query_result::QueryResult;
-use scylla::serialize::row::SerializeRow;
-// Removed batch imports - using async concurrency instead
 use scylla::statement::prepared::PreparedStatement;
-use scylla::value::CqlTimestamp;
+use scylla::statement::Consistency;
 
 use crate::bloom_manager::BloomManager;
 use crate::cassandra::{CassandraClient, CassandraStats};
 use crate::config::CassandraConfig;
 
-/// Write command for the single writer task
+/// Work item sent to worker tasks via MPMC channel
 #[derive(Debug)]
-enum WriteCommand {
-    Batch {
-        batch: DataPointBatch,
-        response_tx: oneshot::Sender<KairosResult<()>>,
-    },
-    Shutdown,
+pub struct WorkItem {
+    pub batch: DataPointBatch,
+    pub queue_key: String, // Key to identify the queue item for completion
 }
 
-/// Production Cassandra client implementation using single writer task
+/// Response sent back from Cassandra workers to queue processor
+#[derive(Debug, Clone)]
+pub struct WorkResponse {
+    pub queue_key: String,
+    pub result: Result<usize, String>, // Ok(batch_size) or Err(error_message)
+    pub processing_duration_ns: u64,
+}
+
+/// Shared session and prepared statements for all workers
 #[derive(Clone)]
-pub struct CassandraClientImpl {
-    write_tx: mpsc::UnboundedSender<WriteCommand>,
-    stats: Arc<CassandraClientStats>,
-}
-
-/// Internal writer task state (not shared, no Arc needed!)
-struct WriterTaskState {
-    session: Session,
+#[allow(dead_code)]
+struct SharedCassandraResources {
+    session: Arc<Session>,
     config: Arc<CassandraConfig>,
-    bloom_manager: BloomManager,
-    stats: Arc<CassandraClientStats>,
-    // Prepared statements for performance
-    insert_data_point: Option<PreparedStatement>,
-    insert_row_key_index: Option<PreparedStatement>,
-    insert_string_index: Option<PreparedStatement>,
-    insert_row_keys: Option<PreparedStatement>,
-    insert_row_key_time_index: Option<PreparedStatement>,
+    insert_data_point: PreparedStatement,
+    insert_row_key_time_index: PreparedStatement,
+    insert_row_keys: PreparedStatement,
+    insert_string_index: PreparedStatement,
 }
 
-/// Internal statistics tracking
-struct CassandraClientStats {
+/// Statistics for the multi-worker client
+#[derive(Debug, Default)]
+struct MultiWorkerStats {
     total_queries: AtomicU64,
     failed_queries: AtomicU64,
     total_datapoints: AtomicU64,
     connection_errors: AtomicU64,
+    batches_processed: AtomicU64,
+
+    // Detailed operation metrics
+    datapoint_writes: AtomicU64,
+    datapoint_write_errors: AtomicU64,
+    index_writes: AtomicU64,
+    index_write_errors: AtomicU64,
+
+    // Worker metrics
+    active_workers: AtomicU64,
+    total_work_items_processed: AtomicU64,
+
+    // Timing metrics (in nanoseconds)
+    total_datapoint_write_time_ns: AtomicU64,
+    total_index_write_time_ns: AtomicU64,
+    total_batch_write_time_ns: AtomicU64,
 }
 
-impl Default for CassandraClientStats {
-    fn default() -> Self {
-        Self {
-            total_queries: AtomicU64::new(0),
-            failed_queries: AtomicU64::new(0),
-            total_datapoints: AtomicU64::new(0),
-            connection_errors: AtomicU64::new(0),
-        }
-    }
+/// Production Cassandra client with multiple workers and MPMC channels
+#[allow(dead_code)]
+pub struct MultiWorkerCassandraClient {
+    work_tx: Sender<WorkItem>,
+    response_rx: Receiver<WorkResponse>, // For backward compatibility with write_batch
+    stats: Arc<MultiWorkerStats>,
+    shared_resources: SharedCassandraResources, // Keep for schema operations
+    shared_bloom_manager: Arc<BloomManager>,    // Shared across all workers
+    _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
 }
 
-impl CassandraClientImpl {
-    /// Create a new Cassandra client instance
-    pub async fn new(config: CassandraConfig) -> KairosResult<Self> {
+impl MultiWorkerCassandraClient {
+    /// Create a new multi-worker Cassandra client with external channels
+    pub async fn new_with_channels(
+        config: CassandraConfig,
+        num_workers: Option<usize>,
+        work_tx: Sender<WorkItem>,
+        work_rx: Receiver<WorkItem>,
+        response_tx: Sender<WorkResponse>,
+        response_rx: Receiver<WorkResponse>,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> KairosResult<Self> {
         let config = Arc::new(config);
+        let num_workers = num_workers.unwrap_or(200); // Default to 200 workers for high concurrency
 
         info!(
-            "Initializing ScyllaDB client with contact points: {:?}",
-            config.contact_points
+            "Initializing Multi-Worker Cassandra Client with {} workers",
+            num_workers
         );
 
-        // Build session with contact points
+        // Build session with contact points (ONE session for all workers)
+        let session = Self::create_session(&config).await?;
+        let session = Arc::new(session);
+
+        // Create schema BEFORE creating workers
+        info!("Creating KairosDB schema if needed");
+        Self::ensure_schema_with_session(&session, &config).await?;
+        info!("KairosDB schema creation completed");
+
+        // Prepare shared statements
+        let shared_resources = Self::prepare_shared_resources(session, config).await?;
+
+        // Create shared stats
+        let stats = Arc::new(MultiWorkerStats::default());
+
+        // Create shared bloom manager for all workers
+        let shared_bloom_manager = Arc::new(BloomManager::new());
+
+        // Spawn worker tasks
+        let mut worker_handles = Vec::with_capacity(num_workers);
+        for worker_id in 0..num_workers {
+            let worker_handle = Self::spawn_worker(
+                worker_id,
+                work_rx.clone(),
+                response_tx.clone(),
+                shared_resources.clone(),
+                stats.clone(),
+                shared_bloom_manager.clone(),
+                shutdown_token.clone(),
+            );
+            worker_handles.push(worker_handle);
+        }
+
+        stats
+            .active_workers
+            .store(num_workers as u64, Ordering::Relaxed);
+
+        info!(
+            "Multi-worker Cassandra client started with {} workers",
+            num_workers
+        );
+
+        Ok(Self {
+            work_tx,
+            response_rx,
+            stats,
+            shared_resources: shared_resources.clone(),
+            shared_bloom_manager,
+            _worker_handles: worker_handles,
+        })
+    }
+
+    /// Create schema using a specific session and config
+    async fn ensure_schema_with_session(
+        session: &Arc<Session>,
+        config: &Arc<CassandraConfig>,
+    ) -> KairosResult<()> {
+        use kairosdb_core::schema::KairosSchema;
+
+        let schema = KairosSchema::new(config.keyspace.clone(), 1);
+
+        // Execute keyspace creation
+        session
+            .query_unpaged(schema.create_keyspace_cql(), ())
+            .await
+            .map_err(|e| KairosError::cassandra(format!("Failed to create keyspace: {}", e)))?;
+
+        // Execute table creation statements
+        let statements = vec![
+            schema.create_data_points_table_cql(),
+            schema.create_row_key_time_index_table_cql(),
+            schema.create_string_index_table_cql(),
+        ];
+
+        for statement in statements {
+            session.query_unpaged(statement, ()).await.map_err(|e| {
+                KairosError::cassandra(format!("Failed to execute schema statement: {}", e))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Create a new multi-worker Cassandra client (creates its own channels)
+    pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+        // Create MPMC channels for work distribution and responses
+        let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
+        let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
+        // Create a cancellation token for this instance
+        let shutdown_token = CancellationToken::new();
+        Self::new_with_channels(
+            config,
+            num_workers,
+            work_tx,
+            work_rx,
+            response_tx,
+            response_rx,
+            shutdown_token,
+        )
+        .await
+    }
+
+    /// Create ScyllaDB session
+    async fn create_session(config: &CassandraConfig) -> KairosResult<Session> {
         let mut session_builder = SessionBuilder::new();
 
         for contact_point in &config.contact_points {
@@ -107,312 +231,302 @@ impl CassandraClientImpl {
             session_builder = session_builder.user(username, password);
         }
 
-        // Configure connection pool and concurrency settings
+        // Configure connection pool and settings
         session_builder = session_builder
-            .connection_timeout(std::time::Duration::from_millis(config.connection_timeout_ms))
+            .connection_timeout(std::time::Duration::from_millis(
+                config.connection_timeout_ms,
+            ))
             .pool_size(PoolSize::PerHost(
                 std::num::NonZero::new(config.max_connections)
-                    .unwrap_or_else(|| std::num::NonZero::new(1).unwrap())
-            ));
-
-        // Don't set default keyspace here - we'll create it in ensure_schema()
+                    .unwrap_or_else(|| std::num::NonZero::new(10).unwrap()),
+            ))
+            .default_execution_profile_handle(
+                ExecutionProfile::builder()
+                    .consistency(Consistency::LocalQuorum)
+                    .request_timeout(Some(std::time::Duration::from_millis(
+                        config.query_timeout_ms,
+                    )))
+                    .build()
+                    .into_handle(),
+            );
 
         let session = session_builder.build().await.map_err(|e| {
             KairosError::cassandra(format!("Failed to create ScyllaDB session: {}", e))
         })?;
 
         info!("ScyllaDB session established successfully");
-
-        Ok(Self {
-            session: Arc::new(session),
-            config: config.clone(),
-            stats: Arc::new(CassandraClientStats::default()),
-            bloom_manager: Arc::new(BloomManager::new()),
-            insert_data_point: None,
-            insert_row_key_index: None,
-            insert_string_index: None,
-            insert_row_keys: None,
-            insert_row_key_time_index: None,
-        })
+        Ok(session)
     }
 
-    /// Prepare frequently used statements for better performance
-    pub async fn prepare_statements(&mut self) -> KairosResult<()> {
-        debug!("Preparing frequently used CQL statements");
+    /// Prepare shared statements for all workers
+    async fn prepare_shared_resources(
+        session: Arc<Session>,
+        config: Arc<CassandraConfig>,
+    ) -> KairosResult<SharedCassandraResources> {
+        debug!("Preparing shared CQL statements for workers");
 
-        // Prepare data point insertion statement
-        self.insert_data_point = Some(
-            self.session
-                .prepare("INSERT INTO data_points (key, column1, value) VALUES (?, ?, ?)")
-                .await
-                .map_err(|e| {
-                    KairosError::cassandra(format!(
-                        "Failed to prepare data_points statement: {}",
-                        e
-                    ))
-                })?,
+        // Prepare data point insert
+        let data_point_query = format!(
+            "INSERT INTO {}.data_points (key, column1, value) VALUES (?, ?, ?)",
+            config.keyspace
         );
+        let insert_data_point = session.prepare(data_point_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare data point statement: {}", e))
+        })?;
 
-        // Prepare row key index insertion statement
-        self.insert_row_key_index = Some(
-            self.session
-                .prepare("INSERT INTO row_key_index (key, column1, value) VALUES (?, ?, ?)")
-                .await
-                .map_err(|e| {
-                    KairosError::cassandra(format!(
-                        "Failed to prepare row_key_index statement: {}",
-                        e
-                    ))
-                })?,
+        // Prepare row_key_time_index insert
+        let row_key_time_index_query = format!(
+            "INSERT INTO {}.row_key_time_index (metric, table_name, row_time, value) VALUES (?, ?, ?, ?)",
+            config.keyspace
         );
-
-        // Prepare string index insertion statement
-        self.insert_string_index = Some(
-            self.session
-                .prepare("INSERT INTO string_index (key, column1, value) VALUES (?, ?, ?)")
-                .await
-                .map_err(|e| {
-                    KairosError::cassandra(format!(
-                        "Failed to prepare string_index statement: {}",
-                        e
-                    ))
-                })?,
-        );
-
-        // Prepare row_keys insertion statement (new format)
-        self.insert_row_keys = Some(
-            self.session
-                .prepare("INSERT INTO row_keys (metric, table_name, row_time, data_type, tags, mtime) VALUES (?, 'data_points', ?, ?, ?, now()) USING TTL ?")
-                .await
-                .map_err(|e| {
-                    KairosError::cassandra(format!(
-                        "Failed to prepare row_keys statement: {}",
-                        e
-                    ))
-                })?,
-        );
-
-        // Prepare row_key_time_index insertion statement (new format)
-        self.insert_row_key_time_index = Some(
-            self.session
-                .prepare("INSERT INTO row_key_time_index (metric, table_name, row_time) VALUES (?, 'data_points', ?) USING TTL ?")
+        let insert_row_key_time_index =
+            session
+                .prepare(row_key_time_index_query)
                 .await
                 .map_err(|e| {
                     KairosError::cassandra(format!(
                         "Failed to prepare row_key_time_index statement: {}",
                         e
                     ))
-                })?,
+                })?;
+
+        // Prepare row_keys insert
+        let row_keys_query = format!(
+            "INSERT INTO {}.row_keys (metric, table_name, row_time, data_type, tags, mtime, value) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            config.keyspace
         );
+        let insert_row_keys = session.prepare(row_keys_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare row_keys statement: {}", e))
+        })?;
 
-        debug!("All CQL statements prepared successfully");
-        Ok(())
-    }
-
-    /// Execute a simple query without parameters
-    async fn execute_query(&self, query: &str) -> KairosResult<QueryResult> {
-        self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-
-        trace!("Executing query: {}", query);
-
-        match self.session.query_unpaged(query, &[]).await {
-            Ok(result) => {
-                trace!("Query executed successfully");
-                Ok(result)
-            }
-            Err(e) => {
-                self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-                error!("Query execution failed: {}", e);
-                Err(KairosError::cassandra(format!("Query failed: {}", e)))
-            }
-        }
-    }
-
-    /// Execute a prepared statement with values
-    async fn execute_prepared<T>(
-        &self,
-        prepared: &PreparedStatement,
-        values: T,
-    ) -> KairosResult<QueryResult>
-    where
-        T: SerializeRow,
-    {
-        self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
-
-        match self.session.execute_unpaged(prepared, values).await {
-            Ok(result) => {
-                trace!("Prepared statement executed successfully");
-                Ok(result)
-            }
-            Err(e) => {
-                self.stats.failed_queries.fetch_add(1, Ordering::Relaxed);
-                error!("Prepared statement execution failed: {}", e);
-                Err(KairosError::cassandra(format!(
-                    "Prepared statement failed: {}",
-                    e
-                )))
-            }
-        }
-    }
-
-    /// Write a single data point to Cassandra using prepared statement
-    async fn write_data_point(
-        &self,
-        row_key: &RowKey,
-        column_name: &ColumnName,
-        value: &CassandraValue,
-    ) -> KairosResult<()> {
-        let row_key_bytes = row_key.to_bytes();
-        let column_key_bytes = column_name.to_bytes();
-        let value_bytes = &value.bytes;
-
-        trace!(
-            "Writing data point: row_key_len={}, column_key_len={}, value_len={}, row_key_hex={}",
-            row_key_bytes.len(),
-            column_key_bytes.len(),
-            value_bytes.len(),
-            hex::encode(&row_key_bytes)
+        // Prepare string index insert
+        let string_index_query = format!(
+            "INSERT INTO {}.string_index (key, column1, value) VALUES (?, ?, ?)",
+            config.keyspace
         );
+        let insert_string_index = session.prepare(string_index_query).await.map_err(|e| {
+            KairosError::cassandra(format!("Failed to prepare string index statement: {}", e))
+        })?;
 
-        if let Some(ref prepared) = self.insert_data_point {
-            self.execute_prepared(prepared, (row_key_bytes, column_key_bytes, value_bytes))
-                .await?;
-        } else {
-            return Err(KairosError::cassandra(
-                "Data point prepared statement not available",
-            ));
-        }
+        info!("All shared CQL statements prepared successfully");
 
-        trace!("Data point written successfully");
-        Ok(())
+        Ok(SharedCassandraResources {
+            session,
+            config,
+            insert_data_point,
+            insert_row_key_time_index,
+            insert_row_keys,
+            insert_string_index,
+        })
     }
 
-    /// Write an entry to the row_key_index table using prepared statement
-    async fn write_row_key_index(&self, entry: &RowKeyIndexEntry) -> KairosResult<()> {
-        let key_bytes = entry.key().to_bytes();
-        let column_bytes = entry.column().to_bytes();
-        let value_bytes = entry.value().to_bytes();
+    /// Spawn a worker task that processes batches sequentially
+    fn spawn_worker(
+        worker_id: usize,
+        work_rx: Receiver<WorkItem>,
+        response_tx: Sender<WorkResponse>,
+        shared_resources: SharedCassandraResources,
+        stats: Arc<MultiWorkerStats>,
+        shared_bloom_manager: Arc<BloomManager>,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            // info!("Worker {} started", worker_id);
+            // Use shared bloom manager instead of individual ones
 
-        trace!("Writing row key index entry");
-
-        if let Some(ref prepared) = self.insert_row_key_index {
-            self.execute_prepared(prepared, (key_bytes, column_bytes, value_bytes))
-                .await?;
-        } else {
-            return Err(KairosError::cassandra(
-                "Row key index prepared statement not available",
-            ));
-        }
-
-        trace!("Row key index entry written successfully");
-        Ok(())
-    }
-
-    /// Write an entry to the row_keys table (new format)
-    async fn write_row_keys(&self, row_key: &RowKey, ttl: Option<u32>) -> KairosResult<()> {
-        trace!("Writing row_keys entry");
-
-        if let Some(ref prepared) = self.insert_row_keys {
-            // Convert tags to a map format expected by Cassandra
-            let tags_map: std::collections::HashMap<String, String> = row_key
-                .tags
-                .split(':')
-                .filter_map(|pair| {
-                    if pair.is_empty() {
-                        return None;
+            loop {
+                let work_item = tokio::select! {
+                    result = work_rx.recv_async() => {
+                        match result {
+                            Ok(item) => item,
+                            Err(_) => {
+                                // Channel closed, worker should exit
+                                break;
+                            }
+                        }
                     }
-                    let mut parts = pair.split('=');
-                    let key = parts.next()?.to_string();
-                    let value = parts.next()?.to_string();
-                    Some((key, value))
-                })
-                .collect();
+                    _ = shutdown_token.cancelled() => {
+                        // Shutdown requested
+                        trace!("Worker {} received shutdown signal", worker_id);
+                        break;
+                    }
+                };
+                let batch_start = std::time::Instant::now();
+                let batch_size = work_item.batch.points.len();
 
-            // Convert to Cassandra timestamp type
-            let row_time_timestamp = CqlTimestamp(row_key.row_time.timestamp_millis());
-            let ttl_seconds = ttl.unwrap_or(0);
+                // info!("Worker {} processing batch of {} points", worker_id, batch_size);
 
-            self.execute_prepared(
-                prepared,
-                (
-                    &row_key.metric.as_str(), // metric
-                    row_time_timestamp,       // row_time as timestamp
-                    &row_key.data_type,       // data_type
-                    tags_map,                 // tags as map
-                    ttl_seconds as i32,       // TTL
-                ),
-            )
-            .await?;
-        } else {
-            return Err(KairosError::cassandra(
-                "Row keys prepared statement not available",
-            ));
-        }
+                // Process the batch sequentially in this worker
+                let result = Self::process_batch_sequentially(
+                    &shared_resources,
+                    &work_item.batch,
+                    &shared_bloom_manager,
+                    &stats,
+                )
+                .await;
 
-        trace!("Row keys entry written successfully");
-        Ok(())
+                let batch_duration = batch_start.elapsed();
+                stats
+                    .total_batch_write_time_ns
+                    .fetch_add(batch_duration.as_nanos() as u64, Ordering::Relaxed);
+                stats
+                    .total_work_items_processed
+                    .fetch_add(1, Ordering::Relaxed);
+
+                // Create response for queue processor
+                let response = match &result {
+                    Ok(_) => {
+                        trace!(
+                            "Worker {} completed batch of {} points successfully in {:?}",
+                            worker_id,
+                            batch_size,
+                            batch_duration
+                        );
+                        stats.batches_processed.fetch_add(1, Ordering::Relaxed);
+
+                        WorkResponse {
+                            queue_key: work_item.queue_key.clone(),
+                            result: Ok(batch_size),
+                            processing_duration_ns: batch_duration.as_nanos() as u64,
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Worker {} failed to process batch of {} points after {:?}: {}",
+                            worker_id, batch_size, batch_duration, e
+                        );
+                        stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+
+                        WorkResponse {
+                            queue_key: work_item.queue_key.clone(),
+                            result: Err(e.to_string()),
+                            processing_duration_ns: batch_duration.as_nanos() as u64,
+                        }
+                    }
+                };
+
+                // Send response back via MPMC channel (BLOCKING - must not drop responses)
+                // info!("Worker {} sending response for batch {}", worker_id, work_item.queue_key);
+                if let Err(e) = response_tx.send(response) {
+                    error!(
+                        "Worker {} failed to send response (channel disconnected): {}",
+                        worker_id, e
+                    );
+                    break; // Channel disconnected, worker should exit
+                }
+                // info!("Worker {} successfully sent response for {}", worker_id, work_item.queue_key);
+            }
+
+            info!("Worker {} shutting down", worker_id);
+        })
     }
 
-    /// Write an entry to the row_key_time_index table (new format)
-    async fn write_row_key_time_index(
-        &self,
-        row_key: &RowKey,
-        ttl: Option<u32>,
+    /// Process a batch sequentially (called by individual workers)
+    async fn process_batch_sequentially(
+        resources: &SharedCassandraResources,
+        batch: &DataPointBatch,
+        bloom_manager: &Arc<BloomManager>,
+        stats: &Arc<MultiWorkerStats>,
     ) -> KairosResult<()> {
-        trace!("Writing row_key_time_index entry");
-
-        if let Some(ref prepared) = self.insert_row_key_time_index {
-            // Convert to Cassandra timestamp type
-            let row_time_timestamp = CqlTimestamp(row_key.row_time.timestamp_millis());
-            let ttl_seconds = ttl.unwrap_or(0);
-
-            self.execute_prepared(
-                prepared,
-                (
-                    &row_key.metric.as_str(), // metric
-                    row_time_timestamp,       // row_time as timestamp
-                    ttl_seconds as i32,       // TTL
-                ),
-            )
-            .await?;
-        } else {
-            return Err(KairosError::cassandra(
-                "Row key time index prepared statement not available",
-            ));
+        if batch.points.is_empty() {
+            trace!("Empty batch, nothing to write");
+            return Ok(());
         }
 
-        trace!("Row key time index entry written successfully");
+        let internal_start = std::time::Instant::now();
+        trace!(
+            "Sequential worker processing batch of {} data points",
+            batch.points.len()
+        );
+
+        stats
+            .total_datapoints
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+
+        // Write all data points sequentially
+        let datapoints_start = std::time::Instant::now();
+        for data_point in &batch.points {
+            let row_key = RowKey::from_data_point(data_point);
+            let column_name = ColumnName::from_timestamp(data_point.timestamp);
+            let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
+
+            let row_key_bytes = row_key.to_bytes();
+            let column_key_bytes = column_name.to_bytes();
+            let value_bytes = &cassandra_value.bytes;
+
+            // Write to data_points table
+            match resources
+                .session
+                .execute_unpaged(
+                    &resources.insert_data_point,
+                    (row_key_bytes.clone(), column_key_bytes, value_bytes.clone()),
+                )
+                .await
+            {
+                Ok(_) => {
+                    stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                    stats.datapoint_writes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                    stats.datapoint_write_errors.fetch_add(1, Ordering::Relaxed);
+                    return Err(KairosError::cassandra(format!(
+                        "Failed to write data point: {}",
+                        e
+                    )));
+                }
+            }
+
+            // Write to row_key_time_index table for time-based queries
+            Self::write_row_key_time_index_entry(resources, &row_key, stats).await?;
+        }
+
+        let datapoints_duration = datapoints_start.elapsed();
+        stats
+            .total_datapoint_write_time_ns
+            .fetch_add(datapoints_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!(
+            "Successfully wrote {} data points to Cassandra in {:?}",
+            batch.points.len(),
+            datapoints_duration
+        );
+
+        // Write indexes sequentially with bloom filter deduplication
+        let indexes_start = std::time::Instant::now();
+        let index_count =
+            Self::write_indexes_sequentially(resources, batch, bloom_manager, stats).await?;
+        let indexes_duration = indexes_start.elapsed();
+
+        stats
+            .total_index_write_time_ns
+            .fetch_add(indexes_duration.as_nanos() as u64, Ordering::Relaxed);
+        trace!(
+            "Completed writing {} indexes in {:?}",
+            index_count,
+            indexes_duration
+        );
+
+        let total_duration = internal_start.elapsed();
+        trace!(
+            "Sequential worker batch completed successfully in {:?} total",
+            total_duration
+        );
         Ok(())
     }
 
-    /// Write an entry to the string_index table using prepared statement
-    async fn write_string_index(&self, entry: &StringIndexEntry) -> KairosResult<()> {
-        let key_bytes = entry.key().to_bytes();
-        let column_name = entry.index_column();
-        let value_bytes = vec![0u8]; // Empty value for string index
-
-        trace!("Writing string index entry: {}", column_name);
-
-        if let Some(ref prepared) = self.insert_string_index {
-            self.execute_prepared(prepared, (key_bytes, column_name, value_bytes))
-                .await?;
-        } else {
-            return Err(KairosError::cassandra(
-                "String index prepared statement not available",
-            ));
-        }
-
-        trace!("String index entry written successfully");
-        Ok(())
-    }
-
-    /// Write all indexing data for a batch of data points
-    async fn write_indexes(&self, batch: &DataPointBatch) -> KairosResult<()> {
+    /// Write indexes sequentially with bloom filter deduplication
+    async fn write_indexes_sequentially(
+        resources: &SharedCassandraResources,
+        batch: &DataPointBatch,
+        bloom_manager: &Arc<BloomManager>,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<u64> {
         let mut metric_names = HashSet::new();
         let mut tag_names = HashSet::new();
         let mut tag_values = HashSet::new();
+        let mut row_keys_entries = HashMap::new();
 
-        // Collect all unique metric names and tags
+        // Collect all unique metric names, tags, and row_keys entries
         for data_point in &batch.points {
             metric_names.insert(data_point.metric.as_str());
 
@@ -420,127 +534,274 @@ impl CassandraClientImpl {
                 tag_names.insert(tag_key.as_str());
                 tag_values.insert(tag_value.as_str());
             }
+
+            // Collect unique row_keys entries (one per unique combination of metric, row_time, data_type, tags)
+            let row_key = RowKey::from_data_point(data_point);
+            let data_type = match &data_point.value {
+                DataPointValue::Long(_) => "kairos_long",
+                DataPointValue::Double(_) => "kairos_double",
+                DataPointValue::Text(_) => "kairos_string",
+                DataPointValue::Complex { .. } => "kairos_complex",
+                DataPointValue::Binary(_) => "kairos_binary",
+                DataPointValue::Histogram(_) => "kairos_histogram_v2",
+            };
+
+            // Create a unique string key for this row_keys entry (since TagSet doesn't implement Hash/Eq)
+            let tags_string: String = {
+                let mut tag_pairs: Vec<_> = data_point
+                    .tags
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k.as_str(), v.as_str()))
+                    .collect();
+                tag_pairs.sort(); // Ensure consistent ordering
+                tag_pairs.join(",")
+            };
+
+            let row_keys_entry_key = format!(
+                "{}:data_points:{}:{}:{}",
+                data_point.metric.as_str(),
+                row_key.row_time.timestamp_millis(),
+                data_type,
+                tags_string
+            );
+            row_keys_entries.insert(row_keys_entry_key, data_point.clone());
         }
 
         trace!(
-            "Writing indexes for {} metrics, {} tag keys, {} tag values",
+            "Writing indexes for {} metrics, {} tag keys, {} tag values, {} row_keys entries",
             metric_names.len(),
             tag_names.len(),
-            tag_values.len()
+            tag_values.len(),
+            row_keys_entries.len()
         );
+
+        let mut indexes_written = 0u64;
 
         // Write metric name indexes (with bloom filter deduplication)
         for metric_name in metric_names {
             let bloom_key = format!("metric_name:{}", metric_name);
-            if self.bloom_manager.should_write_index(&bloom_key) {
+            if bloom_manager.should_write_index(&bloom_key) {
                 let entry = StringIndexEntry::metric_name(metric_name);
-                self.write_string_index(&entry).await?;
+                Self::write_string_index_sequentially(resources, &entry, stats).await?;
+                indexes_written += 1;
             }
         }
 
-        // Write tag name indexes (with bloom filter deduplication)
-        for tag_name in tag_names {
-            let bloom_key = format!("tag_name:{}", tag_name);
-            if self.bloom_manager.should_write_index(&bloom_key) {
-                let entry = StringIndexEntry::tag_name(tag_name);
-                self.write_string_index(&entry).await?;
-            }
-        }
+        // Write row_keys entries (with bloom filter deduplication)
+        for (unique_key, data_point) in &row_keys_entries {
+            // Use the unique key for bloom filtering
+            let bloom_key = format!("row_keys:{}", unique_key);
+            if bloom_manager.should_write_index(&bloom_key) {
+                let row_key = RowKey::from_data_point(data_point);
+                let metric_name = data_point.metric.as_str();
+                let table_name = "data_points";
+                let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
 
-        // Write tag value indexes (with bloom filter deduplication)
-        for tag_value in tag_values {
-            let bloom_key = format!("tag_value:{}", tag_value);
-            if self.bloom_manager.should_write_index(&bloom_key) {
-                let entry = StringIndexEntry::tag_value(tag_value);
-                self.write_string_index(&entry).await?;
-            }
-        }
-
-        // Write row key indexes (legacy and new format) with bloom filter deduplication
-        for data_point in &batch.points {
-            let row_key = RowKey::from_data_point(data_point);
-            
-            // Use a composite key that includes metric name and time bucket for row keys
-            // This ensures we don't skip legitimate row key updates for different time periods  
-            let time_bucket = data_point.timestamp.timestamp_millis() / (3600 * 1000); // Hour bucket
-            let row_key_bloom_key = format!("row_key:{}:{}", data_point.metric, time_bucket);
-            
-            if self.bloom_manager.should_write_index(&row_key_bloom_key) {
-                // Write to legacy row_key_index for backward compatibility
-                let entry = RowKeyIndexEntry::from_row_key(&row_key);
-                self.write_row_key_index(&entry).await?;
-
-                // Write to new row_keys and row_key_time_index tables used by Java KairosDB
-                let ttl = if data_point.ttl == 0 {
-                    None
-                } else {
-                    Some(data_point.ttl)
+                let data_type = match &data_point.value {
+                    DataPointValue::Long(_) => "kairos_long",
+                    DataPointValue::Double(_) => "kairos_double",
+                    DataPointValue::Text(_) => "kairos_string",
+                    DataPointValue::Complex { .. } => "kairos_complex",
+                    DataPointValue::Binary(_) => "kairos_binary",
+                    DataPointValue::Histogram(_) => "kairos_histogram_v2",
                 };
-                self.write_row_keys(&row_key, ttl).await?;
-                self.write_row_key_time_index(&row_key, ttl).await?;
+
+                let tags_map: HashMap<String, String> = data_point
+                    .tags
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+                    .collect();
+
+                // Generate proper UUID v1 timeuuid for mtime
+                let uuid = uuid::Uuid::now_v1(&[1, 2, 3, 4, 5, 6]);
+                let mtime = scylla::value::CqlTimeuuid::from_bytes(uuid.into_bytes());
+                let value: Option<String> = None;
+
+                match resources
+                    .session
+                    .execute_unpaged(
+                        &resources.insert_row_keys,
+                        (
+                            metric_name,
+                            table_name,
+                            row_time,
+                            data_type,
+                            tags_map,
+                            mtime,
+                            value,
+                        ),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                        stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                        indexes_written += 1;
+                    }
+                    Err(e) => {
+                        stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                        stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                        return Err(KairosError::cassandra(format!(
+                            "Failed to write row_keys: {}",
+                            e
+                        )));
+                    }
+                }
             }
         }
 
-        trace!("All indexes written successfully");
-        Ok(())
+        // NOTE: Java KairosDB does NOT write tag_names or tag_values during ingestion
+        // Only metric_names are written to string_index during ingestion
+        // Commenting out tag index writes to match Java KairosDB behavior exactly
+
+        // // Write tag name indexes (with bloom filter deduplication)
+        // for tag_name in tag_names {
+        //     let bloom_key = format!("tag_name:{}", tag_name);
+        //     if bloom_manager.should_write_index(&bloom_key) {
+        //         let entry = StringIndexEntry::tag_name(tag_name);
+        //         Self::write_string_index_sequentially(resources, &entry, stats).await?;
+        //         indexes_written += 1;
+        //     }
+        // }
+
+        // // Write tag value indexes (with bloom filter deduplication)
+        // for tag_value in tag_values {
+        //     let bloom_key = format!("tag_value:{}", tag_value);
+        //     if bloom_manager.should_write_index(&bloom_key) {
+        //         let entry = StringIndexEntry::tag_value(tag_value);
+        //         Self::write_string_index_sequentially(resources, &entry, stats).await?;
+        //         indexes_written += 1;
+        //     }
+        // }
+
+        trace!("All {} indexes written successfully", indexes_written);
+        Ok(indexes_written)
+    }
+
+    /// Write a string index entry sequentially
+    async fn write_string_index_sequentially(
+        resources: &SharedCassandraResources,
+        entry: &StringIndexEntry,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        let key_bytes = entry.key().to_bytes();
+        let column_name = entry.index_column();
+        let value_bytes = vec![0u8]; // Empty value for string index
+
+        match resources
+            .session
+            .execute_unpaged(
+                &resources.insert_string_index,
+                (key_bytes, column_name, value_bytes),
+            )
+            .await
+        {
+            Ok(_) => {
+                stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                Err(KairosError::cassandra(format!(
+                    "Failed to write string index: {}",
+                    e
+                )))
+            }
+        }
+    }
+
+    /// Write a row key time index entry for time-based queries
+    async fn write_row_key_time_index_entry(
+        resources: &SharedCassandraResources,
+        row_key: &RowKey,
+        stats: &Arc<MultiWorkerStats>,
+    ) -> KairosResult<()> {
+        // Extract values for row_key_time_index table
+        let metric_name = row_key.metric.as_str();
+        let table_name = "data_points"; // Always data_points table
+        let row_time = scylla::value::CqlTimestamp(row_key.row_time.timestamp_millis());
+
+        // Java KairosDB stores null in the value column - the presence of the row is what matters
+        let value: Option<String> = None;
+
+        match resources
+            .session
+            .execute_unpaged(
+                &resources.insert_row_key_time_index,
+                (metric_name, table_name, row_time, value),
+            )
+            .await
+        {
+            Ok(_) => {
+                stats.total_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                stats.failed_queries.fetch_add(1, Ordering::Relaxed);
+                stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                Err(KairosError::cassandra(format!(
+                    "Failed to write row_key_time_index: {}",
+                    e
+                )))
+            }
+        }
     }
 }
 
 #[async_trait]
-impl CassandraClient for CassandraClientImpl {
+impl CassandraClient for MultiWorkerCassandraClient {
     async fn write_batch(&self, batch: &DataPointBatch) -> KairosResult<()> {
-        if batch.points.is_empty() {
-            trace!("Empty batch, nothing to write");
-            return Ok(());
-        }
+        let start = std::time::Instant::now();
 
-        trace!("Writing batch of {} data points with async concurrency", batch.points.len());
-        self.stats
-            .total_datapoints
-            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
+        // Create work item with a unique queue key for response tracking
+        let queue_key = format!("direct_{}", uuid::Uuid::new_v4());
+        let work_item = WorkItem {
+            batch: batch.clone(),
+            queue_key: queue_key.clone(),
+        };
 
-        // Write all data points concurrently using async writes
-        let data_point_futures: Vec<_> = batch.points.iter().map(|data_point| {
-            let row_key = RowKey::from_data_point(data_point);
-            let column_name = ColumnName::from_timestamp(data_point.timestamp);
-            let cassandra_value = CassandraValue::from_data_point_value(&data_point.value, None);
-            
-            // Clone self and move values into the async block
-            let client = self.clone();
-            async move {
-                client.write_data_point(&row_key, &column_name, &cassandra_value).await
+        trace!(
+            "MultiWorker: Sending batch of {} points to worker pool",
+            batch.points.len()
+        );
+
+        // Send work item to worker pool via MPMC channel
+        self.work_tx
+            .send(work_item)
+            .map_err(|_| KairosError::cassandra("Worker pool unavailable"))?;
+
+        // Wait for response from worker via response channel
+        loop {
+            match self.response_rx.recv_async().await {
+                Ok(response) if response.queue_key == queue_key => {
+                    // Found our response
+                    match response.result {
+                        Ok(_) => break Ok(()),
+                        Err(e) => break Err(KairosError::cassandra(e)),
+                    }
+                }
+                Ok(_) => {
+                    // Not our response, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    break Err(KairosError::cassandra("Response channel closed"));
+                }
             }
-        }).collect();
+        }?;
 
-        // Execute all data point writes concurrently
-        let results = join_all(data_point_futures).await;
-        
-        // Check for any errors
-        for result in results {
-            result?;
-        }
-
-        // Write indexes with bloom filter deduplication
-        self.write_indexes(batch).await?;
-
-        trace!("Async batch written successfully");
+        let duration = start.elapsed();
+        trace!("MultiWorker: Batch write completed in {:?}", duration);
         Ok(())
     }
 
     async fn health_check(&self) -> KairosResult<bool> {
-        debug!("Performing health check");
-
-        match self.execute_query("SELECT now() FROM system.local").await {
-            Ok(_) => {
-                debug!("Health check passed");
-                Ok(true)
-            }
-            Err(e) => {
-                warn!("Health check failed: {}", e);
-                self.stats.connection_errors.fetch_add(1, Ordering::Relaxed);
-                Ok(false)
-            }
-        }
+        // Check if worker pool is available and active
+        let active_workers = self.stats.active_workers.load(Ordering::Relaxed);
+        Ok(active_workers > 0 && !self.work_tx.is_disconnected())
     }
 
     fn get_stats(&self) -> CassandraStats {
@@ -551,14 +812,60 @@ impl CassandraClient for CassandraClientImpl {
         self.get_stats_internal(true)
     }
 
+    async fn ensure_schema(&self) -> KairosResult<()> {
+        // Schema already created during initialization
+        info!("Schema already ensured during client initialization");
+        Ok(())
+    }
+}
+
+impl MultiWorkerCassandraClient {
     fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
-        let bloom_stats = self.bloom_manager.get_stats_with_options(include_ones_count);
-        
+        let bloom_stats = self
+            .shared_bloom_manager
+            .get_stats_with_options(include_ones_count);
+
+        // Calculate averages
+        let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
+        let index_writes = self.stats.index_writes.load(Ordering::Relaxed);
+        let total_batches = self.stats.batches_processed.load(Ordering::Relaxed).max(1);
+
+        let avg_datapoint_write_time_ms = if datapoint_writes > 0 {
+            (self
+                .stats
+                .total_datapoint_write_time_ns
+                .load(Ordering::Relaxed) as f64)
+                / (datapoint_writes as f64)
+                / 1_000_000.0
+        } else {
+            0.0
+        };
+
+        let avg_index_write_time_ms = if index_writes > 0 {
+            (self.stats.total_index_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (index_writes as f64)
+                / 1_000_000.0
+        } else {
+            0.0
+        };
+
+        let avg_batch_write_time_ms = if total_batches > 0 {
+            (self.stats.total_batch_write_time_ns.load(Ordering::Relaxed) as f64)
+                / (total_batches as f64)
+                / 1_000_000.0
+        } else {
+            0.0
+        };
+
         CassandraStats {
             total_queries: self.stats.total_queries.load(Ordering::Relaxed),
             failed_queries: self.stats.failed_queries.load(Ordering::Relaxed),
             total_datapoints_written: self.stats.total_datapoints.load(Ordering::Relaxed),
-            avg_batch_size: 0.0, // TODO: Calculate actual average batch size
+            avg_batch_size: if total_batches > 0 {
+                self.stats.total_datapoints.load(Ordering::Relaxed) as f64 / total_batches as f64
+            } else {
+                0.0
+            },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
             bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
@@ -569,81 +876,24 @@ impl CassandraClient for CassandraClientImpl {
             bloom_filter_total_memory_bytes: bloom_stats.total_memory_bytes,
             bloom_filter_primary_ones_count: bloom_stats.primary_ones_count,
             bloom_filter_secondary_ones_count: bloom_stats.secondary_ones_count,
+
+            // Detailed operation metrics
+            datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
+            datapoint_write_errors: self.stats.datapoint_write_errors.load(Ordering::Relaxed),
+            index_writes: self.stats.index_writes.load(Ordering::Relaxed),
+            index_write_errors: self.stats.index_write_errors.load(Ordering::Relaxed),
+            prepared_statement_cache_hits: 0, // Not applicable to multi-worker model
+            prepared_statement_cache_misses: 0,
+
+            // Worker-specific metrics instead of concurrency
+            current_concurrent_requests: self.stats.active_workers.load(Ordering::Relaxed),
+            max_concurrent_requests_reached: self.stats.active_workers.load(Ordering::Relaxed),
+            avg_semaphore_wait_time_ms: 0.0, // Not applicable - workers consume sequentially
+
+            // Timing metrics
+            avg_datapoint_write_time_ms,
+            avg_index_write_time_ms,
+            avg_batch_write_time_ms,
         }
-    }
-
-    async fn ensure_schema(&self) -> KairosResult<()> {
-        info!("Initializing KairosDB schema");
-
-        let keyspace = &self.config.keyspace;
-
-        // Create keyspace
-        let create_keyspace = format!(
-            "CREATE KEYSPACE IF NOT EXISTS {} WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': 1}}",
-            keyspace
-        );
-        self.execute_query(&create_keyspace).await?;
-
-        // Use keyspace
-        let use_keyspace = format!("USE {}", keyspace);
-        self.execute_query(&use_keyspace).await?;
-
-        // Create data_points table
-        let create_data_points = "
-            CREATE TABLE IF NOT EXISTS data_points (
-                key blob,
-                column1 blob,
-                value blob,
-                PRIMARY KEY (key, column1)
-            ) WITH COMPACT STORAGE AND CLUSTERING ORDER BY (column1 ASC)";
-        self.execute_query(create_data_points).await?;
-
-        // Create row_keys table (Java KairosDB new format)
-        let create_row_keys = "
-            CREATE TABLE IF NOT EXISTS row_keys (
-                metric text,
-                table_name text,
-                row_time timestamp,
-                data_type text,
-                tags frozen<map<text, text>>,
-                mtime timeuuid static,
-                value text,
-                PRIMARY KEY ((metric, table_name, row_time), data_type, tags)
-            ) WITH CLUSTERING ORDER BY (data_type ASC, tags ASC)";
-        self.execute_query(create_row_keys).await?;
-
-        // Create row_key_time_index table (Java KairosDB new format)
-        let create_row_key_time_index = "
-            CREATE TABLE IF NOT EXISTS row_key_time_index (
-                metric text,
-                table_name text,
-                row_time timestamp,
-                value text,
-                PRIMARY KEY (metric, table_name, row_time)
-            ) WITH CLUSTERING ORDER BY (table_name ASC, row_time ASC)";
-        self.execute_query(create_row_key_time_index).await?;
-
-        // Create row_key_index table
-        let create_row_key_index = "
-            CREATE TABLE IF NOT EXISTS row_key_index (
-                key blob,
-                column1 blob,
-                value blob,
-                PRIMARY KEY (key, column1)
-            ) WITH COMPACT STORAGE AND CLUSTERING ORDER BY (column1 ASC)";
-        self.execute_query(create_row_key_index).await?;
-
-        // Create string_index table
-        let create_string_index = "
-            CREATE TABLE IF NOT EXISTS string_index (
-                key blob,
-                column1 text,
-                value blob,
-                PRIMARY KEY (key, column1)
-            ) WITH COMPACT STORAGE";
-        self.execute_query(create_string_index).await?;
-
-        info!("KairosDB schema initialized successfully");
-        Ok(())
     }
 }

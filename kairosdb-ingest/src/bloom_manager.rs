@@ -291,7 +291,7 @@ fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> ScalableBloomFilter<
     // Create bloom filter with calculated optimal size and hash count
     // Note: Using default hasher, seed is used for future rotation logic
     const INITIAL_BITS: usize = (1 << 10) * 8 * 5; // Start with 5MB bit array
-    // const INITIAL_BITS: usize = (1 << 20) * 8 * 5; // Start with 5MB bit array
+                                                   // const INITIAL_BITS: usize = (1 << 20) * 8 * 5; // Start with 5MB bit array
     ScalableBloomFilter::new(INITIAL_BITS, config.false_positive_rate, 1.2, 1.0)
 }
 
@@ -299,20 +299,19 @@ fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> ScalableBloomFilter<
 /// This gets the real number of bits in the bloom filter
 fn calculate_bloom_memory_bytes(bloom_filter: &ScalableBloomFilter<String>) -> u64 {
     use std::mem;
-    
+
     // Get the size of the BloomFilter struct itself (stack allocation)
     let struct_size = mem::size_of_val(bloom_filter) as u64;
-    
+
     // Get the actual number of bits in the bloom filter
     let num_bits = bloom_filter.len() as u64;
-    
+
     // Convert bits to bytes (round up to nearest byte)
     let bit_vector_bytes = (num_bits + 7) / 8; // Equivalent to ceiling division
-    
+
     // Total memory = struct size + bit vector + some overhead for Vec metadata
     struct_size + bit_vector_bytes + 64
 }
-
 
 /// Generate a random seed for hash functions
 fn generate_random_seed() -> u64 {
@@ -446,25 +445,25 @@ mod tests {
     #[test]
     fn test_bloom_ones_count() {
         let manager = BloomManager::new();
-        
+
         // Get stats without ones count (fast)
         let stats_no_ones = manager.get_stats();
         assert!(stats_no_ones.primary_ones_count.is_none());
         assert!(stats_no_ones.secondary_ones_count.is_none());
-        
+
         // Get stats with ones count (expensive)
         let stats_with_ones = manager.get_stats_with_options(true);
         assert!(stats_with_ones.primary_ones_count.is_some());
         assert!(stats_with_ones.secondary_ones_count.is_none()); // No secondary initially
-        
+
         // Add some items to set bits in the bloom filter
         assert!(manager.should_write_index("test.metric.1"));
         assert!(manager.should_write_index("test.metric.2"));
         assert!(manager.should_write_index("test.metric.3"));
-        
+
         let stats_after_adds = manager.get_stats_with_options(true);
         let ones_count = stats_after_adds.primary_ones_count.unwrap();
-        
+
         // Should have some bits set after adding items
         assert!(ones_count > 0);
         // Should be reasonable number for a few items

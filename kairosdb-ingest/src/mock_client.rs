@@ -199,7 +199,7 @@ impl CassandraClient for MockCassandraClient {
             bloom_filter_primary_age_seconds: 0,
             bloom_filter_expected_items: 0,
             bloom_filter_false_positive_rate: 0.0,
-            bloom_filter_primary_memory_bytes: 12500, // Mock values for testing  
+            bloom_filter_primary_memory_bytes: 12500, // Mock values for testing
             bloom_filter_secondary_memory_bytes: None,
             bloom_filter_total_memory_bytes: 12500,
             bloom_filter_primary_ones_count: None, // Not calculated in mock

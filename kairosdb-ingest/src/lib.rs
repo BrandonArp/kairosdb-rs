@@ -6,7 +6,7 @@
 // Core modules
 pub mod bloom_manager;
 pub mod cassandra;
-// pub mod cassandra_client;  // Temporarily disabled - using multi_writer_client
+pub mod cassandra_client;
 pub mod config;
 pub mod handlers;
 pub mod http_metrics;
@@ -15,9 +15,7 @@ pub mod json_parser;
 pub mod memory_queue;
 pub mod metrics;
 pub mod mock_client;
-pub mod multi_writer_client;
 pub mod persistent_queue;
-pub mod single_writer_client; // Deprecated - will be removed
 
 // Re-export commonly used types
 pub use config::IngestConfig;

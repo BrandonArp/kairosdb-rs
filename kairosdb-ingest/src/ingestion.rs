@@ -26,8 +26,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
+    cassandra_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     config::IngestConfig,
-    multi_writer_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     persistent_queue::PersistentQueue,
 };
 
@@ -1102,10 +1102,13 @@ mod tests {
             .prometheus_metrics
             .bloom_filter_secondary_ones_gauge
             .get();
-        
+
         // Mock client doesn't provide actual ones count, but the metrics should still be initialized
         // Primary ones gauge should be 0 (not set since mock returns None)
         // Secondary ones gauge should be 0 (explicitly set when None)
-        assert_eq!(secondary_ones, 0.0, "Secondary ones gauge should be 0 when no secondary filter");
+        assert_eq!(
+            secondary_ones, 0.0,
+            "Secondary ones gauge should be 0 when no secondary filter"
+        );
     }
 }
