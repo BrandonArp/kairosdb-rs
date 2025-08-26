@@ -51,22 +51,6 @@ impl KairosSchema {
         )
     }
 
-    /// Generate CQL for creating the row_key_index table
-    pub fn create_row_key_index_table_cql(&self) -> String {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {}.row_key_index (
-                key blob,
-                column1 blob,
-                value blob,
-                PRIMARY KEY (key, column1)
-            ) WITH COMPACT STORAGE
-            AND compression = {{'class': 'LZ4Compressor'}}
-            AND compaction = {{'class': 'SizeTieredCompactionStrategy'}}
-            AND gc_grace_seconds = 864000;",
-            self.keyspace
-        )
-    }
-
     /// Generate CQL for creating the string_index table
     pub fn create_string_index_table_cql(&self) -> String {
         format!(
@@ -124,7 +108,6 @@ impl KairosSchema {
         vec![
             self.create_keyspace_cql(),
             self.create_data_points_table_cql(),
-            self.create_row_key_index_table_cql(),
             self.create_row_key_time_index_table_cql(),
             self.create_row_keys_table_cql(),
             self.create_string_index_table_cql(),
@@ -216,90 +199,6 @@ impl IndexType {
     /// Get the index key bytes for Cassandra
     pub fn key_bytes(&self) -> Vec<u8> {
         self.as_str().as_bytes().to_vec()
-    }
-}
-
-/// Row key index entry for efficient querying
-#[derive(Debug, Clone)]
-pub struct RowKeyIndexEntry {
-    /// The metric name
-    pub metric_name: String,
-    /// The data type
-    pub data_type: String,
-    /// The row time timestamp
-    pub row_time: i64,
-    /// The tags in Cassandra format
-    pub tags: String,
-}
-
-impl RowKeyIndexEntry {
-    /// Create from a RowKey
-    pub fn from_row_key(row_key: &crate::cassandra::RowKey) -> Self {
-        Self {
-            metric_name: row_key.metric.as_str().to_string(),
-            data_type: row_key.data_type.clone(),
-            row_time: row_key.row_time.timestamp_millis(),
-            tags: row_key.tags.clone(),
-        }
-    }
-
-    /// Create the index key for this entry
-    pub fn index_key(&self) -> Vec<u8> {
-        // Use metric name + data type as the partition key
-        format!("{}:{}", self.metric_name, self.data_type).into_bytes()
-    }
-
-    /// Get the key as bytes for Cassandra
-    pub fn key(&self) -> IndexKey {
-        IndexKey {
-            bytes: self.index_key(),
-        }
-    }
-
-    /// Get the column as bytes for Cassandra
-    pub fn column(&self) -> IndexColumn {
-        IndexColumn {
-            bytes: self.index_column(),
-        }
-    }
-
-    /// Get the value as bytes for Cassandra
-    pub fn value(&self) -> IndexValue {
-        IndexValue {
-            bytes: self.index_value(),
-        }
-    }
-
-    /// Create the index column for this entry
-    pub fn index_column(&self) -> Vec<u8> {
-        // Use row time + tags as the clustering column
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.row_time.to_be_bytes());
-        bytes.extend_from_slice(self.tags.as_bytes());
-        bytes
-    }
-
-    /// Create the index value for this entry
-    pub fn index_value(&self) -> Vec<u8> {
-        // The value is the actual row key bytes
-        let mut bytes = Vec::new();
-
-        // Encode the full row key
-        let metric_bytes = self.metric_name.as_bytes();
-        bytes.extend_from_slice(&(metric_bytes.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(metric_bytes);
-
-        let type_bytes = self.data_type.as_bytes();
-        bytes.extend_from_slice(&(type_bytes.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(type_bytes);
-
-        bytes.extend_from_slice(&self.row_time.to_be_bytes());
-
-        let tags_bytes = self.tags.as_bytes();
-        bytes.extend_from_slice(&(tags_bytes.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(tags_bytes);
-
-        bytes
     }
 }
 
@@ -415,7 +314,7 @@ mod tests {
         assert!(schema.validate().is_ok());
 
         let cql_statements = schema.create_schema_cql();
-        assert_eq!(cql_statements.len(), 6); // keyspace + 5 tables
+        assert_eq!(cql_statements.len(), 5); // keyspace + 4 tables
 
         // Check keyspace creation
         assert!(cql_statements[0].contains("CREATE KEYSPACE"));
@@ -442,24 +341,6 @@ mod tests {
         assert_eq!(IndexType::MetricNames.as_str(), "metric_names");
         assert_eq!(IndexType::TagNames.as_str(), "tag_names");
         assert_eq!(IndexType::TagValues.as_str(), "tag_values");
-    }
-
-    #[test]
-    fn test_row_key_index_entry() {
-        let entry = RowKeyIndexEntry {
-            metric_name: "test.metric".to_string(),
-            data_type: "kairos_long".to_string(),
-            row_time: 1234567890000,
-            tags: "host=server1".to_string(),
-        };
-
-        let key = entry.index_key();
-        let column = entry.index_column();
-        let value = entry.index_value();
-
-        assert!(!key.is_empty());
-        assert!(!column.is_empty());
-        assert!(!value.is_empty());
     }
 
     #[test]

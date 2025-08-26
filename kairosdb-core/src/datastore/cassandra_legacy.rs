@@ -215,7 +215,7 @@ impl CassandraLegacyStore {
     }
 
     /// Query the row_keys table to find all series for a metric in the time range
-    async fn query_row_key_index(
+    async fn query_row_keys_for_metric(
         &self,
         metric: &MetricName,
         _time_range: TimeRange,
@@ -399,8 +399,8 @@ impl TimeSeriesStore for CassandraLegacyStore {
         tags: &TagFilter,
         time_range: TimeRange,
     ) -> KairosResult<Vec<DataPoint>> {
-        // Phase 1: Query row_key_index to find all series for this metric
-        let row_keys = self.query_row_key_index(metric, time_range.clone()).await?;
+        // Phase 1: Query row_keys table to find all series for this metric
+        let row_keys = self.query_row_keys_for_metric(metric, time_range.clone()).await?;
 
         // Phase 2: Filter row keys by tag criteria
         let filtered_keys: Vec<_> = row_keys

@@ -9,7 +9,6 @@ use crate::time::Timestamp;
 #[derive(Debug, Clone)]
 pub struct TableNames {
     pub data_points: &'static str,
-    pub row_key_index: &'static str,
     pub string_index: &'static str,
 }
 
@@ -17,7 +16,6 @@ impl Default for TableNames {
     fn default() -> Self {
         Self {
             data_points: "data_points",
-            row_key_index: "row_key_index",
             string_index: "string_index",
         }
     }

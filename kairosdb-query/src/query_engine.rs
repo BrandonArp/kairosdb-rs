@@ -219,7 +219,7 @@ impl QueryEngine {
         _time_range: &TimeRange,
     ) -> KairosResult<Vec<TimeSeriesInfo>> {
         // In a real implementation, this would:
-        // 1. Query the row_key_index table to find matching row keys
+        // 1. Query the row_keys table to find matching row keys
         // 2. Filter by tag constraints
         // 3. Return metadata about each matching time series
 
