@@ -266,8 +266,8 @@ pub struct BloomStats {
 fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> ScalableBloomFilter<String> {
     // Create bloom filter with calculated optimal size and hash count
     // Note: Using default hasher, seed is used for future rotation logic
-
-    ScalableBloomFilter::new(100000, config.false_positive_rate, 1.2, 1.0)
+    const INITIAL_BITS: usize = 2 ^ 20 * 8 * 5; // Start with 5MB bit array
+    ScalableBloomFilter::new(INITIAL_BITS, config.false_positive_rate, 1.2, 1.0)
 }
 
 /// Calculate actual memory usage of a bloom filter using the len() method

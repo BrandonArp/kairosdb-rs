@@ -987,31 +987,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingestion_service_creation() {
-        // Set environment variable to use mock Cassandra client
-        std::env::set_var("USE_MOCK_CASSANDRA", "true");
-
         let config = Arc::new(IngestConfig::default());
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
-        let service = IngestionService::new(config, shutdown_token).await;
+        let service = IngestionService::new_with_mock(config).await;
         assert!(service.is_ok());
-
-        // Clean up environment variable
-        std::env::remove_var("USE_MOCK_CASSANDRA");
     }
 
     #[tokio::test]
     async fn test_batch_ingestion() {
         use kairosdb_core::{datapoint::DataPoint, time::Timestamp};
 
-        // Set environment variable to use mock Cassandra client
-        std::env::set_var("USE_MOCK_CASSANDRA", "true");
-
         let mut config = IngestConfig::default();
         // Set high queue size limit for testing to avoid triggering backpressure
         config.ingestion.max_queue_size = 100000;
         let config = Arc::new(config);
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
-        let service = IngestionService::new(config, shutdown_token).await.unwrap();
+        let service = IngestionService::new_with_mock(config).await.unwrap();
 
         let mut batch = DataPointBatch::new();
         batch
@@ -1024,9 +1013,6 @@ mod tests {
         let metrics = service.get_metrics_snapshot();
         assert_eq!(metrics.batches_processed, 1);
         assert_eq!(metrics.datapoints_ingested, 1);
-
-        // Clean up environment variable
-        std::env::remove_var("USE_MOCK_CASSANDRA");
     }
 
     #[test]
@@ -1045,12 +1031,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_bloom_memory_metrics() {
-        // Set environment variable to use mock Cassandra client
-        std::env::set_var("USE_MOCK_CASSANDRA", "true");
-
         let config = Arc::new(IngestConfig::default());
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
-        let service = IngestionService::new(config, shutdown_token).await.unwrap();
+        let service = IngestionService::new_with_mock(config).await.unwrap();
 
         // Get initial metrics snapshot
         let metrics = service.get_metrics_snapshot();
@@ -1075,8 +1057,5 @@ mod tests {
             prometheus_value as u64, metrics.bloom_memory_usage,
             "Prometheus metric should match atomic metric"
         );
-
-        // Clean up environment variable
-        std::env::remove_var("USE_MOCK_CASSANDRA");
     }
 }
