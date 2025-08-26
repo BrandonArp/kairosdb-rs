@@ -92,6 +92,7 @@ pub struct MultiWorkerCassandraClient {
     response_rx: Receiver<WorkResponse>, // For backward compatibility with write_batch
     stats: Arc<MultiWorkerStats>,
     shared_resources: SharedCassandraResources, // Keep for schema operations
+    shared_bloom_manager: Arc<BloomManager>, // Shared across all workers
     _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
 }
 
@@ -129,6 +130,9 @@ impl MultiWorkerCassandraClient {
         // Create shared stats
         let stats = Arc::new(MultiWorkerStats::default());
 
+        // Create shared bloom manager for all workers
+        let shared_bloom_manager = Arc::new(BloomManager::new());
+
         // Spawn worker tasks
         let mut worker_handles = Vec::with_capacity(num_workers);
         for worker_id in 0..num_workers {
@@ -138,6 +142,7 @@ impl MultiWorkerCassandraClient {
                 response_tx.clone(),
                 shared_resources.clone(),
                 stats.clone(),
+                shared_bloom_manager.clone(),
                 shutdown_token.clone(),
             );
             worker_handles.push(worker_handle);
@@ -157,6 +162,7 @@ impl MultiWorkerCassandraClient {
             response_rx,
             stats,
             shared_resources: shared_resources.clone(),
+            shared_bloom_manager,
             _worker_handles: worker_handles,
         })
     }
@@ -320,11 +326,12 @@ impl MultiWorkerCassandraClient {
         response_tx: Sender<WorkResponse>,
         shared_resources: SharedCassandraResources,
         stats: Arc<MultiWorkerStats>,
+        shared_bloom_manager: Arc<BloomManager>,
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             // info!("Worker {} started", worker_id);
-            let mut bloom_manager = BloomManager::new(); // Each worker gets its own bloom filter
+            // Use shared bloom manager instead of individual ones
 
             loop {
                 let work_item = tokio::select! {
@@ -352,7 +359,7 @@ impl MultiWorkerCassandraClient {
                 let result = Self::process_batch_sequentially(
                     &shared_resources,
                     &work_item.batch,
-                    &mut bloom_manager,
+                    &shared_bloom_manager,
                     &stats,
                 )
                 .await;
@@ -417,7 +424,7 @@ impl MultiWorkerCassandraClient {
     async fn process_batch_sequentially(
         resources: &SharedCassandraResources,
         batch: &DataPointBatch,
-        bloom_manager: &mut BloomManager,
+        bloom_manager: &Arc<BloomManager>,
         stats: &Arc<MultiWorkerStats>,
     ) -> KairosResult<()> {
         if batch.points.is_empty() {
@@ -510,7 +517,7 @@ impl MultiWorkerCassandraClient {
     async fn write_indexes_sequentially(
         resources: &SharedCassandraResources,
         batch: &DataPointBatch,
-        bloom_manager: &mut BloomManager,
+        bloom_manager: &Arc<BloomManager>,
         stats: &Arc<MultiWorkerStats>,
     ) -> KairosResult<u64> {
         let mut metric_names = HashSet::new();
@@ -797,7 +804,23 @@ impl CassandraClient for MultiWorkerCassandraClient {
     }
 
     fn get_stats(&self) -> CassandraStats {
-        let bloom_stats = BloomManager::new().get_stats(); // Placeholder
+        self.get_stats_internal(false)
+    }
+
+    fn get_detailed_stats(&self) -> CassandraStats {
+        self.get_stats_internal(true)
+    }
+
+    async fn ensure_schema(&self) -> KairosResult<()> {
+        // Schema already created during initialization
+        info!("Schema already ensured during client initialization");
+        Ok(())
+    }
+}
+
+impl MultiWorkerCassandraClient {
+    fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
+        let bloom_stats = self.shared_bloom_manager.get_stats_with_options(include_ones_count);
 
         // Calculate averages
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
@@ -845,6 +868,11 @@ impl CassandraClient for MultiWorkerCassandraClient {
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
             bloom_filter_expected_items: bloom_stats.expected_items,
             bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
+            bloom_filter_primary_memory_bytes: bloom_stats.primary_memory_bytes,
+            bloom_filter_secondary_memory_bytes: bloom_stats.secondary_memory_bytes,
+            bloom_filter_total_memory_bytes: bloom_stats.total_memory_bytes,
+            bloom_filter_primary_ones_count: bloom_stats.primary_ones_count,
+            bloom_filter_secondary_ones_count: bloom_stats.secondary_ones_count,
 
             // Detailed operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
@@ -864,11 +892,5 @@ impl CassandraClient for MultiWorkerCassandraClient {
             avg_index_write_time_ms,
             avg_batch_write_time_ms,
         }
-    }
-
-    async fn ensure_schema(&self) -> KairosResult<()> {
-        // Schema already created during initialization
-        info!("Schema already ensured during client initialization");
-        Ok(())
     }
 }

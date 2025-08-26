@@ -208,8 +208,13 @@ impl BloomManager {
         }
     }
 
-    /// Get statistics about the bloom filters
+    /// Get basic statistics about the bloom filters (without expensive calculations)
     pub fn get_stats(&self) -> BloomStats {
+        self.get_stats_with_options(false)
+    }
+
+    /// Get detailed statistics about the bloom filters with optional expensive calculations
+    pub fn get_stats_with_options(&self, include_ones_count: bool) -> BloomStats {
         let state = self.state.read();
         let primary_age = state.primary_created.elapsed();
         let secondary_age = state.secondary_created.map(|created| created.elapsed());
@@ -223,6 +228,19 @@ impl BloomManager {
         };
         let total_memory_bytes = primary_memory_bytes + secondary_memory_bytes.unwrap_or(0);
 
+        // Calculate ones count only if requested (expensive operation)
+        let (primary_ones_count, secondary_ones_count) = if include_ones_count {
+            let primary_ones = Some(state.primary.count_ones() as u64);
+            let secondary_ones = if let Some(ref secondary) = state.secondary {
+                Some(secondary.count_ones() as u64)
+            } else {
+                None
+            };
+            (primary_ones, secondary_ones)
+        } else {
+            (None, None)
+        };
+
         BloomStats {
             primary_age_seconds: primary_age.as_secs(),
             secondary_age_seconds: secondary_age.map(|age| age.as_secs()),
@@ -234,6 +252,8 @@ impl BloomManager {
             primary_memory_bytes,
             secondary_memory_bytes,
             total_memory_bytes,
+            primary_ones_count,
+            secondary_ones_count,
         }
     }
 }
@@ -260,13 +280,18 @@ pub struct BloomStats {
     pub secondary_memory_bytes: Option<u64>,
     /// Total estimated memory usage in bytes
     pub total_memory_bytes: u64,
+    /// Number of set bits in primary bloom filter (expensive to calculate)
+    pub primary_ones_count: Option<u64>,
+    /// Number of set bits in secondary bloom filter (expensive to calculate)
+    pub secondary_ones_count: Option<u64>,
 }
 
 /// Create a bloom filter with specific configuration and hash seed
 fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> ScalableBloomFilter<String> {
     // Create bloom filter with calculated optimal size and hash count
     // Note: Using default hasher, seed is used for future rotation logic
-    const INITIAL_BITS: usize = 2 ^ 20 * 8 * 5; // Start with 5MB bit array
+    const INITIAL_BITS: usize = (1 << 10) * 8 * 5; // Start with 5MB bit array
+    // const INITIAL_BITS: usize = (1 << 20) * 8 * 5; // Start with 5MB bit array
     ScalableBloomFilter::new(INITIAL_BITS, config.false_positive_rate, 1.2, 1.0)
 }
 
@@ -416,5 +441,33 @@ mod tests {
             overlap_stats.total_memory_bytes,
             overlap_stats.primary_memory_bytes + overlap_stats.secondary_memory_bytes.unwrap()
         );
+    }
+
+    #[test]
+    fn test_bloom_ones_count() {
+        let manager = BloomManager::new();
+        
+        // Get stats without ones count (fast)
+        let stats_no_ones = manager.get_stats();
+        assert!(stats_no_ones.primary_ones_count.is_none());
+        assert!(stats_no_ones.secondary_ones_count.is_none());
+        
+        // Get stats with ones count (expensive)
+        let stats_with_ones = manager.get_stats_with_options(true);
+        assert!(stats_with_ones.primary_ones_count.is_some());
+        assert!(stats_with_ones.secondary_ones_count.is_none()); // No secondary initially
+        
+        // Add some items to set bits in the bloom filter
+        assert!(manager.should_write_index("test.metric.1"));
+        assert!(manager.should_write_index("test.metric.2"));
+        assert!(manager.should_write_index("test.metric.3"));
+        
+        let stats_after_adds = manager.get_stats_with_options(true);
+        let ones_count = stats_after_adds.primary_ones_count.unwrap();
+        
+        // Should have some bits set after adding items
+        assert!(ones_count > 0);
+        // Should be reasonable number for a few items
+        assert!(ones_count < 1000); // Shouldn't be too high for just 3 items
     }
 }

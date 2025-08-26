@@ -178,6 +178,10 @@ impl CassandraClient for MockCassandraClient {
     }
 
     fn get_stats(&self) -> CassandraStats {
+        self.get_detailed_stats() // Mock client doesn't differentiate
+    }
+
+    fn get_detailed_stats(&self) -> CassandraStats {
         let total_queries = self.stats.total_queries.load(Ordering::Relaxed);
         let total_datapoints = self.stats.total_datapoints.load(Ordering::Relaxed);
 
@@ -195,6 +199,11 @@ impl CassandraClient for MockCassandraClient {
             bloom_filter_primary_age_seconds: 0,
             bloom_filter_expected_items: 0,
             bloom_filter_false_positive_rate: 0.0,
+            bloom_filter_primary_memory_bytes: 12500, // Mock values for testing  
+            bloom_filter_secondary_memory_bytes: None,
+            bloom_filter_total_memory_bytes: 12500,
+            bloom_filter_primary_ones_count: None, // Not calculated in mock
+            bloom_filter_secondary_ones_count: None,
 
             // Mock detailed metrics (all zeros since mock doesn't track them)
             datapoint_writes: total_datapoints,
@@ -306,5 +315,19 @@ mod tests {
 
         // Verify the histogram was stored (it would be serialized to V2 format)
         assert!(client.has_operation("write_batch(1 points)"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_detailed_stats() {
+        let client = MockCassandraClient::new();
+
+        // Regular stats should have None for ones count
+        let stats = client.get_stats();
+        assert!(stats.bloom_filter_primary_ones_count.is_none());
+        assert!(stats.bloom_filter_secondary_ones_count.is_none());
+
+        // Detailed stats should have Some values for ones count (mock values)
+        let detailed_stats = client.get_detailed_stats();
+        assert!(detailed_stats.bloom_filter_primary_ones_count.is_none()); // Mock still returns None since it's not calculating actual ones
     }
 }

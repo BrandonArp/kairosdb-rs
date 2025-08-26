@@ -19,6 +19,11 @@ pub struct CassandraStats {
     pub bloom_filter_primary_age_seconds: u64,
     pub bloom_filter_expected_items: u64,
     pub bloom_filter_false_positive_rate: f64,
+    pub bloom_filter_primary_memory_bytes: u64,
+    pub bloom_filter_secondary_memory_bytes: Option<u64>,
+    pub bloom_filter_total_memory_bytes: u64,
+    pub bloom_filter_primary_ones_count: Option<u64>,
+    pub bloom_filter_secondary_ones_count: Option<u64>,
 
     // Detailed Cassandra operation metrics
     pub datapoint_writes: u64,
@@ -50,6 +55,9 @@ pub trait CassandraClient: Send + Sync {
 
     /// Get client statistics
     fn get_stats(&self) -> CassandraStats;
+
+    /// Get detailed client statistics with expensive calculations (for health checks)
+    fn get_detailed_stats(&self) -> CassandraStats;
 
     /// Initialize/verify the KairosDB schema
     async fn ensure_schema(&self) -> KairosResult<()>;

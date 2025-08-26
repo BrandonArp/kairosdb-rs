@@ -52,13 +52,14 @@ enum WriteCommand {
 pub struct SingleWriterCassandraClient {
     write_tx: mpsc::UnboundedSender<WriteCommand>,
     stats: Arc<CassandraClientStats>,
+    bloom_manager: Arc<BloomManager>, // Reference to shared bloom manager
 }
 
 /// Internal writer task state (shared across concurrent operations)
 struct WriterTaskState {
     session: Arc<Session>, // Arc needed for sharing across concurrent tasks
     config: Arc<CassandraConfig>,
-    bloom_manager: BloomManager,
+    bloom_manager: Arc<BloomManager>, // Shared across all concurrent tasks
     stats: Arc<CassandraClientStats>,
     // Concurrency control
     semaphore: Arc<Semaphore>,
@@ -183,7 +184,7 @@ impl SingleWriterCassandraClient {
         let mut writer_state = WriterTaskState {
             session: Arc::new(session),
             config: config.clone(),
-            bloom_manager: BloomManager::new(),
+            bloom_manager: Arc::new(BloomManager::new()),
             stats: stats.clone(),
             semaphore,
             insert_data_point: None,
@@ -199,12 +200,19 @@ impl SingleWriterCassandraClient {
         // Create channel for write commands
         let (write_tx, write_rx) = mpsc::unbounded_channel();
 
+        // Clone the bloom manager before moving writer_state
+        let bloom_manager = writer_state.bloom_manager.clone();
+
         // Spawn single writer task
         tokio::spawn(Self::writer_task(writer_state, write_rx));
 
         info!("Single writer task started successfully");
 
-        Ok(Self { write_tx, stats })
+        Ok(Self { 
+            write_tx, 
+            stats, 
+            bloom_manager,
+        })
     }
 
     /// The high-concurrency writer task - handles multiple concurrent Cassandra writes
@@ -616,7 +624,7 @@ impl WriterTaskState {
         Self {
             session: Arc::clone(&self.session), // Share the Arc<Session>
             config: Arc::clone(&self.config),
-            bloom_manager: BloomManager::new(), // Each concurrent task gets its own bloom filter
+            bloom_manager: Arc::clone(&self.bloom_manager), // Share the same bloom filter
             stats: Arc::clone(&self.stats),
             semaphore: Arc::clone(&self.semaphore),
             insert_data_point: self.insert_data_point.clone(),
@@ -951,7 +959,24 @@ impl CassandraClient for SingleWriterCassandraClient {
     }
 
     fn get_stats(&self) -> CassandraStats {
-        let bloom_stats = BloomManager::new().get_stats(); // Placeholder - would need writer task stats
+        self.get_stats_internal(false)
+    }
+
+    fn get_detailed_stats(&self) -> CassandraStats {
+        self.get_stats_internal(true)
+    }
+
+    async fn ensure_schema(&self) -> KairosResult<()> {
+        // Schema operations could be sent to writer task or handled separately
+        // For now, assume schema is already created
+        info!("Schema assumed to be present");
+        Ok(())
+    }
+}
+
+impl SingleWriterCassandraClient {
+    fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
+        let bloom_stats = self.bloom_manager.get_stats_with_options(include_ones_count);
 
         // Calculate average timing metrics
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
@@ -1009,6 +1034,11 @@ impl CassandraClient for SingleWriterCassandraClient {
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
             bloom_filter_expected_items: bloom_stats.expected_items,
             bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
+            bloom_filter_primary_memory_bytes: bloom_stats.primary_memory_bytes,
+            bloom_filter_secondary_memory_bytes: bloom_stats.secondary_memory_bytes,
+            bloom_filter_total_memory_bytes: bloom_stats.total_memory_bytes,
+            bloom_filter_primary_ones_count: bloom_stats.primary_ones_count,
+            bloom_filter_secondary_ones_count: bloom_stats.secondary_ones_count,
 
             // Detailed Cassandra operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
@@ -1037,12 +1067,5 @@ impl CassandraClient for SingleWriterCassandraClient {
             avg_index_write_time_ms,
             avg_batch_write_time_ms,
         }
-    }
-
-    async fn ensure_schema(&self) -> KairosResult<()> {
-        // Schema operations could be sent to writer task or handled separately
-        // For now, assume schema is already created
-        info!("Schema assumed to be present");
-        Ok(())
     }
 }

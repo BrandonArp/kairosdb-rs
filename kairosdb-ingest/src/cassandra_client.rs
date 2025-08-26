@@ -544,7 +544,15 @@ impl CassandraClient for CassandraClientImpl {
     }
 
     fn get_stats(&self) -> CassandraStats {
-        let bloom_stats = self.bloom_manager.get_stats();
+        self.get_stats_internal(false)
+    }
+
+    fn get_detailed_stats(&self) -> CassandraStats {
+        self.get_stats_internal(true)
+    }
+
+    fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
+        let bloom_stats = self.bloom_manager.get_stats_with_options(include_ones_count);
         
         CassandraStats {
             total_queries: self.stats.total_queries.load(Ordering::Relaxed),
@@ -556,6 +564,11 @@ impl CassandraClient for CassandraClientImpl {
             bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
             bloom_filter_expected_items: bloom_stats.expected_items,
             bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
+            bloom_filter_primary_memory_bytes: bloom_stats.primary_memory_bytes,
+            bloom_filter_secondary_memory_bytes: bloom_stats.secondary_memory_bytes,
+            bloom_filter_total_memory_bytes: bloom_stats.total_memory_bytes,
+            bloom_filter_primary_ones_count: bloom_stats.primary_ones_count,
+            bloom_filter_secondary_ones_count: bloom_stats.secondary_ones_count,
         }
     }
 

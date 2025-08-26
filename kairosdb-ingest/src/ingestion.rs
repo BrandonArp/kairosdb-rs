@@ -79,6 +79,8 @@ pub struct PrometheusMetrics {
     pub work_channel_avg_utilization_gauge: Gauge,
     pub response_channel_avg_utilization_gauge: Gauge,
     pub bloom_memory_usage_gauge: Gauge,
+    pub bloom_filter_primary_ones_gauge: Gauge,
+    pub bloom_filter_secondary_ones_gauge: Gauge,
 }
 
 /// Main ingestion service that handles data point processing
@@ -770,16 +772,12 @@ impl IngestionService {
 
     /// Update bloom filter memory usage metrics
     fn update_bloom_memory_metrics(&self) {
-        use crate::bloom_manager::BloomManager;
-
-        // Create a sample bloom manager to calculate memory usage
-        // In a production system, this should be collected from actual workers
-        let sample_bloom = BloomManager::new();
-        let bloom_stats = sample_bloom.get_stats();
+        // Get detailed bloom stats from the Cassandra client (includes expensive ones count)
+        let cassandra_stats = self.cassandra_client.get_detailed_stats();
 
         // Update atomic metrics
         self.metrics.bloom_memory_usage.store(
-            bloom_stats.total_memory_bytes,
+            cassandra_stats.bloom_filter_total_memory_bytes,
             std::sync::atomic::Ordering::Relaxed,
         );
 
@@ -787,7 +785,28 @@ impl IngestionService {
         self.metrics
             .prometheus_metrics
             .bloom_memory_usage_gauge
-            .set(bloom_stats.total_memory_bytes as f64);
+            .set(cassandra_stats.bloom_filter_total_memory_bytes as f64);
+
+        // Update bloom filter ones count metrics
+        if let Some(primary_ones) = cassandra_stats.bloom_filter_primary_ones_count {
+            self.metrics
+                .prometheus_metrics
+                .bloom_filter_primary_ones_gauge
+                .set(primary_ones as f64);
+        }
+
+        if let Some(secondary_ones) = cassandra_stats.bloom_filter_secondary_ones_count {
+            self.metrics
+                .prometheus_metrics
+                .bloom_filter_secondary_ones_gauge
+                .set(secondary_ones as f64);
+        } else {
+            // Clear secondary gauge when no secondary filter exists
+            self.metrics
+                .prometheus_metrics
+                .bloom_filter_secondary_ones_gauge
+                .set(0.0);
+        }
     }
 
     /// Get current metrics snapshot
@@ -915,6 +934,18 @@ impl PrometheusMetrics {
         )
         .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge7", "test").unwrap());
 
+        let bloom_filter_primary_ones_gauge = register_gauge!(
+            format!("kairosdb_bloom_filter_primary_ones{}", suffix),
+            "Number of set bits in primary bloom filter"
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge8", "test").unwrap());
+
+        let bloom_filter_secondary_ones_gauge = register_gauge!(
+            format!("kairosdb_bloom_filter_secondary_ones{}", suffix),
+            "Number of set bits in secondary bloom filter"
+        )
+        .unwrap_or_else(|_| prometheus::Gauge::new("test_gauge9", "test").unwrap());
+
         Ok(Self {
             datapoints_total,
             batches_total,
@@ -926,6 +957,8 @@ impl PrometheusMetrics {
             work_channel_avg_utilization_gauge,
             response_channel_avg_utilization_gauge,
             bloom_memory_usage_gauge,
+            bloom_filter_primary_ones_gauge,
+            bloom_filter_secondary_ones_gauge,
         })
     }
 }
@@ -1057,5 +1090,22 @@ mod tests {
             prometheus_value as u64, metrics.bloom_memory_usage,
             "Prometheus metric should match atomic metric"
         );
+
+        // Test that bloom filter ones count metrics are also updated (mock returns None, so should be 0)
+        let _primary_ones = service
+            .metrics
+            .prometheus_metrics
+            .bloom_filter_primary_ones_gauge
+            .get();
+        let secondary_ones = service
+            .metrics
+            .prometheus_metrics
+            .bloom_filter_secondary_ones_gauge
+            .get();
+        
+        // Mock client doesn't provide actual ones count, but the metrics should still be initialized
+        // Primary ones gauge should be 0 (not set since mock returns None)
+        // Secondary ones gauge should be 0 (explicitly set when None)
+        assert_eq!(secondary_ones, 0.0, "Secondary ones gauge should be 0 when no secondary filter");
     }
 }
