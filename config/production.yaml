@@ -20,6 +20,7 @@ cassandra:
 ingestion:
   max_batch_size: 5000   # Smaller batches for better latency
   batch_timeout_ms: 100  # More frequent queue checks
+  empty_queue_delay_ms: 1000
   worker_threads: 8      # More workers for production
   max_queue_size: 50000000    # 50M items
   max_queue_disk_bytes: 10737418240  # 10GB maximum disk usage for queue

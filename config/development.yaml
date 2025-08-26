@@ -19,6 +19,7 @@ cassandra:
 ingestion:
   max_batch_size: 10000
   batch_timeout_ms: 50  # Check queue every 50ms for continuous processing
+  empty_queue_delay_ms: 1000
   worker_threads: 4
   max_queue_size: 100000000  # 100M items - disk-backed queue with Fjall
   max_queue_disk_bytes: 21474836480  # 20GB maximum disk usage for queue

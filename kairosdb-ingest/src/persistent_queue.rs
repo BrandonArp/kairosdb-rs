@@ -622,9 +622,6 @@ impl PersistentQueue {
         self.metrics
             .current_size
             .set(self.queue_size.load(Ordering::Relaxed) as f64);
-        self.metrics
-            .dequeue_duration
-            .observe(start_time.elapsed().as_secs_f64());
         self.metrics.dequeue_total.inc_by(batch_size as f64); // Track dequeued data points
         self.metrics.batch_size.observe(batch_size as f64); // Track batch size
 

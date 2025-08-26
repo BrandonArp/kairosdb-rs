@@ -104,6 +104,9 @@ pub struct IngestionConfig {
     /// Default sync behavior - force flush to disk before returning success
     /// Can be overridden per-request with ?sync=true/false query parameter
     pub default_sync: bool,
+
+    /// Delay when queue is empty in milliseconds (prevents CPU spinning)
+    pub empty_queue_delay_ms: u64,
 }
 
 /// Metrics and monitoring configuration
@@ -212,6 +215,7 @@ impl Default for IngestionConfig {
             max_request_size: 100 * 1024 * 1024, // 100MB
             performance_mode: PerformanceMode::ParseAndStoreMode, // Default to normal operation
             default_sync: false,                 // Default to fast mode for performance
+            empty_queue_delay_ms: 1000,          // 1 second delay when queue is empty
         }
     }
 }
@@ -306,6 +310,10 @@ impl IngestConfig {
 
         if let Ok(default_sync) = env::var("KAIROSDB_DEFAULT_SYNC") {
             config.ingestion.default_sync = default_sync.parse()?;
+        }
+
+        if let Ok(empty_queue_delay) = env::var("KAIROSDB_EMPTY_QUEUE_DELAY_MS") {
+            config.ingestion.empty_queue_delay_ms = empty_queue_delay.parse()?;
         }
 
         if let Ok(perf_mode) = env::var("KAIROSDB_PERFORMANCE_MODE") {
@@ -409,6 +417,11 @@ impl IngestConfig {
     /// Get the batch timeout as a Duration
     pub fn batch_timeout(&self) -> Duration {
         Duration::from_millis(self.ingestion.batch_timeout_ms)
+    }
+
+    /// Get the empty queue delay as a Duration
+    pub fn empty_queue_delay(&self) -> Duration {
+        Duration::from_millis(self.ingestion.empty_queue_delay_ms)
     }
 
     /// Get the request timeout as a Duration

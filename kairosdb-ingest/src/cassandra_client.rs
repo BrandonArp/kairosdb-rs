@@ -126,7 +126,7 @@ impl MultiWorkerCassandraClient {
         info!("KairosDB schema creation completed");
 
         // Prepare shared statements
-        let shared_resources = Self::prepare_shared_resources(session, config).await?;
+        let shared_resources = Self::prepare_shared_resources(&session, config).await?;
 
         // Create shared stats
         let stats = Arc::new(MultiWorkerStats::default());
@@ -170,7 +170,7 @@ impl MultiWorkerCassandraClient {
 
     /// Create schema using a specific session and config
     async fn ensure_schema_with_session(
-        session: &Arc<Session>,
+        session: &Session,
         config: &Arc<CassandraConfig>,
     ) -> KairosResult<()> {
         use kairosdb_core::schema::KairosSchema;
@@ -258,12 +258,12 @@ impl MultiWorkerCassandraClient {
         Ok(session)
     }
 
-    /// Prepare shared statements for all workers
+    /// Prepare shared resources with Arc session
     async fn prepare_shared_resources(
-        session: Arc<Session>,
+        session: &Arc<Session>,
         config: Arc<CassandraConfig>,
     ) -> KairosResult<SharedCassandraResources> {
-        debug!("Preparing shared CQL statements for workers");
+        debug!("Preparing shared CQL statements");
 
         // Prepare data point insert
         let data_point_query = format!(
@@ -311,7 +311,7 @@ impl MultiWorkerCassandraClient {
         info!("All shared CQL statements prepared successfully");
 
         Ok(SharedCassandraResources {
-            session,
+            session: session.clone(),
             config,
             insert_data_point,
             insert_row_key_time_index,
@@ -459,7 +459,7 @@ impl MultiWorkerCassandraClient {
                 .session
                 .execute_unpaged(
                     &resources.insert_data_point,
-                    (row_key_bytes.clone(), column_key_bytes, value_bytes.clone()),
+                    (row_key_bytes, column_key_bytes, value_bytes),
                 )
                 .await
             {
