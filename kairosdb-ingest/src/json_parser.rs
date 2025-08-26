@@ -403,90 +403,62 @@ impl JsonParser {
             .as_array()
             .ok_or_else(|| KairosError::validation("Histogram 'buckets' must be an array"))?;
 
-        let mut boundaries = Vec::new();
-        let mut counts = Vec::new();
+        // Pre-allocate with known capacity and parse buckets with cumulative-to-individual conversion
+        let len = buckets.len();
+        let mut bins = Vec::with_capacity(len);
+        let mut prev_cumulative = 0u64;
 
-        // Parse buckets
-        for (i, bucket) in buckets.iter().enumerate() {
-            let bucket_obj = bucket.as_object().ok_or_else(|| {
-                KairosError::validation(format!("Bucket {} must be an object", i))
-            })?;
+        for bucket in buckets.iter() {
+            let bucket_obj = bucket
+                .as_object()
+                .ok_or_else(|| KairosError::validation("Bucket must be an object"))?;
 
             let le = bucket_obj
                 .get("le")
                 .and_then(|v| v.as_f64())
-                .ok_or_else(|| {
-                    KairosError::validation(format!(
-                        "Bucket {} missing 'le' (less than or equal) field",
-                        i
-                    ))
-                })?;
+                .filter(|&f| f.is_finite())
+                .ok_or_else(|| KairosError::validation("Bucket missing finite 'le' field"))?;
 
-            let count = bucket_obj
+            let cumulative_count = bucket_obj
                 .get("count")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| {
-                    KairosError::validation(format!("Bucket {} missing 'count' field", i))
-                })?;
+                .ok_or_else(|| KairosError::validation("Bucket missing 'count' field"))?;
 
-            if !le.is_finite() {
-                return Err(KairosError::validation(format!(
-                    "Bucket {} 'le' value must be finite",
-                    i
-                )));
-            }
-
-            boundaries.push(le);
-            counts.push(count);
-        }
-
-        // Get total count and sum
-        let _total_count = obj
-            .get("count")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| KairosError::validation("Histogram missing 'count' field"))?;
-
-        let sum = obj.get("sum").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-        if !sum.is_finite() {
-            return Err(KairosError::validation("Histogram 'sum' must be finite"));
-        }
-
-        // Optional min/max
-        let min = obj.get("min").and_then(|v| v.as_f64());
-        let max = obj.get("max").and_then(|v| v.as_f64());
-
-        // Validate min/max are finite if present
-        if let Some(min_val) = min {
-            if !min_val.is_finite() {
-                return Err(KairosError::validation("Histogram 'min' must be finite"));
-            }
-        }
-        if let Some(max_val) = max {
-            if !max_val.is_finite() {
-                return Err(KairosError::validation("Histogram 'max' must be finite"));
-            }
-        }
-
-        // Convert Prometheus cumulative counts to individual bucket counts
-        let mut individual_counts = Vec::new();
-        let mut prev_count = 0;
-        for &cumulative_count in &counts {
-            if cumulative_count < prev_count {
+            // Validate non-decreasing cumulative counts and convert to individual count
+            if cumulative_count < prev_cumulative {
                 return Err(KairosError::validation(
                     "Histogram bucket counts must be non-decreasing",
                 ));
             }
-            individual_counts.push(cumulative_count - prev_count);
-            prev_count = cumulative_count;
+            let individual_count = cumulative_count - prev_cumulative;
+            prev_cumulative = cumulative_count;
+
+            bins.push((le, individual_count));
         }
 
-        // Create bins and ensure they're sorted by boundary
-        let mut bins: Vec<(f64, u64)> = boundaries.into_iter().zip(individual_counts).collect();
+        // Sort bins by boundary (Prometheus buckets might not be ordered)
         bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let histogram =
-            HistogramData::from_bins(bins, sum, min.unwrap_or(0.0), max.unwrap_or(0.0), None)?;
+        // Parse remaining fields with consolidated validation
+        let sum = obj
+            .get("sum")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let min = obj
+            .get("min")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let max = obj
+            .get("max")
+            .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
+            .unwrap_or(0.0);
+
+        let histogram = HistogramData::from_bins(bins, sum, min, max, None)?;
         Ok(DataPointValue::Histogram(histogram))
     }
 
@@ -495,7 +467,7 @@ impl JsonParser {
         &self,
         obj: &serde_json::Map<String, Value>,
     ) -> KairosResult<DataPointValue> {
-        // Get bins object
+        // Get bins object with early validation
         let bins_value = obj
             .get("bins")
             .ok_or_else(|| KairosError::validation("Histogram missing 'bins' field"))?;
@@ -504,20 +476,19 @@ impl JsonParser {
             .as_object()
             .ok_or_else(|| KairosError::validation("Histogram 'bins' must be an object"))?;
 
-        // Parse bins into sorted Vec<(f64, u64)>
-        let mut bins = Vec::new();
+        // Pre-allocate with known capacity and parse bins with string-to-f64 conversion
+        let mut bins = Vec::with_capacity(bins_obj.len());
         for (boundary_str, count_val) in bins_obj {
-            let boundary = boundary_str.parse::<f64>().map_err(|_| {
-                KairosError::validation(format!("Invalid bin boundary: {}", boundary_str))
-            })?;
+            // Parse boundary string to f64 with combined validation
+            let boundary = boundary_str
+                .parse::<f64>()
+                .ok()
+                .filter(|&f| f.is_finite())
+                .ok_or_else(|| KairosError::validation("Invalid or non-finite bin boundary"))?;
 
-            let count = count_val.as_u64().ok_or_else(|| {
-                KairosError::validation(format!("Bin count must be integer: {}", count_val))
-            })?;
-
-            if !boundary.is_finite() {
-                return Err(KairosError::validation("Bin boundary must be finite"));
-            }
+            let count = count_val
+                .as_u64()
+                .ok_or_else(|| KairosError::validation("Bin count must be a non-negative integer"))?;
 
             bins.push((boundary, count));
         }
@@ -525,20 +496,23 @@ impl JsonParser {
         // Sort bins by boundary (KairosDB uses TreeMap which is sorted)
         bins.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Get required fields
+        // Parse remaining fields with consolidated validation
         let sum = obj
             .get("sum")
             .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
             .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'sum' field"))?;
 
         let min = obj
             .get("min")
             .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
             .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'min' field"))?;
 
         let max = obj
             .get("max")
             .and_then(|v| v.as_f64())
+            .filter(|&f| f.is_finite())
             .ok_or_else(|| KairosError::validation("Histogram missing or invalid 'max' field"))?;
 
         // Precision is optional (V1 has no precision field, V2 does)
@@ -547,11 +521,6 @@ impl JsonParser {
             .and_then(|v| v.as_u64())
             .map(|p| p as u8)
             .unwrap_or(7); // Default V1 precision
-
-        // Validate values
-        if !sum.is_finite() || !min.is_finite() || !max.is_finite() {
-            return Err(KairosError::validation("Histogram values must be finite"));
-        }
 
         let histogram = HistogramData::from_bins(bins, sum, min, max, Some(precision))?;
         Ok(DataPointValue::Histogram(histogram))
