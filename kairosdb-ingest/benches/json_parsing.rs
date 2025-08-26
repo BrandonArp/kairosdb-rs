@@ -1,6 +1,7 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use kairosdb_ingest::json_parser::JsonParser;
 use serde_json::json;
+use std::f64::consts::PI;
 
 fn create_simple_metrics(count: usize) -> String {
     let metrics: Vec<_> = (0..count)
@@ -119,7 +120,7 @@ fn create_mixed_value_types_metrics(count: usize) -> String {
         .map(|i| {
             let value = match i % 6 {
                 0 => json!(42i64 + i as i64),                                // Long
-                1 => json!(3.14159 + i as f64),                              // Double
+                1 => json!(PI + i as f64),                                   // Double
                 2 => json!(format!("text_value_{}", i)),                     // Text
                 3 => json!(i % 2 == 0), // Boolean (converted to Long)
                 4 => json!(format!("{}", 100 + i)), // String number

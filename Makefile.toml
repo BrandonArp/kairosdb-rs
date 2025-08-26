@@ -60,7 +60,7 @@ clear = true
 description = "Run unit tests only"
 script = '''
 mkdir -p target/nextest/ci
-cd target/nextest/ci && cargo nextest run --profile ci --workspace --lib --no-fail-fast --manifest-path ../../../Cargo.toml
+cargo nextest run --profile ci --workspace --lib --no-fail-fast --target-dir target/nextest/ci
 '''
 
 [tasks.test-integration]
@@ -69,8 +69,8 @@ description = "Run integration tests (requires Tilt environment)"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 mkdir -p target/nextest/ci
-cd target/nextest/ci && cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --manifest-path ../../../Cargo.toml
-if [ -f "junit.xml" ]; then mv junit.xml junit-integration.xml; fi
+cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --target-dir target/nextest/ci
+if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml target/nextest/ci/junit-integration.xml; fi
 '''
 
 [tasks.test-all]
@@ -79,11 +79,10 @@ description = "Run all tests"
 script = '''
 echo "🧪 Running unit tests..."
 mkdir -p target/nextest/ci
-cd target/nextest/ci && cargo nextest run --profile ci --workspace --lib --no-fail-fast --manifest-path ../../../Cargo.toml
+cargo nextest run --profile ci --workspace --lib --no-fail-fast --target-dir target/nextest/ci
 echo "🔍 Running integration tests (requires Tilt)..."
-mkdir -p target/nextest/ci
-cd target/nextest/ci && KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --manifest-path ../../../Cargo.toml
-if [ -f "junit.xml" ]; then mv junit.xml junit-integration.xml; fi
+KAIROSDB_CASSANDRA_CONTACT_POINTS=localhost:9042 cargo nextest run --profile ci --workspace --run-ignored ignored-only --no-fail-fast --target-dir target/nextest/ci
+if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml target/nextest/ci/junit-integration.xml; fi
 '''
 
 [tasks.coverage-report]
@@ -91,7 +90,7 @@ description = "Generate test coverage report"
 script = '''
 echo "📊 Generating coverage report..."
 mkdir -p target/nextest/ci target/llvm-cov-target
-cd target/nextest/ci && cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path ../../llvm-cov-target/cobertura.xml --manifest-path ../../../Cargo.toml
+cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml --target-dir target/nextest/ci
 echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
 echo "JUnit report generated at: target/nextest/ci/junit.xml"
 '''
@@ -102,8 +101,8 @@ env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 echo "📊 Generating integration test coverage..."
 mkdir -p target/nextest/ci target/llvm-cov-target
-cd target/nextest/ci && cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path ../../llvm-cov-target/integration-cobertura.xml --manifest-path ../../../Cargo.toml
-if [ -f "junit.xml" ]; then mv junit.xml junit-integration.xml; fi
+cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml --target-dir target/nextest/ci
+if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml target/nextest/ci/junit-integration.xml; fi
 echo "Integration coverage report generated at: target/llvm-cov-target/integration-cobertura.xml"
 echo "JUnit report generated at: target/nextest/ci/junit-integration.xml"
 '''
