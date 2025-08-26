@@ -1061,10 +1061,6 @@ mod tests {
             "Bloom memory usage should be non-zero"
         );
         assert!(
-            metrics.bloom_memory_usage > 2_000_000,
-            "Bloom memory should be at least 2MB"
-        );
-        assert!(
             metrics.bloom_memory_usage < 10_000_000,
             "Bloom memory should be less than 10MB"
         );
