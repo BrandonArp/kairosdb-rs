@@ -138,7 +138,7 @@ pipeline {
       archiveArtifacts artifacts: 'target/debug/*.json, target/doc/**, tilt.log', fingerprint: true, allowEmptyArchive: true
       
       // Coverage reporting
-      recordCoverage(ignoreParsingErrors: true, tools: [[parser: 'COBERTURA', pattern: '**/target/llvm-cov-target/cobertura.xml']])
+      recordCoverage(ignoreParsingErrors: true, tools: [[parser: 'COBERTURA', pattern: '**/target/llvm-cov-target/*cobertura*.xml']])
       
       // Code analysis
       recordIssues(

@@ -90,10 +90,9 @@ if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml tar
 description = "Generate test coverage report"
 script = '''
 echo "📊 Generating coverage report..."
-mkdir -p target/nextest/ci target/llvm-cov-target
-cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml --target-dir target/nextest/ci
+mkdir -p target/llvm-cov-target
+cargo llvm-cov nextest --profile ci --workspace --lib --no-fail-fast --cobertura --output-path target/llvm-cov-target/cobertura.xml
 echo "Coverage report generated at: target/llvm-cov-target/cobertura.xml"
-echo "JUnit report generated at: target/nextest/ci/junit.xml"
 '''
 
 [tasks.coverage-integration]
@@ -101,11 +100,9 @@ description = "Generate coverage report for integration tests"
 env = { KAIROSDB_CASSANDRA_CONTACT_POINTS = "localhost:9042" }
 script = '''
 echo "📊 Generating integration test coverage..."
-mkdir -p target/nextest/ci target/llvm-cov-target
-cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml --target-dir target/nextest/ci
-if [ -f "target/nextest/ci/junit.xml" ]; then mv target/nextest/ci/junit.xml target/nextest/ci/junit-integration.xml; fi
+mkdir -p target/llvm-cov-target
+cargo llvm-cov nextest --profile ci --workspace --run-ignored ignored-only --no-fail-fast --cobertura --output-path target/llvm-cov-target/integration-cobertura.xml
 echo "Integration coverage report generated at: target/llvm-cov-target/integration-cobertura.xml"
-echo "JUnit report generated at: target/nextest/ci/junit-integration.xml"
 '''
 
 # === Quality Assurance Tasks ===
