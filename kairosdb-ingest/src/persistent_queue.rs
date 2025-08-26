@@ -519,6 +519,22 @@ impl PersistentQueue {
     ) -> KairosResult<Vec<QueueWorkItem>> {
         let start_time = Instant::now();
 
+        // Fast path: if queue is empty, return immediately
+        match self.partition.is_empty() {
+            Ok(true) => {
+                self.metrics.oldest_entry_age_seconds.set(0.0);
+                trace!("Queue is empty, returning immediately");
+                return Ok(Vec::new());
+            }
+            Ok(false) => {
+                // Queue has items, proceed with normal logic
+            }
+            Err(e) => {
+                // If we can't check if empty, log and continue with normal logic
+                warn!("Failed to check if queue is empty, proceeding with scan: {}", e);
+            }
+        }
+
         // Check if we need to do a full timeout scan
         let should_timeout_scan = {
             let cursor = self.cursor.read();
