@@ -4,7 +4,7 @@
 //! already been written, avoiding redundant writes to Cassandra.
 
 use parking_lot::RwLock;
-use probabilistic_collections::bloom::BloomFilter;
+use probabilistic_collections::bloom::ScalableBloomFilter;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, trace};
@@ -34,12 +34,11 @@ impl Default for BloomConfig {
 }
 
 /// Dual bloom filter state for rotation
-#[derive(Debug)]
 struct BloomState {
     /// Primary bloom filter (currently active)
-    primary: BloomFilter<String>,
+    primary: ScalableBloomFilter<String>,
     /// Secondary bloom filter (used during overlap period)
-    secondary: Option<BloomFilter<String>>,
+    secondary: Option<ScalableBloomFilter<String>>,
     /// When the primary filter was created
     primary_created: Instant,
     /// When the secondary filter was created (if any)
@@ -50,6 +49,19 @@ struct BloomState {
     secondary_seed: u64,
     /// Configuration
     config: BloomConfig,
+}
+
+impl std::fmt::Debug for BloomState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BloomState")
+            .field("primary_created", &self.primary_created)
+            .field("secondary_created", &self.secondary_created)
+            .field("primary_seed", &self.primary_seed)
+            .field("secondary_seed", &self.secondary_seed)
+            .field("config", &self.config)
+            .field("has_secondary", &self.secondary.is_some())
+            .finish()
+    }
 }
 
 impl BloomState {
@@ -203,12 +215,9 @@ impl BloomManager {
         let secondary_age = state.secondary_created.map(|created| created.elapsed());
 
         // Calculate memory usage for bloom filters
-        let primary_memory_bytes = calculate_bloom_memory_bytes(
-            state.config.expected_items,
-            state.config.false_positive_rate,
-        );
-        let secondary_memory_bytes = if state.secondary.is_some() {
-            Some(primary_memory_bytes) // Secondary has same configuration as primary
+        let primary_memory_bytes = calculate_bloom_memory_bytes(&state.primary);
+        let secondary_memory_bytes = if let Some(ref secondary) = state.secondary {
+            Some(calculate_bloom_memory_bytes(secondary))
         } else {
             None
         };
@@ -254,26 +263,31 @@ pub struct BloomStats {
 }
 
 /// Create a bloom filter with specific configuration and hash seed
-fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> BloomFilter<String> {
+fn create_bloom_filter(config: &BloomConfig, _seed: u64) -> ScalableBloomFilter<String> {
     // Create bloom filter with calculated optimal size and hash count
     // Note: Using default hasher, seed is used for future rotation logic
-    BloomFilter::new(config.expected_items as usize, config.false_positive_rate)
+
+    ScalableBloomFilter::new(100000, config.false_positive_rate, 1.2, 1.0)
 }
 
-/// Calculate estimated memory usage of a bloom filter in bytes
-/// This is based on the mathematical formula for optimal bloom filter size
-fn calculate_bloom_memory_bytes(expected_items: u64, false_positive_rate: f64) -> u64 {
-    // Calculate optimal bit array size: m = -n * ln(p) / (ln(2))^2
-    // where n = expected_items, p = false_positive_rate
-    let ln2 = std::f64::consts::LN_2;
-    let optimal_bits = (-(expected_items as f64) * false_positive_rate.ln()) / (ln2 * ln2);
-
+/// Calculate actual memory usage of a bloom filter using the len() method
+/// This gets the real number of bits in the bloom filter
+fn calculate_bloom_memory_bytes(bloom_filter: &ScalableBloomFilter<String>) -> u64 {
+    use std::mem;
+    
+    // Get the size of the BloomFilter struct itself (stack allocation)
+    let struct_size = mem::size_of_val(bloom_filter) as u64;
+    
+    // Get the actual number of bits in the bloom filter
+    let num_bits = bloom_filter.len() as u64;
+    
     // Convert bits to bytes (round up to nearest byte)
-    let bytes = (optimal_bits / 8.0).ceil() as u64;
-
-    // Add overhead for data structure (estimated 64 bytes for metadata, vectors, etc.)
-    bytes + 64
+    let bit_vector_bytes = (num_bits + 7) / 8; // Equivalent to ceiling division
+    
+    // Total memory = struct size + bit vector + some overhead for Vec metadata
+    struct_size + bit_vector_bytes + 64
 }
+
 
 /// Generate a random seed for hash functions
 fn generate_random_seed() -> u64 {
@@ -367,10 +381,8 @@ mod tests {
         assert_eq!(stats.total_memory_bytes, stats.primary_memory_bytes);
         assert!(stats.secondary_memory_bytes.is_none());
 
-        // For default config (1M items, 0.000001 FP rate), should be around 3.6MB
-        // Allow some variance due to overhead calculation
-        assert!(stats.primary_memory_bytes > 2_000_000); // At least 2MB
-        assert!(stats.primary_memory_bytes < 5_000_000); // Less than 5MB
+        // Memory should be reasonable for a scalable bloom filter starting at 100k bits
+        assert!(stats.primary_memory_bytes < 10_000_000); // Less than 10MB
     }
 
     #[test]
