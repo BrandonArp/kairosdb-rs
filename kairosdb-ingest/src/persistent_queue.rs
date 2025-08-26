@@ -257,7 +257,10 @@ impl PersistentQueue {
 
         // Open the queue partition
         let partition = keyspace
-            .open_partition("datapoint_queue", PartitionCreateOptions::default().block_size(1024 * 64))
+            .open_partition(
+                "datapoint_queue",
+                PartitionCreateOptions::default().block_size(1024 * 64),
+            )
             .context("Failed to open queue partition")?;
 
         // Initialize metrics
@@ -531,7 +534,10 @@ impl PersistentQueue {
             }
             Err(e) => {
                 // If we can't check if empty, log and continue with normal logic
-                warn!("Failed to check if queue is empty, proceeding with scan: {}", e);
+                warn!(
+                    "Failed to check if queue is empty, proceeding with scan: {}",
+                    e
+                );
             }
         }
 
@@ -544,24 +550,30 @@ impl PersistentQueue {
         if should_timeout_scan {
             debug!("Performing periodic timeout scan");
             let result = self.claim_with_full_scan(timeout_ms, batch_size, start_time);
-            
+
             // Mark timeout scan complete
             {
                 let mut cursor = self.cursor.write();
                 cursor.mark_timeout_scan_complete();
             }
-            
+
             return result;
         }
 
         // Try cursor-based scan first
         let mut result = self.claim_with_cursor_scan(timeout_ms, batch_size, start_time)?;
-        
-        // If we didn't find enough items and haven't reached end of queue, 
+
+        // If we didn't find enough items and haven't reached end of queue,
         // fall back to full scan to catch any timed-out items we might have missed
-        if result.len() < batch_size && self.queue_size.load(Ordering::Relaxed) > result.len() as u64 {
-            debug!("Cursor scan found {} items, trying full scan for timeouts", result.len());
-            let additional = self.claim_with_full_scan(timeout_ms, batch_size - result.len(), start_time)?;
+        if result.len() < batch_size
+            && self.queue_size.load(Ordering::Relaxed) > result.len() as u64
+        {
+            debug!(
+                "Cursor scan found {} items, trying full scan for timeouts",
+                result.len()
+            );
+            let additional =
+                self.claim_with_full_scan(timeout_ms, batch_size - result.len(), start_time)?;
             result.extend(additional);
         }
 
@@ -591,7 +603,7 @@ impl PersistentQueue {
             Some(key) => {
                 // Start scanning after the last scanned key
                 Box::new(self.partition.range(key.as_bytes()..))
-            },
+            }
             None => {
                 // Start from beginning
                 Box::new(self.partition.iter())
@@ -634,7 +646,9 @@ impl PersistentQueue {
 
         // Update metrics
         let duration = start_time.elapsed();
-        self.metrics.dequeue_duration.observe(duration.as_secs_f64());
+        self.metrics
+            .dequeue_duration
+            .observe(duration.as_secs_f64());
 
         if !claimed_items.is_empty() {
             trace!(
@@ -690,7 +704,9 @@ impl PersistentQueue {
         }
 
         let duration = start_time.elapsed();
-        self.metrics.dequeue_duration.observe(duration.as_secs_f64());
+        self.metrics
+            .dequeue_duration
+            .observe(duration.as_secs_f64());
 
         if !claimed_items.is_empty() {
             trace!(
@@ -761,9 +777,11 @@ impl PersistentQueue {
                 KairosError::validation(format!("Failed to serialize updated entry: {}", e))
             })?;
 
-            self.partition.insert(key.as_ref(), updated_data).map_err(|e| {
-                KairosError::validation(format!("Failed to update in-flight entry: {}", e))
-            })?;
+            self.partition
+                .insert(key.as_ref(), updated_data)
+                .map_err(|e| {
+                    KairosError::validation(format!("Failed to update in-flight entry: {}", e))
+                })?;
 
             // Update metrics for oldest entry age
             let entry_age_seconds =

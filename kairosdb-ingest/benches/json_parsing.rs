@@ -19,7 +19,7 @@ fn create_simple_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -47,7 +47,7 @@ fn create_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -77,7 +77,7 @@ fn create_prometheus_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -89,7 +89,7 @@ fn create_kairosdb_bins_histogram_metrics(count: usize) -> String {
             for (j, boundary) in [0.1, 1.0, 5.0, 10.0, 50.0].iter().enumerate() {
                 bins[boundary.to_string()] = json!(10 + i + j * 5);
             }
-            
+
             json!({
                 "name": format!("latency_histogram.{}", i),
                 "datapoints": [[
@@ -110,7 +110,7 @@ fn create_kairosdb_bins_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -118,15 +118,15 @@ fn create_mixed_value_types_metrics(count: usize) -> String {
     let metrics: Vec<_> = (0..count)
         .map(|i| {
             let value = match i % 6 {
-                0 => json!(42i64 + i as i64), // Long
-                1 => json!(3.14159 + i as f64), // Double
-                2 => json!(format!("text_value_{}", i)), // Text
+                0 => json!(42i64 + i as i64),                                // Long
+                1 => json!(3.14159 + i as f64),                              // Double
+                2 => json!(format!("text_value_{}", i)),                     // Text
                 3 => json!(i % 2 == 0), // Boolean (converted to Long)
                 4 => json!(format!("{}", 100 + i)), // String number
                 5 => json!({"real": i as f64, "imaginary": (i + 1) as f64}), // Complex
                 _ => json!(42),
             };
-            
+
             json!({
                 "name": format!("mixed.metric.{}", i),
                 "datapoints": [
@@ -135,7 +135,7 @@ fn create_mixed_value_types_metrics(count: usize) -> String {
                 "tags": {
                     "type": match i % 6 {
                         0 => "long",
-                        1 => "double", 
+                        1 => "double",
                         2 => "text",
                         3 => "boolean",
                         4 => "string_number",
@@ -147,26 +147,22 @@ fn create_mixed_value_types_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
 fn bench_simple_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_parsing");
-    
+
     let parser = JsonParser::new(10_000, true);
-    
+
     for size in [1, 10, 100, 1000].iter() {
         let json_data = create_simple_metrics(*size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("simple_metrics", size),
             &json_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -174,44 +170,32 @@ fn bench_simple_parsing(c: &mut Criterion) {
 
 fn bench_histogram_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("histogram_parsing");
-    
+
     let parser = JsonParser::new(10_000, true);
-    
+
     for size in [1, 10, 100].iter() {
         // Direct format histograms
         let direct_data = create_histogram_metrics(*size);
         group.bench_with_input(
             BenchmarkId::new("direct_histograms", size),
             &direct_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
-        
-        // Prometheus format histograms  
+
+        // Prometheus format histograms
         let prometheus_data = create_prometheus_histogram_metrics(*size);
         group.bench_with_input(
             BenchmarkId::new("prometheus_histograms", size),
             &prometheus_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
-        
+
         // KairosDB bins format histograms
         let bins_data = create_kairosdb_bins_histogram_metrics(*size);
         group.bench_with_input(
             BenchmarkId::new("kairosdb_bins_histograms", size),
             &bins_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -219,20 +203,16 @@ fn bench_histogram_parsing(c: &mut Criterion) {
 
 fn bench_mixed_value_types(c: &mut Criterion) {
     let mut group = c.benchmark_group("mixed_value_types");
-    
+
     let parser = JsonParser::new(10_000, true);
-    
+
     for size in [1, 10, 100, 1000].iter() {
         let json_data = create_mixed_value_types_metrics(*size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("mixed_values", size),
             &json_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -240,44 +220,36 @@ fn bench_mixed_value_types(c: &mut Criterion) {
 
 fn bench_validation_modes(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_modes");
-    
+
     let json_data = create_simple_metrics(100);
-    
+
     // Strict validation (default)
     let strict_parser = JsonParser::new(10_000, true);
     group.bench_function("strict_validation", |b| {
-        b.iter(|| {
-            strict_parser.parse_json(black_box(&json_data)).unwrap()
-        })
+        b.iter(|| strict_parser.parse_json(black_box(&json_data)).unwrap())
     });
-    
+
     // Lenient validation
     let lenient_parser = JsonParser::new(10_000, false);
     group.bench_function("lenient_validation", |b| {
-        b.iter(|| {
-            lenient_parser.parse_json(black_box(&json_data)).unwrap()
-        })
+        b.iter(|| lenient_parser.parse_json(black_box(&json_data)).unwrap())
     });
-    
+
     group.finish();
 }
 
 fn bench_batch_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_sizes");
-    
+
     let parser = JsonParser::new(10_000, true);
-    
+
     for batch_size in [1, 5, 10, 50, 100, 500, 1000].iter() {
         let json_data = create_simple_metrics(*batch_size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("batch_size", batch_size),
             &json_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -285,9 +257,9 @@ fn bench_batch_sizes(c: &mut Criterion) {
 
 fn bench_tag_processing(c: &mut Criterion) {
     let mut group = c.benchmark_group("tag_processing");
-    
+
     let parser = JsonParser::new(10_000, true);
-    
+
     // Create metrics with varying numbers of tags
     for tag_count in [0, 2, 5, 10, 20].iter() {
         let metrics: Vec<_> = (0..100)
@@ -296,7 +268,7 @@ fn bench_tag_processing(c: &mut Criterion) {
                 for j in 0..*tag_count {
                     tags[format!("tag{}", j)] = json!(format!("value{}_{}", j, i));
                 }
-                
+
                 json!({
                     "name": format!("tagged.metric.{}", i),
                     "datapoints": [
@@ -306,17 +278,13 @@ fn bench_tag_processing(c: &mut Criterion) {
                 })
             })
             .collect();
-        
+
         let json_data = serde_json::to_string(&metrics).unwrap();
-        
+
         group.bench_with_input(
             BenchmarkId::new("tag_count", tag_count),
             &json_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();

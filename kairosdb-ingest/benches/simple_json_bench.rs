@@ -20,7 +20,7 @@ fn create_simple_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -49,7 +49,7 @@ fn create_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -80,7 +80,7 @@ fn create_prometheus_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -92,7 +92,7 @@ fn create_kairosdb_bins_histogram_metrics(count: usize) -> String {
             for (j, boundary) in [0.1, 1.0, 5.0, 10.0, 50.0].iter().enumerate() {
                 bins[boundary.to_string()] = json!(10 + i + j * 5);
             }
-            
+
             json!({
                 "name": format!("latency_histogram.{}", i),
                 "datapoints": [[
@@ -113,7 +113,7 @@ fn create_kairosdb_bins_histogram_metrics(count: usize) -> String {
             })
         })
         .collect();
-    
+
     serde_json::to_string(&metrics).unwrap()
 }
 
@@ -121,19 +121,15 @@ fn bench_simple_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("simple_parsing");
     group.sample_size(1000); // 100x more samples for better statistics
     let parser = JsonParser::new(10_000, true);
-    
+
     // Test different batch sizes to find performance characteristics
     for batch_size in [1, 10, 100, 1000, 5000].iter() {
         let json_data = create_simple_metrics(*batch_size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("simple_metrics", batch_size),
             &json_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -143,41 +139,29 @@ fn bench_histogram_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("histogram_parsing");
     group.sample_size(1000); // 100x more samples for better statistics
     let parser = JsonParser::new(10_000, true);
-    
+
     // Test histogram parsing with different batch sizes
     for batch_size in [1, 10, 100, 1000].iter() {
         let direct_data = create_histogram_metrics(*batch_size);
         let prometheus_data = create_prometheus_histogram_metrics(*batch_size);
         let kairosdb_data = create_kairosdb_bins_histogram_metrics(*batch_size);
-        
+
         group.bench_with_input(
             BenchmarkId::new("direct_histogram", batch_size),
             &direct_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("prometheus_histogram", batch_size),
             &prometheus_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
-        
+
         group.bench_with_input(
             BenchmarkId::new("kairosdb_bins_histogram", batch_size),
             &kairosdb_data,
-            |b, data| {
-                b.iter(|| {
-                    parser.parse_json(black_box(data)).unwrap()
-                })
-            },
+            |b, data| b.iter(|| parser.parse_json(black_box(data)).unwrap()),
         );
     }
     group.finish();
@@ -187,23 +171,24 @@ fn bench_validation_modes(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_modes");
     group.sample_size(1000); // 100x more samples for better statistics
     let json_data = create_simple_metrics(1000); // 1000 metrics for meaningful measurement
-    
+
     let strict_parser = JsonParser::new(10_000, true);
     group.bench_function("strict_validation", |b| {
-        b.iter(|| {
-            strict_parser.parse_json(black_box(&json_data)).unwrap()
-        })
+        b.iter(|| strict_parser.parse_json(black_box(&json_data)).unwrap())
     });
-    
+
     let lenient_parser = JsonParser::new(10_000, false);
     group.bench_function("lenient_validation", |b| {
-        b.iter(|| {
-            lenient_parser.parse_json(black_box(&json_data)).unwrap()
-        })
+        b.iter(|| lenient_parser.parse_json(black_box(&json_data)).unwrap())
     });
-    
+
     group.finish();
 }
 
-criterion_group!(benches, bench_simple_parsing, bench_histogram_parsing, bench_validation_modes);
+criterion_group!(
+    benches,
+    bench_simple_parsing,
+    bench_histogram_parsing,
+    bench_validation_modes
+);
 criterion_main!(benches);

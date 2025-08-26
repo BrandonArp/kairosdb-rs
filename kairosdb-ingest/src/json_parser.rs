@@ -486,9 +486,9 @@ impl JsonParser {
                 .filter(|&f| f.is_finite())
                 .ok_or_else(|| KairosError::validation("Invalid or non-finite bin boundary"))?;
 
-            let count = count_val
-                .as_u64()
-                .ok_or_else(|| KairosError::validation("Bin count must be a non-negative integer"))?;
+            let count = count_val.as_u64().ok_or_else(|| {
+                KairosError::validation("Bin count must be a non-negative integer")
+            })?;
 
             bins.push((boundary, count));
         }

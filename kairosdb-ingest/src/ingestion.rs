@@ -686,7 +686,10 @@ impl IngestionService {
 
             if work_items.is_empty() {
                 // No work available - use longer delay to prevent CPU spinning
-                debug!("No work items, waiting for queued items ({}ms)", empty_queue_delay.as_millis());
+                debug!(
+                    "No work items, waiting for queued items ({}ms)",
+                    empty_queue_delay.as_millis()
+                );
                 tokio::time::sleep(empty_queue_delay).await;
                 continue;
             }
