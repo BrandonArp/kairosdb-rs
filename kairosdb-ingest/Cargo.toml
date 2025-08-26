@@ -76,8 +76,8 @@ hex = "0.4"
 # Bloom filter for index deduplication
 probabilistic-collections = "0.7"
 
-# Persistent queue storage (without compression for better CPU performance)
-fjall = { version = "2.11", default-features = false }
+# Persistent queue storage with LZ4 compression for space efficiency
+fjall = { version = "2.11", features = ["lz4"] }
 bincode = { version = "2.0", features = ["serde"] }
 rmp-serde = "1.1"  # MessagePack for queue serialization
 

@@ -8,14 +8,56 @@ use anyhow::{Context, Result};
 use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle, PersistMode};
 use kairosdb_core::datapoint::{DataPoint, DataPointBatch};
 use kairosdb_core::error::{KairosError, KairosResult};
+use parking_lot::RwLock;
 use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
+
+/// Queue scanning cursor for optimized work item claiming
+#[derive(Debug)]
+struct QueueCursor {
+    /// Last scanned key - resume scanning from after this key
+    last_scanned_key: Option<String>,
+    /// Last time we did a full scan for timeout cleanup
+    last_timeout_check: Instant,
+    /// Timeout check interval (30 seconds)
+    timeout_check_interval: Duration,
+}
+
+impl QueueCursor {
+    fn new() -> Self {
+        Self {
+            last_scanned_key: None,
+            last_timeout_check: Instant::now(),
+            timeout_check_interval: Duration::from_secs(30),
+        }
+    }
+
+    /// Check if it's time for a full timeout scan
+    fn should_do_timeout_scan(&self) -> bool {
+        self.last_timeout_check.elapsed() >= self.timeout_check_interval
+    }
+
+    /// Mark that we just completed a timeout scan
+    fn mark_timeout_scan_complete(&mut self) {
+        self.last_timeout_check = Instant::now();
+    }
+
+    /// Reset cursor to start from beginning (for timeout scans)
+    fn reset(&mut self) {
+        self.last_scanned_key = None;
+    }
+
+    /// Update cursor with the last processed key
+    fn update_position(&mut self, key: &str) {
+        self.last_scanned_key = Some(key.to_string());
+    }
+}
 
 /// Entry in the persistent queue - now stores batches instead of individual points
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +235,8 @@ pub struct PersistentQueue {
     queue_size: AtomicU64,
     metrics: QueueMetrics,
     data_dir: std::path::PathBuf,
+    /// Cursor for optimized queue scanning
+    cursor: RwLock<QueueCursor>,
 }
 
 impl PersistentQueue {
@@ -206,14 +250,14 @@ impl PersistentQueue {
         std::fs::create_dir_all(data_dir)
             .context("Failed to create persistent queue data directory")?;
 
-        // Open Fjall keyspace
+        // Open Fjall keyspace with compression enabled
         let keyspace = Config::new(data_dir)
             .open()
             .context("Failed to open Fjall keyspace")?;
 
         // Open the queue partition
         let partition = keyspace
-            .open_partition("datapoint_queue", PartitionCreateOptions::default())
+            .open_partition("datapoint_queue", PartitionCreateOptions::default().block_size(1024 * 64))
             .context("Failed to open queue partition")?;
 
         // Initialize metrics
@@ -235,6 +279,7 @@ impl PersistentQueue {
             queue_size: AtomicU64::new(queue_size),
             metrics,
             data_dir: data_dir.to_path_buf(),
+            cursor: RwLock::new(QueueCursor::new()),
         })
     }
 
@@ -466,12 +511,133 @@ impl PersistentQueue {
     }
 
     /// Claim multiple work items for batch processing (up to batch_size items)
+    /// Uses cursor optimization to skip over already-scanned areas and periodic timeout cleanup
     pub fn claim_work_items_batch(
         &self,
         timeout_ms: u64,
         batch_size: usize,
     ) -> KairosResult<Vec<QueueWorkItem>> {
         let start_time = Instant::now();
+
+        // Check if we need to do a full timeout scan
+        let should_timeout_scan = {
+            let cursor = self.cursor.read();
+            cursor.should_do_timeout_scan()
+        };
+
+        if should_timeout_scan {
+            debug!("Performing periodic timeout scan");
+            let result = self.claim_with_full_scan(timeout_ms, batch_size, start_time);
+            
+            // Mark timeout scan complete
+            {
+                let mut cursor = self.cursor.write();
+                cursor.mark_timeout_scan_complete();
+            }
+            
+            return result;
+        }
+
+        // Try cursor-based scan first
+        let mut result = self.claim_with_cursor_scan(timeout_ms, batch_size, start_time)?;
+        
+        // If we didn't find enough items and haven't reached end of queue, 
+        // fall back to full scan to catch any timed-out items we might have missed
+        if result.len() < batch_size && self.queue_size.load(Ordering::Relaxed) > result.len() as u64 {
+            debug!("Cursor scan found {} items, trying full scan for timeouts", result.len());
+            let additional = self.claim_with_full_scan(timeout_ms, batch_size - result.len(), start_time)?;
+            result.extend(additional);
+        }
+
+        Ok(result)
+    }
+
+    /// Optimized scan starting from cursor position
+    fn claim_with_cursor_scan(
+        &self,
+        timeout_ms: u64,
+        batch_size: usize,
+        start_time: Instant,
+    ) -> KairosResult<Vec<QueueWorkItem>> {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        let mut claimed_items = Vec::new();
+        let start_key = {
+            let cursor = self.cursor.read();
+            cursor.last_scanned_key.clone()
+        };
+
+        // Create iterator starting from cursor position
+        let iter: Box<dyn Iterator<Item = _>> = match &start_key {
+            Some(key) => {
+                // Start scanning after the last scanned key
+                Box::new(self.partition.range(key.as_bytes()..))
+            },
+            None => {
+                // Start from beginning
+                Box::new(self.partition.iter())
+            }
+        };
+
+        let mut last_processed_key: Option<String> = None;
+
+        for item in iter {
+            if claimed_items.len() >= batch_size {
+                break;
+            }
+
+            let (key, value) = item.map_err(|e| {
+                self.metrics.dequeue_errors.inc();
+                KairosError::internal(format!("Failed to read from queue: {}", e))
+            })?;
+
+            let queue_key_string = String::from_utf8_lossy(&key).to_string();
+            last_processed_key = Some(queue_key_string.clone());
+
+            // Skip the start key itself if we're resuming from a cursor position
+            if let Some(ref start_key_str) = start_key {
+                if queue_key_string == *start_key_str {
+                    continue;
+                }
+            }
+
+            // Deserialize and process entry
+            if let Some(work_item) = self.try_claim_item(key, value, now_ns, timeout_ms)? {
+                claimed_items.push(work_item);
+            }
+        }
+
+        // Update cursor position
+        if let Some(last_key) = last_processed_key {
+            let mut cursor = self.cursor.write();
+            cursor.update_position(&last_key);
+        }
+
+        // Update metrics
+        let duration = start_time.elapsed();
+        self.metrics.dequeue_duration.observe(duration.as_secs_f64());
+
+        if !claimed_items.is_empty() {
+            trace!(
+                "Cursor scan claimed {} work items from persistent queue in {:?}",
+                claimed_items.len(),
+                duration
+            );
+        }
+
+        Ok(claimed_items)
+    }
+
+    /// Full scan from beginning for timeout cleanup
+    fn claim_with_full_scan(
+        &self,
+        timeout_ms: u64,
+        batch_size: usize,
+        start_time: Instant,
+    ) -> KairosResult<Vec<QueueWorkItem>> {
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -480,16 +646,14 @@ impl PersistentQueue {
         let mut claimed_items = Vec::new();
         let mut iter = self.partition.iter();
 
-        // Process items until we have enough or run out
         while claimed_items.len() < batch_size {
             let item = match iter.next() {
                 Some(item) => item,
                 None => {
-                    // Queue is empty
                     if claimed_items.is_empty() {
                         self.metrics.oldest_entry_age_seconds.set(0.0);
                     }
-                    break; // No more items
+                    break;
                 }
             };
 
@@ -498,87 +662,105 @@ impl PersistentQueue {
                 KairosError::internal(format!("Failed to read from queue: {}", e))
             })?;
 
-            // Deserialize the entry using MessagePack
-            let mut entry: QueueEntry = match rmp_serde::from_slice(&value) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    self.metrics.dequeue_errors.inc();
-                    // Remove corrupted entry
-                    debug!(
-                        "Failed to deserialize queue entry, removing corrupted entry: {}",
-                        e
-                    );
-                    self.partition.remove(key).map_err(|e| {
-                        KairosError::internal(format!("Failed to remove corrupted entry: {}", e))
-                    })?;
-                    self.queue_size.fetch_sub(1, Ordering::Relaxed);
-                    self.metrics
-                        .current_size
-                        .set(self.queue_size.load(Ordering::Relaxed) as f64);
-                    continue; // Try next entry
-                }
-            };
-
-            // Check if item is available or timed out
-            let is_available = match entry.in_flight_since {
-                None => true, // Available
-                Some(in_flight_time) => {
-                    // Check if timed out (crashed worker)
-                    let age_ms = (now_ns.saturating_sub(in_flight_time)) / 1_000_000;
-                    if age_ms > timeout_ms {
-                        warn!(
-                            "Found timed-out in-flight item ({}ms old), reclaiming",
-                            age_ms
-                        );
-                        true // Reclaim timed-out item
-                    } else {
-                        false // Still being processed
-                    }
-                }
-            };
-
-            if is_available {
-                // Extract the queue key string before moving the key
-                let queue_key_string = String::from_utf8_lossy(&key).to_string();
-
-                // Claim this item atomically by marking it in-flight
-                entry.in_flight_since = Some(now_ns);
-
-                // Serialize and update the entry
-                let updated_data = rmp_serde::to_vec(&entry).map_err(|e| {
-                    KairosError::validation(format!("Failed to serialize updated entry: {}", e))
-                })?;
-
-                self.partition.insert(key, updated_data).map_err(|e| {
-                    KairosError::validation(format!("Failed to update in-flight entry: {}", e))
-                })?;
-
-                // Update metrics for oldest entry age
-                let entry_age_seconds =
-                    (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
-                self.metrics.oldest_entry_age_seconds.set(entry_age_seconds);
-
-                claimed_items.push(QueueWorkItem {
-                    entry,
-                    queue_key: queue_key_string,
-                });
+            if let Some(work_item) = self.try_claim_item(key, value, now_ns, timeout_ms)? {
+                claimed_items.push(work_item);
             }
         }
 
+        // Reset cursor since we did a full scan
+        {
+            let mut cursor = self.cursor.write();
+            cursor.reset();
+        }
+
         let duration = start_time.elapsed();
-        self.metrics
-            .dequeue_duration
-            .observe(duration.as_secs_f64());
+        self.metrics.dequeue_duration.observe(duration.as_secs_f64());
 
         if !claimed_items.is_empty() {
             trace!(
-                "Claimed {} work items from persistent queue in {:?}",
+                "Full scan claimed {} work items from persistent queue in {:?}",
                 claimed_items.len(),
                 duration
             );
         }
 
         Ok(claimed_items)
+    }
+
+    /// Try to claim a single item - shared logic between scan types
+    fn try_claim_item(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        now_ns: u64,
+        timeout_ms: u64,
+    ) -> KairosResult<Option<QueueWorkItem>> {
+        // Deserialize the entry using MessagePack
+        let mut entry: QueueEntry = match rmp_serde::from_slice(value.as_ref()) {
+            Ok(entry) => entry,
+            Err(e) => {
+                self.metrics.dequeue_errors.inc();
+                // Remove corrupted entry
+                debug!(
+                    "Failed to deserialize queue entry, removing corrupted entry: {}",
+                    e
+                );
+                self.partition.remove(key.as_ref()).map_err(|e| {
+                    KairosError::internal(format!("Failed to remove corrupted entry: {}", e))
+                })?;
+                self.queue_size.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .current_size
+                    .set(self.queue_size.load(Ordering::Relaxed) as f64);
+                return Ok(None); // Skip corrupted entry
+            }
+        };
+
+        // Check if item is available or timed out
+        let is_available = match entry.in_flight_since {
+            None => true, // Available
+            Some(in_flight_time) => {
+                // Check if timed out (crashed worker)
+                let age_ms = (now_ns.saturating_sub(in_flight_time)) / 1_000_000;
+                if age_ms > timeout_ms {
+                    warn!(
+                        "Found timed-out in-flight item ({}ms old), reclaiming",
+                        age_ms
+                    );
+                    true // Reclaim timed-out item
+                } else {
+                    false // Still being processed
+                }
+            }
+        };
+
+        if is_available {
+            let queue_key_string = String::from_utf8_lossy(key.as_ref()).to_string();
+
+            // Claim this item atomically by marking it in-flight
+            entry.in_flight_since = Some(now_ns);
+
+            // Serialize and update the entry
+            let updated_data = rmp_serde::to_vec(&entry).map_err(|e| {
+                KairosError::validation(format!("Failed to serialize updated entry: {}", e))
+            })?;
+
+            self.partition.insert(key.as_ref(), updated_data).map_err(|e| {
+                KairosError::validation(format!("Failed to update in-flight entry: {}", e))
+            })?;
+
+            // Update metrics for oldest entry age
+            let entry_age_seconds =
+                (now_ns.saturating_sub(entry.timestamp_ns)) as f64 / 1_000_000_000.0;
+            self.metrics.oldest_entry_age_seconds.set(entry_age_seconds);
+
+            Ok(Some(QueueWorkItem {
+                entry,
+                queue_key: queue_key_string,
+            }))
+        } else {
+            Ok(None) // Item is in-flight, skip it
+        }
     }
 
     /// Remove a specific item from the queue after successful processing
