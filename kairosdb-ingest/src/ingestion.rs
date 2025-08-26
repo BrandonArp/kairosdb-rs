@@ -651,7 +651,7 @@ impl IngestionService {
             std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
 
         info!(
-            "Work sender task started with no delays (except {}ms when channel full)",
+            "Work sender task started with no delays (except {}ms when channel full or queue empty)",
             config.ingestion.batch_timeout_ms
         );
 
@@ -684,8 +684,9 @@ impl IngestionService {
             };
 
             if work_items.is_empty() {
-                // No work available - add small delay to prevent CPU spinning
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                // No work available - use reasonable delay to prevent CPU spinning
+                // Use the same delay as when channel is full for consistency
+                tokio::time::sleep(full_channel_delay).await;
                 continue;
             }
 
