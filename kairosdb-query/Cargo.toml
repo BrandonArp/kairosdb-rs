@@ -11,9 +11,9 @@ repository = "https://github.com/example/kairosdb-rs"
 tokio = { version = "1.0", features = ["full"] }
 
 # Web framework
-axum = { version = "0.7", features = ["json"] }
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -24,17 +24,17 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { workspace = true }
 
 # Math and statistics
-ordered-float = "4.0"
+ordered-float = { workspace = true }
 
 # Caching
 moka = { version = "0.12", features = ["future"] }
@@ -44,4 +44,4 @@ kairosdb-core = { path = "../kairosdb-core" }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tower = { version = "0.4", features = ["util"] }
+tower = { workspace = true, features = ["util"] }

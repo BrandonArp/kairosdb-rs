@@ -369,9 +369,10 @@ impl HighPerformanceQueue {
             .join(format!("batch_{:010}.dat", file_id));
 
         let serialize_start = Instant::now();
-        let serialized = bincode::serialize(&batch_to_spill).map_err(|e| {
-            KairosError::parse(format!("Failed to serialize batch for disk: {}", e))
-        })?;
+        let serialized =
+            bincode::serde::encode_to_vec(&batch_to_spill, bincode::config::standard()).map_err(
+                |e| KairosError::parse(format!("Failed to serialize batch for disk: {}", e)),
+            )?;
         self.inner
             .metrics
             .serialize_duration
@@ -503,9 +504,10 @@ impl HighPerformanceQueue {
         let data = fs::read(file_path)
             .map_err(|e| KairosError::validation(format!("Failed to read batch file: {}", e)))?;
 
-        let batch: DataPointBatch = bincode::deserialize(&data).map_err(|e| {
-            KairosError::parse(format!("Failed to deserialize batch from disk: {}", e))
-        })?;
+        let (batch, _): (DataPointBatch, _) =
+            bincode::serde::decode_from_slice(&data, bincode::config::standard()).map_err(|e| {
+                KairosError::parse(format!("Failed to deserialize batch from disk: {}", e))
+            })?;
 
         self.inner
             .metrics

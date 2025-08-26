@@ -1,4 +1,5 @@
 use rand::prelude::*;
+use rand::rng;
 use rand_distr::{Distribution, LogNormal, Normal};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -227,7 +228,7 @@ impl MetricDataGenerator {
         &mut self,
         metric_name: &str,
     ) -> Vec<HashMap<String, String>> {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let mut combinations = Vec::new();
         let pools = &self.tag_pools;
 
@@ -267,7 +268,7 @@ impl MetricDataGenerator {
                         "status_code".to_string(),
                         pools.status_codes.choose(&mut rng).unwrap().clone(),
                     );
-                    if rng.gen_bool(0.7) {
+                    if rng.random_bool(0.7) {
                         tags.insert(
                             "region".to_string(),
                             pools.regions.choose(&mut rng).unwrap().clone(),
@@ -285,7 +286,7 @@ impl MetricDataGenerator {
                     );
                     tags.insert(
                         "table".to_string(),
-                        format!("table_{}", rng.gen_range(1..=20)),
+                        format!("table_{}", rng.random_range(1..=20)),
                     );
                     tags.insert(
                         "operation".to_string(),
@@ -294,7 +295,7 @@ impl MetricDataGenerator {
                             .unwrap()
                             .to_string(),
                     );
-                    if rng.gen_bool(0.8) {
+                    if rng.random_bool(0.8) {
                         tags.insert(
                             "region".to_string(),
                             pools.regions.choose(&mut rng).unwrap().clone(),
@@ -318,7 +319,7 @@ impl MetricDataGenerator {
                         "region".to_string(),
                         pools.regions.choose(&mut rng).unwrap().clone(),
                     );
-                    if rng.gen_bool(0.6) {
+                    if rng.random_bool(0.6) {
                         tags.insert(
                             "version".to_string(),
                             pools.versions.choose(&mut rng).unwrap().clone(),
@@ -357,7 +358,7 @@ impl MetricDataGenerator {
                     );
                     tags.insert(
                         "queue_name".to_string(),
-                        format!("queue_{}", rng.gen_range(1..=10)),
+                        format!("queue_{}", rng.random_range(1..=10)),
                     );
                     tags.insert(
                         "queue_type".to_string(),
@@ -401,7 +402,7 @@ impl MetricDataGenerator {
                         "environment".to_string(),
                         pools.environments.choose(&mut rng).unwrap().clone(),
                     );
-                    if rng.gen_bool(0.7) {
+                    if rng.random_bool(0.7) {
                         tags.insert(
                             "region".to_string(),
                             pools.regions.choose(&mut rng).unwrap().clone(),
@@ -422,11 +423,11 @@ impl MetricDataGenerator {
 
         for _ in 0..batch_size {
             let (template, tag_combo) = {
-                let mut rng = thread_rng(); // Create fresh RNG for each iteration
+                let mut rng = rng(); // Create fresh RNG for each iteration
                 let template =
-                    &self.metric_templates[rng.gen_range(0..self.metric_templates.len())];
-                let tag_combo =
-                    &template.tag_combinations[rng.gen_range(0..template.tag_combinations.len())];
+                    &self.metric_templates[rng.random_range(0..self.metric_templates.len())];
+                let tag_combo = &template.tag_combinations
+                    [rng.random_range(0..template.tag_combinations.len())];
                 (template, tag_combo)
             }; // RNG goes out of scope here
 
@@ -463,7 +464,7 @@ impl MetricDataGenerator {
                 })]
             }
             MetricType::Counter => {
-                let value = thread_rng().gen_range(1..=100) as u64;
+                let value = rng().random_range(1..=100) as u64;
                 vec![json!({
                     "name": template.name,
                     "datapoints": [[timestamp, value]],
@@ -471,7 +472,7 @@ impl MetricDataGenerator {
                 })]
             }
             MetricType::Gauge => {
-                let sampled_value: f64 = Normal::new(50.0, 15.0).unwrap().sample(&mut thread_rng());
+                let sampled_value: f64 = Normal::new(50.0, 15.0).unwrap().sample(&mut rng());
                 let value: f64 = sampled_value.max(0.0);
                 vec![json!({
                     "name": template.name,
@@ -480,7 +481,7 @@ impl MetricDataGenerator {
                 })]
             }
             MetricType::Timer => {
-                let value: f64 = LogNormal::new(0.0, 1.0).unwrap().sample(&mut thread_rng());
+                let value: f64 = LogNormal::new(0.0, 1.0).unwrap().sample(&mut rng());
                 vec![json!({
                     "name": template.name,
                     "datapoints": [[timestamp, value]],
@@ -491,13 +492,13 @@ impl MetricDataGenerator {
     }
 
     async fn generate_realistic_histogram(&self, boundaries: &[f64]) -> Value {
-        let mut rng = thread_rng();
-        let sample_count = rng.gen_range(
+        let mut rng = rng();
+        let sample_count = rng.random_range(
             self.config.histogram_samples_range.0..=self.config.histogram_samples_range.1,
         );
 
         // Generate realistic distributions based on boundary ranges
-        let distribution_type = rng.gen_range(0..3);
+        let distribution_type = rng.random_range(0..3);
         let samples = match distribution_type {
             0 => self.generate_normal_samples(boundaries, sample_count),
             1 => self.generate_exponential_samples(boundaries, sample_count),
@@ -546,7 +547,7 @@ impl MetricDataGenerator {
         let normal = Normal::new(mean, std_dev).unwrap();
 
         (0..count)
-            .map(|_| normal.sample(&mut thread_rng()).max(0.0))
+            .map(|_| normal.sample(&mut rng()).max(0.0))
             .collect()
     }
 
@@ -554,9 +555,7 @@ impl MetricDataGenerator {
         let scale = boundaries[boundaries.len() / 3];
         let log_normal = LogNormal::new(scale.ln(), 1.0).unwrap();
 
-        (0..count)
-            .map(|_| log_normal.sample(&mut thread_rng()))
-            .collect()
+        (0..count).map(|_| log_normal.sample(&mut rng())).collect()
     }
 
     fn generate_bimodal_samples(&self, boundaries: &[f64], count: usize) -> Vec<f64> {
@@ -569,12 +568,12 @@ impl MetricDataGenerator {
 
         (0..count)
             .map(|_| {
-                let dist = if thread_rng().gen_bool(0.7) {
+                let dist = if rng().random_bool(0.7) {
                     &normal1
                 } else {
                     &normal2
                 };
-                dist.sample(&mut thread_rng()).max(0.0)
+                dist.sample(&mut rng()).max(0.0)
             })
             .collect()
     }

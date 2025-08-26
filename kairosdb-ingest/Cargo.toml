@@ -68,7 +68,7 @@ prometheus = "0.14"
 flate2 = "1.0"
 
 # Memory monitoring
-sysinfo = "0.30"
+sysinfo = "0.37"
 
 # Hex encoding for binary data
 hex = "0.4"
@@ -77,15 +77,15 @@ hex = "0.4"
 probabilistic-collections = "0.7"
 
 # Persistent queue storage (without compression for better CPU performance)
-fjall = { version = "2.6", default-features = false }
-bincode = "1.3"
+fjall = { version = "2.11", default-features = false }
+bincode = { version = "2.0", features = ["serde"] }
 rmp-serde = "1.1"  # MessagePack for queue serialization
 
 # Multi-producer multi-consumer channels
 flume = "0.11"
 
 # CPU profiling support
-pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"], optional = true }
+pprof = { version = "0.15", features = ["flamegraph", "protobuf-codec"], optional = true }
 
 [features]
 # Enable CPU profiling with pprof
