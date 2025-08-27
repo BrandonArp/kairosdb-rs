@@ -23,7 +23,7 @@ use std::{
 };
 use tokio::{sync::Notify, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Tracks active HTTP requests for graceful shutdown
 #[derive(Debug, Clone)]
@@ -42,13 +42,13 @@ impl ConnectionTracker {
     /// Increment the active request count
     pub fn increment(&self) {
         let count = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
-        debug!("HTTP request started, active requests: {}", count);
+        trace!("HTTP request started, active requests: {}", count);
     }
 
     /// Decrement the active request count
     pub fn decrement(&self) {
         let count = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
-        debug!("HTTP request completed, active requests: {}", count);
+        trace!("HTTP request completed, active requests: {}", count);
     }
 
     /// Get the current number of active HTTP requests

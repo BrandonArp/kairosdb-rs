@@ -29,9 +29,6 @@ spec:
               value: "cassandra:9042"
             - name: KAIROSDB_BIND_ADDRESS
               value: "0.0.0.0:8081"
-            - name: USE_NULL_QUEUE
-              value: "true"
-
             - name: USE_REAL_CASSANDRA
               value: "true"
           readinessProbe:
