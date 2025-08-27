@@ -15,9 +15,7 @@ use kairosdb_core::error::KairosError;
 use prometheus::TextEncoder;
 use serde_json::json;
 use std::{io::Read, time::Instant};
-#[cfg(feature = "profiling")]
-use tracing::info;
-use tracing::{error, trace, warn};
+use tracing::{error, info, trace, warn};
 
 #[cfg(feature = "profiling")]
 use pprof;
@@ -43,6 +41,27 @@ pub struct IngestParams {
 /// Health check endpoint compatible with KairosDB format
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let _timer = state.http_metrics.start_request_timer("health");
+
+    // Check if shutdown manager indicates we should fail health checks
+    if state.shutdown_manager.should_fail_health_checks() {
+        info!("Health check failing due to shutdown in progress");
+        let response = json!({
+            "status": "unhealthy",
+            "service": "kairosdb-ingest",
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": "shutdown_in_progress",
+            "checks": {
+                "cassandra": "unknown",
+                "memory": "unknown",
+                "queue": "unknown"
+            }
+        });
+        state
+            .http_metrics
+            .record_status_code(StatusCode::SERVICE_UNAVAILABLE);
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(response));
+    }
+
     match state.ingestion_service.health_check().await {
         Ok(status) => {
             let response = match status {
@@ -564,6 +583,58 @@ pub async fn request_size_middleware(headers: HeaderMap, request: Request, next:
     }
 
     next.run(request).await
+}
+
+/// Connection tracking middleware - tracks active HTTP connections for graceful shutdown
+pub async fn connection_tracking_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Increment connection count when request starts
+    state.shutdown_manager.connection_tracker().increment();
+
+    // Process the request
+    let response = next.run(request).await;
+
+    // Decrement connection count when request completes
+    state.shutdown_manager.connection_tracker().decrement();
+
+    response
+}
+
+/// Connection draining middleware - rejects new requests during graceful shutdown
+pub async fn connection_draining_middleware(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // Check if we should reject new requests due to connection draining
+    if state.shutdown_manager.should_drain_connections() {
+        warn!("Rejecting new request due to connection draining in progress");
+        let error_response =
+            ErrorResponse::from_error("Service is shutting down, please retry on another instance");
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(error_response)).into_response();
+
+        // Set Connection: close header to signal client to close connection
+        response
+            .headers_mut()
+            .insert("Connection", "close".parse().unwrap());
+        return response;
+    }
+
+    // Process the request normally
+    let mut response = next.run(request).await;
+
+    // If we're in draining phase, add Connection: close header to all responses
+    // to encourage clients to close connections after this response
+    if state.shutdown_manager.should_drain_connections() {
+        response
+            .headers_mut()
+            .insert("Connection", "close".parse().unwrap());
+    }
+
+    response
 }
 
 /// CPU profiling endpoint - generates flame graph

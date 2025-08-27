@@ -16,11 +16,13 @@ pub mod memory_queue;
 pub mod metrics;
 pub mod mock_client;
 pub mod persistent_queue;
+pub mod shutdown;
 
 // Re-export commonly used types
 pub use config::IngestConfig;
 pub use ingestion::IngestionService;
 pub use json_parser::JsonParser;
+pub use shutdown::{ConnectionTracker, ShutdownConfig, ShutdownManager, ShutdownPhase};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -28,6 +30,7 @@ pub struct AppState {
     pub ingestion_service: std::sync::Arc<IngestionService>,
     pub config: std::sync::Arc<IngestConfig>,
     pub http_metrics: std::sync::Arc<crate::http_metrics::HttpMetrics>,
+    pub shutdown_manager: std::sync::Arc<ShutdownManager>,
 }
 
 /// Create the main application router
@@ -64,6 +67,14 @@ pub fn create_router(state: AppState) -> axum::Router {
         .layer(
             ServiceBuilder::new()
                 .layer(axum::middleware::from_fn(timing_middleware))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    connection_draining_middleware,
+                ))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    connection_tracking_middleware,
+                ))
                 .layer(axum::middleware::from_fn(request_size_middleware))
                 .layer(RequestBodyLimitLayer::new(
                     state.config.ingestion.max_request_size,

@@ -234,6 +234,7 @@ pub struct PersistentQueue {
     partition: PartitionHandle,
     queue_size: AtomicU64,
     metrics: QueueMetrics,
+    #[allow(dead_code)]
     data_dir: std::path::PathBuf,
     /// Cursor for optimized queue scanning
     cursor: RwLock<QueueCursor>,
@@ -920,25 +921,11 @@ impl PersistentQueue {
 
     /// Get disk usage in bytes for the queue data directory
     pub fn get_disk_usage_bytes(&self) -> Result<u64> {
-        let mut total_size = 0u64;
-
-        // Recursively calculate size of all files in the data directory
-        for entry in std::fs::read_dir(&self.data_dir)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-
-            if metadata.is_file() {
-                total_size += metadata.len();
-            } else if metadata.is_dir() {
-                // Recursively calculate subdirectory sizes
-                total_size += Self::calculate_dir_size(&entry.path())?;
-            }
-        }
-
-        Ok(total_size)
+        Ok(self.partition.disk_space())
     }
 
     /// Helper to recursively calculate directory size
+    #[allow(dead_code)]
     fn calculate_dir_size(dir: &Path) -> Result<u64> {
         let mut size = 0u64;
 

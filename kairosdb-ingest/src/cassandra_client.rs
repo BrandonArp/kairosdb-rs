@@ -346,8 +346,8 @@ impl MultiWorkerCassandraClient {
                         }
                     }
                     _ = shutdown_token.cancelled() => {
-                        // Shutdown requested
-                        trace!("Worker {} received shutdown signal", worker_id);
+                        // Shutdown requested - this happens during step 8 (worker shutdown phase)
+                        info!("Worker {} received shutdown signal, exiting gracefully", worker_id);
                         break;
                     }
                 };

@@ -1,11 +1,10 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::{net::TcpListener, signal};
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 // Use the library modules
-use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService};
+use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService, ShutdownManager};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,11 +24,11 @@ async fn main() -> Result<()> {
     let config = Arc::new(IngestConfig::load()?);
     info!("Configuration loaded successfully");
 
-    // Create cancellation token for coordinated shutdown
-    let shutdown_token = CancellationToken::new();
+    // Create shutdown manager for coordinated graceful shutdown
+    let shutdown_manager = Arc::new(ShutdownManager::new());
 
     // Initialize ingestion service
-    let ingestion_service = IngestionService::new(config.clone(), shutdown_token.clone()).await?;
+    let ingestion_service = IngestionService::new(config.clone(), shutdown_manager.clone()).await?;
     info!("Ingestion service initialized");
 
     // Initialize HTTP metrics
@@ -38,14 +37,19 @@ async fn main() -> Result<()> {
 
     // Start background tasks that need coordinated shutdown
     let queue_processor_handle = ingestion_service
-        .start_queue_processor(shutdown_token.clone())
+        .start_queue_processor(shutdown_manager.clone())
         .await;
+
+    // Start background metrics update task
+    let metrics_update_handle =
+        ingestion_service.start_metrics_update_task(shutdown_manager.clone());
 
     // Create shared state
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
         config: config.clone(),
         http_metrics,
+        shutdown_manager: shutdown_manager.clone(),
     };
 
     // Build router using the library function
@@ -56,49 +60,80 @@ async fn main() -> Result<()> {
     let addr = listener.local_addr()?;
     info!("KairosDB Ingest Service listening on {}", addr);
 
-    // Clone token for shutdown signal handler
-    let shutdown_token_clone = shutdown_token.clone();
+    // Clone shutdown manager for shutdown signal handler
+    let shutdown_manager_clone = shutdown_manager.clone();
 
-    // Enhanced shutdown signal handler
+    // Enhanced shutdown signal handler that starts the graceful shutdown sequence
     let shutdown_handler = async move {
         shutdown_signal().await;
-        info!("Shutdown signal received, initiating graceful shutdown");
-        shutdown_token_clone.cancel();
+        info!("Shutdown signal received, initiating 10-step graceful shutdown sequence");
+        shutdown_manager_clone.start_shutdown().await;
     };
 
-    // Graceful shutdown handling
-    let graceful = axum::serve(listener, app).with_graceful_shutdown(shutdown_handler);
+    // Graceful HTTP server shutdown (will be triggered by step 4 of shutdown sequence)
+    let shutdown_manager_for_http = shutdown_manager.clone();
+    let graceful = axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_manager_for_http
+            .http_server_token()
+            .cancelled()
+            .await;
+        info!("HTTP server shutdown token triggered");
+    });
 
     info!("Service ready to accept connections");
+
+    // Start the shutdown handler in the background
+    let shutdown_task = tokio::spawn(shutdown_handler);
 
     tokio::select! {
         result = graceful => {
             if let Err(e) = result {
                 error!("HTTP server error: {}", e);
-                shutdown_token.cancel();
+                // Force immediate shutdown on HTTP server error
+                shutdown_manager.force_termination().await;
                 return Err(e.into());
             }
+            info!("HTTP server stopped gracefully");
         }
-        _ = shutdown_token.cancelled() => {
-            info!("Shutdown token cancelled, stopping HTTP server");
+        _ = shutdown_manager.termination_token().cancelled() => {
+            info!("Termination requested, stopping HTTP server immediately");
         }
     }
 
-    info!("HTTP server stopped, waiting for background tasks to finish");
+    info!("Waiting for background tasks to complete graceful shutdown");
 
-    // Wait for background tasks to complete
+    // Wait for background tasks to complete with longer timeouts since we now have an ordered shutdown
     if let Err(e) =
-        tokio::time::timeout(std::time::Duration::from_secs(10), queue_processor_handle).await
+        tokio::time::timeout(std::time::Duration::from_secs(30), queue_processor_handle).await
     {
         warn!(
-            "Queue processor didn't shutdown cleanly within 10s: {:?}",
+            "Queue processor didn't shutdown cleanly within 30s: {:?}",
             e
         );
     } else {
         info!("Queue processor shutdown complete");
     }
 
-    info!("Service shutdown complete");
+    // Wait for metrics update task to complete
+    // This task should shutdown during step 4 (HTTP server shutdown), so give it enough time
+    if let Err(e) =
+        tokio::time::timeout(std::time::Duration::from_secs(8), metrics_update_handle).await
+    {
+        warn!(
+            "Metrics update task didn't shutdown cleanly within 8s: {:?}",
+            e
+        );
+    } else {
+        info!("Metrics update task shutdown complete");
+    }
+
+    // Wait for the shutdown task to complete with a reasonable timeout
+    // The shutdown task runs the entire shutdown sequence which can take up to 2 minutes
+    if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(130), shutdown_task).await {
+        warn!("Shutdown task didn't complete within 130s: {:?}", e);
+    }
+
+    info!("Graceful shutdown sequence completed successfully");
     Ok(())
 }
 

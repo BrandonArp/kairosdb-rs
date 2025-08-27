@@ -7,7 +7,6 @@
 //! - Metrics collection and monitoring
 
 use anyhow::{Context, Result};
-use tokio_util::sync::CancellationToken;
 // Removed unused imports
 use kairosdb_core::{
     datapoint::DataPointBatch,
@@ -29,6 +28,7 @@ use crate::{
     cassandra_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     config::IngestConfig,
     persistent_queue::PersistentQueue,
+    shutdown::{ShutdownManager, ShutdownPhase},
 };
 
 use crate::mock_client::MockCassandraClient;
@@ -109,7 +109,10 @@ pub struct IngestionService {
 
 impl IngestionService {
     /// Create a new ingestion service
-    pub async fn new(config: Arc<IngestConfig>, shutdown_token: CancellationToken) -> Result<Self> {
+    pub async fn new(
+        config: Arc<IngestConfig>,
+        shutdown_manager: Arc<ShutdownManager>,
+    ) -> Result<Self> {
         config.validate().context("Invalid configuration")?;
 
         info!("Initializing ingestion service");
@@ -143,7 +146,7 @@ impl IngestionService {
                     work_rx,
                     response_tx,
                     response_rx.clone(),
-                    shutdown_token.clone(),
+                    shutdown_manager.workers_token().clone(),
                 )
                 .await
                 .context("Failed to initialize multi-worker Cassandra client")?;
@@ -198,7 +201,7 @@ impl IngestionService {
             backpressure_active,
         };
 
-        // Queue processor will be started in main.rs with proper shutdown handling
+        // Background tasks (queue processor and metrics update) will be started in main.rs with proper shutdown handling
         info!("Ingestion service initialized, queue processor will be started with shutdown token");
 
         info!(
@@ -260,11 +263,74 @@ impl IngestionService {
         };
 
         // Start background queue processing task for testing
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
-        let _queue_processor = service.start_queue_processor(shutdown_token).await;
+        let shutdown_manager = Arc::new(crate::shutdown::ShutdownManager::new());
+        let _queue_processor = service
+            .start_queue_processor(shutdown_manager.clone())
+            .await;
+
+        // Start background metrics update task for testing
+        let _metrics_update_handle = service.start_metrics_update_task(shutdown_manager);
 
         info!("Test ingestion service initialized with mock client and persistent queue processor");
         Ok(service)
+    }
+
+    /// Start background task to update expensive metrics every 500ms
+    pub fn start_metrics_update_task(
+        &self,
+        shutdown_manager: Arc<ShutdownManager>,
+    ) -> tokio::task::JoinHandle<()> {
+        let cassandra_client = Arc::clone(&self.cassandra_client);
+        let bloom_memory_usage = Arc::clone(&self.metrics.bloom_memory_usage);
+        let prometheus_metrics = self.metrics.prometheus_metrics.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Update bloom filter memory usage metrics (expensive operation)
+                        let cassandra_stats = cassandra_client.get_detailed_stats();
+
+                        // Update atomic metrics
+                        bloom_memory_usage.store(
+                            cassandra_stats.bloom_filter_total_memory_bytes,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+
+                        // Update Prometheus metrics
+                        prometheus_metrics.bloom_memory_usage_gauge
+                            .set(cassandra_stats.bloom_filter_total_memory_bytes as f64);
+
+                        // Update bloom filter ones count metrics (most expensive calculations)
+                        if let Some(primary_ones) = cassandra_stats.bloom_filter_primary_ones_count {
+                            prometheus_metrics.bloom_filter_primary_ones_gauge
+                                .set(primary_ones as f64);
+                        }
+
+                        if let Some(secondary_ones) = cassandra_stats.bloom_filter_secondary_ones_count {
+                            prometheus_metrics.bloom_filter_secondary_ones_gauge
+                                .set(secondary_ones as f64);
+                        } else {
+                            // Clear secondary gauge when no secondary filter exists
+                            prometheus_metrics.bloom_filter_secondary_ones_gauge
+                                .set(0.0);
+                        }
+                    }
+                    _ = shutdown_manager.termination_token().cancelled() => {
+                        info!("Metrics update task shutting down due to termination signal");
+                        break;
+                    }
+                    _ = shutdown_manager.http_server_token().cancelled() => {
+                        info!("Metrics update task shutting down due to HTTP server shutdown");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Started background metrics update task (500ms interval)");
+        handle
     }
 
     /// Submit a batch for ingestion with write-ahead logging (fire-and-forget)
@@ -378,7 +444,7 @@ impl IngestionService {
     /// Start the background queue processor task
     pub async fn start_queue_processor(
         &self,
-        shutdown_token: tokio_util::sync::CancellationToken,
+        shutdown_manager: Arc<ShutdownManager>,
     ) -> tokio::task::JoinHandle<()> {
         let persistent_queue = self.persistent_queue.clone();
         let _cassandra_client = self.cassandra_client.clone();
@@ -413,7 +479,7 @@ impl IngestionService {
                 response_rx,
                 config,
                 metrics,
-                shutdown_token,
+                shutdown_manager,
             )
             .await;
         })
@@ -426,7 +492,7 @@ impl IngestionService {
         response_rx: flume::Receiver<WorkResponse>,
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
-        shutdown_token: CancellationToken,
+        shutdown_manager: Arc<ShutdownManager>,
     ) {
         info!("Starting separate response processor and work sender tasks");
 
@@ -434,9 +500,9 @@ impl IngestionService {
         let response_task = {
             let queue = persistent_queue.clone();
             let metrics = metrics.clone();
-            let shutdown_token_clone = shutdown_token.clone();
+            let shutdown_manager_clone = shutdown_manager.clone();
             tokio::spawn(async move {
-                Self::run_response_processor(queue, response_rx, metrics, shutdown_token_clone)
+                Self::run_response_processor(queue, response_rx, metrics, shutdown_manager_clone)
                     .await;
             })
         };
@@ -446,17 +512,26 @@ impl IngestionService {
             let queue = persistent_queue.clone();
             let config = config.clone();
             let metrics_clone = metrics.clone();
-            let shutdown_token_clone = shutdown_token.clone();
+            let shutdown_manager_clone = shutdown_manager.clone();
             tokio::spawn(async move {
-                Self::run_work_sender(queue, work_tx, config, metrics_clone, shutdown_token_clone)
-                    .await;
+                Self::run_work_sender(
+                    queue,
+                    work_tx,
+                    config,
+                    metrics_clone,
+                    shutdown_manager_clone,
+                )
+                .await;
             })
         };
 
         // Wait for shutdown signal or task completion
         tokio::select! {
-            _ = shutdown_token.cancelled() => {
-                info!("Shutdown requested, stopping queue processor tasks");
+            _ = shutdown_manager.termination_token().cancelled() => {
+                info!("Final termination requested, stopping queue processor tasks immediately");
+            }
+            _ = shutdown_manager.queue_dequeuing_token().cancelled() => {
+                info!("Queue dequeuing shutdown requested, stopping queue processor tasks");
             }
             result = response_task => {
                 warn!("Response processor task completed unexpectedly: {:?}", result);
@@ -474,7 +549,7 @@ impl IngestionService {
         persistent_queue: Arc<PersistentQueue>,
         response_rx: flume::Receiver<WorkResponse>,
         metrics: IngestionMetrics,
-        shutdown_token: CancellationToken,
+        shutdown_manager: Arc<ShutdownManager>,
     ) {
         info!("Response processor task started with batched queue operations");
 
@@ -482,9 +557,11 @@ impl IngestionService {
         let mut failed_unclaims = Vec::new();
 
         loop {
-            // Check for shutdown signal
-            if shutdown_token.is_cancelled() {
-                info!("Response processor received shutdown signal, exiting");
+            // Only check for immediate termination signal
+            // Workers will naturally exit when work channel closes, and then response channel will close
+            // Response processor relies primarily on channel close for graceful shutdown
+            if shutdown_manager.termination_token().is_cancelled() {
+                info!("Response processor received immediate termination signal");
                 break;
             }
             // Record response channel utilization BEFORE collecting responses
@@ -530,7 +607,11 @@ impl IngestionService {
                     responses_collected += 1;
                 }
                 Err(_) => {
-                    error!("Response processor exiting - response channel closed");
+                    if shutdown_manager.current_phase() >= ShutdownPhase::QueueDequeueingStopped {
+                        info!("Response processor exiting - workers finished and response channel closed naturally");
+                    } else {
+                        warn!("Response processor exiting - response channel closed before shutdown started");
+                    }
                     break;
                 }
             }
@@ -568,7 +649,7 @@ impl IngestionService {
                 if responses_collected == 1 {
                     // Single response - don't log batch info
                 } else {
-                    debug!("Processed batch of {} successful responses ({} total points, response channel: {}/{} items, {}% full, {}% avg)",
+                    trace!("Processed batch of {} successful responses ({} total points, response channel: {}/{} items, {}% full, {}% avg)",
                           successful_removals.len(), total_points, response_channel_len, response_channel_capacity, response_channel_fullness, new_avg);
                 }
                 successful_removals.clear();
@@ -645,7 +726,7 @@ impl IngestionService {
         work_tx: flume::Sender<WorkItem>,
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
-        shutdown_token: CancellationToken,
+        shutdown_manager: Arc<ShutdownManager>,
     ) {
         let full_channel_delay = config.batch_timeout();
         let empty_queue_delay = config.empty_queue_delay();
@@ -657,8 +738,10 @@ impl IngestionService {
         );
 
         loop {
-            // Check for shutdown signal
-            if shutdown_token.is_cancelled() {
+            // Check for shutdown signal - respect queue dequeuing shutdown or termination
+            if shutdown_manager.queue_dequeuing_token().is_cancelled()
+                || shutdown_manager.termination_token().is_cancelled()
+            {
                 info!("Work sender received shutdown signal, exiting");
                 break;
             }
@@ -775,50 +858,8 @@ impl IngestionService {
         }
     }
 
-    /// Update bloom filter memory usage metrics
-    fn update_bloom_memory_metrics(&self) {
-        // Get detailed bloom stats from the Cassandra client (includes expensive ones count)
-        let cassandra_stats = self.cassandra_client.get_detailed_stats();
-
-        // Update atomic metrics
-        self.metrics.bloom_memory_usage.store(
-            cassandra_stats.bloom_filter_total_memory_bytes,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        // Update Prometheus metrics
-        self.metrics
-            .prometheus_metrics
-            .bloom_memory_usage_gauge
-            .set(cassandra_stats.bloom_filter_total_memory_bytes as f64);
-
-        // Update bloom filter ones count metrics
-        if let Some(primary_ones) = cassandra_stats.bloom_filter_primary_ones_count {
-            self.metrics
-                .prometheus_metrics
-                .bloom_filter_primary_ones_gauge
-                .set(primary_ones as f64);
-        }
-
-        if let Some(secondary_ones) = cassandra_stats.bloom_filter_secondary_ones_count {
-            self.metrics
-                .prometheus_metrics
-                .bloom_filter_secondary_ones_gauge
-                .set(secondary_ones as f64);
-        } else {
-            // Clear secondary gauge when no secondary filter exists
-            self.metrics
-                .prometheus_metrics
-                .bloom_filter_secondary_ones_gauge
-                .set(0.0);
-        }
-    }
-
     /// Get current metrics snapshot
     pub fn get_metrics_snapshot(&self) -> IngestionMetricsSnapshot {
-        // Update bloom memory metrics when snapshot is requested
-        self.update_bloom_memory_metrics();
-
         IngestionMetricsSnapshot {
             datapoints_ingested: self.metrics.datapoints_ingested.load(Ordering::Relaxed),
             batches_processed: self.metrics.batches_processed.load(Ordering::Relaxed),
@@ -836,9 +877,6 @@ impl IngestionService {
 
     /// Health check for the ingestion service
     pub async fn health_check(&self) -> Result<HealthStatus> {
-        // Update bloom memory metrics during health check
-        self.update_bloom_memory_metrics();
-
         let cassandra_healthy = self.cassandra_client.health_check().await.unwrap_or(false);
         let backpressure_active = self.backpressure_active.load(Ordering::Relaxed) > 0;
         let queue_size = self.persistent_queue.size() as usize;
@@ -1072,7 +1110,10 @@ mod tests {
         let config = Arc::new(IngestConfig::default());
         let service = IngestionService::new_with_mock(config).await.unwrap();
 
-        // Get initial metrics snapshot
+        // Wait a bit for the background metrics task to run (it runs every 500ms)
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+
+        // Get metrics snapshot after background task has had a chance to run
         let metrics = service.get_metrics_snapshot();
 
         // Bloom memory usage should be calculated and non-zero
