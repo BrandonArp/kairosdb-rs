@@ -23,9 +23,10 @@ async fn create_test_app_with_mock() -> axum::Router {
     let config = Arc::new(config);
 
     let shutdown_manager = Arc::new(kairosdb_ingest::ShutdownManager::new());
-    let ingestion_service = IngestionService::new(config.clone(), shutdown_manager.clone())
-        .await
-        .expect("Failed to create ingestion service for testing");
+    let (ingestion_service, _null_queue_work_channel) =
+        IngestionService::new(config.clone(), shutdown_manager.clone())
+            .await
+            .expect("Failed to create ingestion service for testing");
 
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
@@ -46,9 +47,10 @@ async fn create_test_app() -> axum::Router {
     let config = Arc::new(config);
 
     let shutdown_manager = Arc::new(kairosdb_ingest::ShutdownManager::new());
-    let ingestion_service = IngestionService::new(config.clone(), shutdown_manager.clone())
-        .await
-        .expect("Failed to create ingestion service for testing");
+    let (ingestion_service, _null_queue_work_channel) =
+        IngestionService::new(config.clone(), shutdown_manager.clone())
+            .await
+            .expect("Failed to create ingestion service for testing");
 
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
@@ -609,7 +611,7 @@ mod service_integration_tests {
         let config = Arc::new(config);
 
         let shutdown_manager = Arc::new(kairosdb_ingest::ShutdownManager::new());
-        let service = IngestionService::new(config, shutdown_manager)
+        let (service, _null_queue_work_channel) = IngestionService::new(config, shutdown_manager)
             .await
             .unwrap();
 

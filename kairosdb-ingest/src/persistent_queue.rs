@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::queue_trait::Queue;
+
 /// Queue scanning cursor for optimized work item claiming
 #[derive(Debug)]
 struct QueueCursor {
@@ -941,6 +943,65 @@ impl PersistentQueue {
         }
 
         Ok(size)
+    }
+}
+
+// Implement Queue trait for PersistentQueue
+impl Queue for PersistentQueue {
+    fn enqueue_batch(&self, batch: DataPointBatch) -> KairosResult<()> {
+        self.enqueue_batch(batch)
+    }
+
+    fn enqueue_batch_with_sync(
+        &self,
+        batch: DataPointBatch,
+        sync_to_disk: bool,
+    ) -> KairosResult<()> {
+        self.enqueue_batch_with_sync(batch, sync_to_disk)
+    }
+
+    fn enqueue(&self, data_point: DataPoint) -> KairosResult<()> {
+        self.enqueue(data_point)
+    }
+
+    fn claim_next_work_item(&self, timeout_ms: u64) -> KairosResult<Option<QueueWorkItem>> {
+        self.claim_next_work_item(timeout_ms)
+    }
+
+    fn claim_work_items_batch(
+        &self,
+        timeout_ms: u64,
+        max_items: usize,
+    ) -> KairosResult<Vec<QueueWorkItem>> {
+        self.claim_work_items_batch(timeout_ms, max_items)
+    }
+
+    fn remove_processed_item(&self, queue_key: &str, batch_size: usize) -> KairosResult<()> {
+        self.remove_processed_item(queue_key, batch_size)
+    }
+
+    fn mark_item_failed(&self, queue_key: &str) -> KairosResult<()> {
+        self.mark_item_failed(queue_key)
+    }
+
+    fn size(&self) -> u64 {
+        self.size()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    fn flush(&self) -> KairosResult<()> {
+        self.flush()
+    }
+
+    fn metrics(&self) -> &QueueMetrics {
+        self.metrics()
+    }
+
+    fn get_disk_usage_bytes(&self) -> anyhow::Result<u64> {
+        self.get_disk_usage_bytes()
     }
 }
 

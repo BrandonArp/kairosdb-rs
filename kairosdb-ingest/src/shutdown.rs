@@ -25,10 +25,10 @@ use tokio::{sync::Notify, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-/// Tracks active HTTP connections for graceful shutdown
+/// Tracks active HTTP requests for graceful shutdown
 #[derive(Debug, Clone)]
 pub struct ConnectionTracker {
-    /// Number of active connections
+    /// Number of active HTTP requests (not actual TCP connections)
     active_connections: Arc<AtomicU64>,
 }
 
@@ -39,24 +39,24 @@ impl ConnectionTracker {
         }
     }
 
-    /// Increment the active connection count
+    /// Increment the active request count
     pub fn increment(&self) {
         let count = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
-        debug!("Connection opened, active connections: {}", count);
+        debug!("HTTP request started, active requests: {}", count);
     }
 
-    /// Decrement the active connection count
+    /// Decrement the active request count
     pub fn decrement(&self) {
         let count = self.active_connections.fetch_sub(1, Ordering::Relaxed) - 1;
-        debug!("Connection closed, active connections: {}", count);
+        debug!("HTTP request completed, active requests: {}", count);
     }
 
-    /// Get the current number of active connections
+    /// Get the current number of active HTTP requests
     pub fn active_count(&self) -> u64 {
         self.active_connections.load(Ordering::Relaxed)
     }
 
-    /// Check if all connections are closed
+    /// Check if all HTTP requests are complete
     pub fn all_connections_closed(&self) -> bool {
         self.active_count() == 0
     }

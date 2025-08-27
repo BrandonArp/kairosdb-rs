@@ -27,7 +27,9 @@ use crate::{
     cassandra::{BoxedCassandraClient, CassandraClient},
     cassandra_client::{MultiWorkerCassandraClient, WorkItem, WorkResponse},
     config::IngestConfig,
+    null_queue::NullQueue,
     persistent_queue::PersistentQueue,
+    queue_trait::BoxedQueue,
     shutdown::{ShutdownManager, ShutdownPhase},
 };
 
@@ -88,8 +90,8 @@ pub struct IngestionService {
     /// Configuration
     config: Arc<IngestConfig>,
 
-    /// Persistent queue for write-ahead logging
-    persistent_queue: Arc<PersistentQueue>,
+    /// Queue for write-ahead logging (persistent or null)
+    queue: BoxedQueue,
 
     /// Cassandra client for data persistence
     cassandra_client: BoxedCassandraClient,
@@ -112,60 +114,131 @@ impl IngestionService {
     pub async fn new(
         config: Arc<IngestConfig>,
         shutdown_manager: Arc<ShutdownManager>,
-    ) -> Result<Self> {
+    ) -> Result<(
+        Self,
+        Option<tokio::sync::mpsc::Receiver<crate::persistent_queue::QueueWorkItem>>,
+    )> {
         config.validate().context("Invalid configuration")?;
 
         info!("Initializing ingestion service");
 
-        // Initialize persistent queue for write-ahead logging
-        let queue_dir = std::path::Path::new("./data/queue");
-        let persistent_queue = Arc::new(
-            PersistentQueue::new(queue_dir)
-                .await
-                .context("Failed to initialize persistent queue")?,
-        );
+        // Initialize queue (persistent or null based on environment)
+        let (queue, null_queue_work_channel): (BoxedQueue, Option<tokio::sync::mpsc::Receiver<_>>) =
+            if std::env::var("USE_NULL_QUEUE").unwrap_or_default() == "true" {
+                info!("Using null queue for memory leak testing (bypasses Fjall LSM storage)");
+
+                // Create bounded channel for null queue (1000 items max, same as work queue)
+                let (work_tx, work_rx) = tokio::sync::mpsc::channel(1000);
+                let null_queue = Arc::new(
+                    NullQueue::new(work_tx)
+                        .await
+                        .context("Failed to initialize null queue")?,
+                ) as BoxedQueue;
+
+                (null_queue, Some(work_rx))
+            } else {
+                info!("Using persistent queue with Fjall LSM storage");
+                let queue_dir = std::path::Path::new("./data/queue");
+                let persistent_queue = Arc::new(
+                    PersistentQueue::new(queue_dir)
+                        .await
+                        .context("Failed to initialize persistent queue")?,
+                ) as BoxedQueue;
+
+                (persistent_queue, None)
+            };
 
         // Check if we should use mock client for testing
-        let (cassandra_client, cassandra_work_tx, cassandra_response_rx) =
-            if std::env::var("USE_MOCK_CASSANDRA").unwrap_or_default() == "true" {
-                info!("Using mock Cassandra client for testing");
-                let mock_client = Arc::new(MockCassandraClient::new()) as BoxedCassandraClient;
-                (mock_client, None, None)
-            } else {
-                info!("Using production multi-worker Cassandra client with bidirectional channels");
-                let num_workers = config.cassandra.max_concurrent_requests;
+        let (cassandra_client, cassandra_work_tx, cassandra_response_rx) = if std::env::var(
+            "USE_MOCK_CASSANDRA",
+        )
+        .unwrap_or_default()
+            == "true"
+        {
+            info!("Using mock Cassandra client for testing");
+            let mock_client = Arc::new(MockCassandraClient::new()) as BoxedCassandraClient;
+            (mock_client, None, None)
+        } else if std::env::var("USE_NULL_CASSANDRA").unwrap_or_default() == "true" {
+            info!("Using null Cassandra client for memory leak testing (discards all data)");
+            let null_client = Arc::new(MockCassandraClient::new_null()) as BoxedCassandraClient;
 
-                // Create shared MPMC channels for bidirectional communication
-                let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
-                let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
+            // Create channels and null workers to prevent blocking
+            let num_workers = config.cassandra.max_concurrent_requests.unwrap_or(200);
+            let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
+            let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
 
-                let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
-                    config.cassandra.clone(),
-                    num_workers,
-                    work_tx.clone(),
-                    work_rx,
-                    response_tx,
-                    response_rx.clone(),
-                    shutdown_manager.workers_token().clone(),
-                )
+            // Spawn null workers that just discard all work items immediately
+            for worker_id in 0..num_workers {
+                let work_rx_clone = work_rx.clone();
+                let response_tx_clone = response_tx.clone();
+                let shutdown_token = shutdown_manager.workers_token().clone();
+
+                tokio::spawn(async move {
+                    info!("Started null worker {} (discards all data)", worker_id);
+                    loop {
+                        tokio::select! {
+                            work_item = work_rx_clone.recv_async() => {
+                                match work_item {
+                                    Ok(item) => {
+                                        // Immediately send back success response (discard data)
+                                        let response = WorkResponse {
+                                            queue_key: item.queue_key,
+                                            result: Ok(item.batch.points.len()),
+                                            processing_duration_ns: 1000, // Fake 1µs processing time
+                                        };
+                                        if (response_tx_clone.send_async(response).await).is_err() {
+                                            break; // Response channel closed
+                                        }
+                                    }
+                                    Err(_) => break, // Work channel closed
+                                }
+                            }
+                            _ = shutdown_token.cancelled() => {
+                                info!("Null worker {} shutting down", worker_id);
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+
+            info!("Created {} null workers that discard all data", num_workers);
+            (null_client, Some(work_tx), Some(response_rx))
+        } else {
+            info!("Using production multi-worker Cassandra client with bidirectional channels");
+            let num_workers = config.cassandra.max_concurrent_requests;
+
+            // Create shared MPMC channels for bidirectional communication
+            let (work_tx, work_rx) = flume::bounded::<WorkItem>(1000);
+            let (response_tx, response_rx) = flume::bounded::<WorkResponse>(1000);
+
+            let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
+                config.cassandra.clone(),
+                num_workers,
+                work_tx.clone(),
+                work_rx,
+                response_tx,
+                response_rx.clone(),
+                shutdown_manager.workers_token().clone(),
+            )
+            .await
+            .context("Failed to initialize multi-worker Cassandra client")?;
+
+            // Ensure schema exists
+            info!("Ensuring KairosDB schema exists");
+            cassandra_client
+                .ensure_schema()
                 .await
-                .context("Failed to initialize multi-worker Cassandra client")?;
+                .context("Failed to ensure Cassandra schema")?;
 
-                // Ensure schema exists
-                info!("Ensuring KairosDB schema exists");
-                cassandra_client
-                    .ensure_schema()
-                    .await
-                    .context("Failed to ensure Cassandra schema")?;
-
-                info!(
+            info!(
                 "Multi-worker Cassandra client ready with {} workers and bidirectional channels",
                 num_workers.unwrap_or(200)
             );
 
-                let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
-                (cassandra_client, Some(work_tx), Some(response_rx))
-            };
+            let cassandra_client = Arc::new(cassandra_client) as BoxedCassandraClient;
+            (cassandra_client, Some(work_tx), Some(response_rx))
+        };
 
         // Initialize Prometheus metrics
         let prometheus_metrics = PrometheusMetrics::new()?;
@@ -193,7 +266,7 @@ impl IngestionService {
 
         let service = Self {
             config: config.clone(),
-            persistent_queue,
+            queue,
             cassandra_client,
             cassandra_work_tx,
             cassandra_response_rx,
@@ -208,7 +281,7 @@ impl IngestionService {
             "Ingestion service initialized with {} worker threads and persistent queue processor",
             config.ingestion.worker_threads
         );
-        Ok(service)
+        Ok((service, null_queue_work_channel))
     }
 
     /// Create a new ingestion service with mock client for testing
@@ -254,7 +327,7 @@ impl IngestionService {
 
         let service = Self {
             config,
-            persistent_queue,
+            queue: persistent_queue,
             cassandra_client,
             cassandra_work_tx: None, // Mock client doesn't use direct channel
             cassandra_response_rx: None, // Mock client doesn't use response channel
@@ -265,7 +338,7 @@ impl IngestionService {
         // Start background queue processing task for testing
         let shutdown_manager = Arc::new(crate::shutdown::ShutdownManager::new());
         let _queue_processor = service
-            .start_queue_processor(shutdown_manager.clone())
+            .start_queue_processor(shutdown_manager.clone(), None)
             .await;
 
         // Start background metrics update task for testing
@@ -348,10 +421,10 @@ impl IngestionService {
         let start = Instant::now();
 
         // Check disk usage for backpressure (same as ingest_batch)
-        let disk_usage = self.persistent_queue.get_disk_usage_bytes().unwrap_or(0);
+        let disk_usage = self.queue.get_disk_usage_bytes().unwrap_or(0);
         let max_disk_bytes = self.config.ingestion.max_queue_disk_bytes;
 
-        let current_queue_size = self.persistent_queue.size();
+        let current_queue_size = self.queue.size();
         let max_queue_size = self.config.ingestion.max_queue_size as u64;
 
         trace!(
@@ -363,10 +436,7 @@ impl IngestionService {
             max_disk_bytes as f64 / 1_048_576.0
         );
 
-        self.persistent_queue
-            .metrics()
-            .disk_usage_bytes
-            .set(disk_usage as f64);
+        self.queue.metrics().disk_usage_bytes.set(disk_usage as f64);
 
         // Check disk usage limit first
         if disk_usage > max_disk_bytes {
@@ -405,9 +475,9 @@ impl IngestionService {
             }
         }
 
-        // Write batch to persistent queue with sync control
+        // Write batch to queue with sync control
         if let Err(e) = self
-            .persistent_queue
+            .queue
             .enqueue_batch_with_sync(batch.clone(), sync_to_disk)
         {
             error!("Failed to write batch to persistent queue: {}", e);
@@ -445,8 +515,11 @@ impl IngestionService {
     pub async fn start_queue_processor(
         &self,
         shutdown_manager: Arc<ShutdownManager>,
+        null_queue_work_channel: Option<
+            tokio::sync::mpsc::Receiver<crate::persistent_queue::QueueWorkItem>,
+        >,
     ) -> tokio::task::JoinHandle<()> {
-        let persistent_queue = self.persistent_queue.clone();
+        let queue = self.queue.clone();
         let _cassandra_client = self.cassandra_client.clone();
         let cassandra_work_tx = self.cassandra_work_tx.clone();
         let cassandra_response_rx = self.cassandra_response_rx.clone();
@@ -454,40 +527,115 @@ impl IngestionService {
         let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
-            info!("Persistent queue processor task spawned successfully");
+            info!("Queue processor task spawned successfully");
 
-            let interval_duration =
-                std::time::Duration::from_millis(config.ingestion.batch_timeout_ms);
-            info!(
-                "Creating interval timer with duration: {:?}",
-                interval_duration
-            );
-            let _interval = tokio::time::interval(interval_duration);
+            // Check if we have null queue work channel (direct feeding)
+            if let Some(mut null_work_rx) = null_queue_work_channel {
+                info!("Starting null queue direct feeding processor");
 
-            info!("Starting persistent queue processor with bidirectional MPMC channels");
+                let work_tx =
+                    cassandra_work_tx.expect("Multi-worker client should provide work channel");
+                let response_rx = cassandra_response_rx
+                    .expect("Multi-worker client should provide response channel");
 
-            // Use bidirectional processor only
-            let work_tx =
-                cassandra_work_tx.expect("Multi-worker client should provide work channel");
-            let response_rx =
-                cassandra_response_rx.expect("Multi-worker client should provide response channel");
+                // Spawn response processor for null queue
+                let response_task = {
+                    let queue = queue.clone();
+                    let metrics = metrics.clone();
+                    let shutdown_manager_clone = shutdown_manager.clone();
+                    tokio::spawn(async move {
+                        Self::run_response_processor(
+                            queue,
+                            response_rx,
+                            metrics,
+                            shutdown_manager_clone,
+                        )
+                        .await;
+                    })
+                };
 
-            info!("Starting optimized bidirectional channel mode");
-            Self::run_bidirectional_processor(
-                persistent_queue,
-                work_tx,
-                response_rx,
-                config,
-                metrics,
-                shutdown_manager,
-            )
-            .await;
+                // Direct feeding from null queue to Cassandra workers
+                loop {
+                    tokio::select! {
+                        work_item = null_work_rx.recv() => {
+                            match work_item {
+                                Some(queue_work_item) => {
+                                    // Check if we should shutdown before processing
+                                    if shutdown_manager.termination_token().is_cancelled() {
+                                        info!("Null queue processor terminating, dropping work item");
+                                        break;
+                                    }
+
+                                    let cassandra_work = WorkItem {
+                                        batch: queue_work_item.entry.batch,
+                                        queue_key: queue_work_item.queue_key,
+                                    };
+
+                                    // Send to Cassandra workers (will wait if channel is full)
+                                    tokio::select! {
+                                        result = work_tx.send_async(cassandra_work) => {
+                                            if result.is_err() {
+                                                warn!("Failed to send work item to Cassandra workers (channel closed)");
+                                                break;
+                                            }
+                                        }
+                                        _ = shutdown_manager.termination_token().cancelled() => {
+                                            info!("Null queue processor terminating during send");
+                                            break;
+                                        }
+                                        _ = shutdown_manager.queue_dequeuing_token().cancelled() => {
+                                            info!("Null queue processor stopping during send");
+                                            break;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    info!("Null queue work channel closed, exiting processor");
+                                    break;
+                                }
+                            }
+                        }
+                        _ = shutdown_manager.termination_token().cancelled() => {
+                            info!("Null queue processor received termination signal");
+                            break;
+                        }
+                        _ = shutdown_manager.queue_dequeuing_token().cancelled() => {
+                            info!("Null queue processor received queue dequeuing shutdown");
+                            break;
+                        }
+                    }
+                }
+
+                info!("Null queue direct feeding processor shutting down");
+
+                // Wait for response processor to finish
+                let _ = response_task.await;
+            } else {
+                info!("Starting persistent queue processor with bidirectional MPMC channels");
+
+                // Use bidirectional processor for persistent queue
+                let work_tx =
+                    cassandra_work_tx.expect("Multi-worker client should provide work channel");
+                let response_rx = cassandra_response_rx
+                    .expect("Multi-worker client should provide response channel");
+
+                info!("Starting optimized bidirectional channel mode");
+                Self::run_bidirectional_processor(
+                    queue,
+                    work_tx,
+                    response_rx,
+                    config,
+                    metrics,
+                    shutdown_manager,
+                )
+                .await;
+            }
         })
     }
 
     /// Run the optimized bidirectional processor with separate tasks
     async fn run_bidirectional_processor(
-        persistent_queue: Arc<PersistentQueue>,
+        queue: BoxedQueue,
         work_tx: flume::Sender<WorkItem>,
         response_rx: flume::Receiver<WorkResponse>,
         config: Arc<IngestConfig>,
@@ -498,7 +646,7 @@ impl IngestionService {
 
         // Spawn dedicated response processing task
         let response_task = {
-            let queue = persistent_queue.clone();
+            let queue = queue.clone();
             let metrics = metrics.clone();
             let shutdown_manager_clone = shutdown_manager.clone();
             tokio::spawn(async move {
@@ -509,7 +657,7 @@ impl IngestionService {
 
         // Spawn dedicated work sending task
         let work_task = {
-            let queue = persistent_queue.clone();
+            let queue = queue.clone();
             let config = config.clone();
             let metrics_clone = metrics.clone();
             let shutdown_manager_clone = shutdown_manager.clone();
@@ -546,7 +694,7 @@ impl IngestionService {
 
     /// Dedicated response processing task - processes responses with batched queue operations
     async fn run_response_processor(
-        persistent_queue: Arc<PersistentQueue>,
+        queue: BoxedQueue,
         response_rx: flume::Receiver<WorkResponse>,
         metrics: IngestionMetrics,
         shutdown_manager: Arc<ShutdownManager>,
@@ -640,12 +788,8 @@ impl IngestionService {
 
             // Process batched removals
             if !successful_removals.is_empty() {
-                let total_points = Self::process_successful_batch(
-                    &persistent_queue,
-                    &successful_removals,
-                    &metrics,
-                )
-                .await;
+                let total_points =
+                    Self::process_successful_batch(&queue, &successful_removals, &metrics).await;
                 if responses_collected == 1 {
                     // Single response - don't log batch info
                 } else {
@@ -657,7 +801,7 @@ impl IngestionService {
 
             // Process batched unclaims
             if !failed_unclaims.is_empty() {
-                Self::process_failed_batch(&persistent_queue, &failed_unclaims, &metrics).await;
+                Self::process_failed_batch(&queue, &failed_unclaims, &metrics).await;
                 failed_unclaims.clear();
             }
         }
@@ -681,14 +825,14 @@ impl IngestionService {
 
     /// Process a batch of successful responses
     async fn process_successful_batch(
-        persistent_queue: &Arc<PersistentQueue>,
+        queue: &BoxedQueue,
         successful_removals: &[(String, usize)],
         metrics: &IngestionMetrics,
     ) -> u64 {
         let mut total_points = 0;
 
         for (queue_key, batch_size) in successful_removals.iter() {
-            if let Err(e) = persistent_queue.remove_processed_item(queue_key, *batch_size) {
+            if let Err(e) = queue.remove_processed_item(queue_key, *batch_size) {
                 error!("Failed to remove successful item from queue: {}", e);
             } else {
                 metrics
@@ -703,13 +847,13 @@ impl IngestionService {
 
     /// Process a batch of failed responses  
     async fn process_failed_batch(
-        persistent_queue: &Arc<PersistentQueue>,
+        queue: &BoxedQueue,
         failed_unclaims: &[(String, String)],
         metrics: &IngestionMetrics,
     ) {
         for (queue_key, error_msg) in failed_unclaims.iter() {
             metrics.cassandra_errors.fetch_add(1, Ordering::Relaxed);
-            if let Err(e) = persistent_queue.mark_item_failed(queue_key) {
+            if let Err(e) = queue.mark_item_failed(queue_key) {
                 error!("Failed to unclaim failed item: {}", e);
             } else {
                 warn!(
@@ -722,7 +866,7 @@ impl IngestionService {
 
     /// Dedicated work sending task - sends work items as fast as possible
     async fn run_work_sender(
-        persistent_queue: Arc<PersistentQueue>,
+        queue: BoxedQueue,
         work_tx: flume::Sender<WorkItem>,
         config: Arc<IngestConfig>,
         metrics: IngestionMetrics,
@@ -759,7 +903,7 @@ impl IngestionService {
             // Use large batches to fill channel efficiently
             let batch_size = available_slots.min(900); // Up to 900 items per batch
 
-            let work_items = match persistent_queue.claim_work_items_batch(30000, batch_size) {
+            let work_items = match queue.claim_work_items_batch(30000, batch_size) {
                 Ok(items) => items,
                 Err(e) => {
                     error!("Failed to claim work items from queue: {}", e);
@@ -799,7 +943,7 @@ impl IngestionService {
                         // Unclaim this and all remaining items
                         for remaining_item in work_items.iter().skip(items_sent) {
                             if let Err(unclaim_err) =
-                                persistent_queue.mark_item_failed(&remaining_item.queue_key)
+                                queue.mark_item_failed(&remaining_item.queue_key)
                             {
                                 error!(
                                     "Failed to unclaim item after unexpected full: {}",
@@ -814,7 +958,7 @@ impl IngestionService {
                         // Unclaim this and all remaining items
                         for remaining_item in work_items.iter().skip(items_sent) {
                             if let Err(unclaim_err) =
-                                persistent_queue.mark_item_failed(&remaining_item.queue_key)
+                                queue.mark_item_failed(&remaining_item.queue_key)
                             {
                                 error!("Failed to unclaim item after disconnect: {}", unclaim_err);
                             }
@@ -866,7 +1010,7 @@ impl IngestionService {
             ingestion_errors: self.metrics.ingestion_errors.load(Ordering::Relaxed),
             validation_errors: self.metrics.validation_errors.load(Ordering::Relaxed),
             cassandra_errors: self.metrics.cassandra_errors.load(Ordering::Relaxed),
-            queue_size: self.persistent_queue.size() as usize,
+            queue_size: self.queue.size() as usize,
             memory_usage: self.metrics.memory_usage.load(Ordering::Relaxed),
             bloom_memory_usage: self.metrics.bloom_memory_usage.load(Ordering::Relaxed),
             avg_batch_time_ms: self.metrics.avg_batch_time_ms.load(Ordering::Relaxed),
@@ -879,7 +1023,7 @@ impl IngestionService {
     pub async fn health_check(&self) -> Result<HealthStatus> {
         let cassandra_healthy = self.cassandra_client.health_check().await.unwrap_or(false);
         let backpressure_active = self.backpressure_active.load(Ordering::Relaxed) > 0;
-        let queue_size = self.persistent_queue.size() as usize;
+        let queue_size = self.queue.size() as usize;
         let max_queue_size = self.config.ingestion.max_queue_size;
 
         let status = if cassandra_healthy && !backpressure_active && queue_size < max_queue_size {

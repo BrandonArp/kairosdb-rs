@@ -28,7 +28,8 @@ async fn main() -> Result<()> {
     let shutdown_manager = Arc::new(ShutdownManager::new());
 
     // Initialize ingestion service
-    let ingestion_service = IngestionService::new(config.clone(), shutdown_manager.clone()).await?;
+    let (ingestion_service, null_queue_work_channel) =
+        IngestionService::new(config.clone(), shutdown_manager.clone()).await?;
     info!("Ingestion service initialized");
 
     // Initialize HTTP metrics
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
 
     // Start background tasks that need coordinated shutdown
     let queue_processor_handle = ingestion_service
-        .start_queue_processor(shutdown_manager.clone())
+        .start_queue_processor(shutdown_manager.clone(), null_queue_work_channel)
         .await;
 
     // Start background metrics update task

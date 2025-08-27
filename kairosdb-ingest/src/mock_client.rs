@@ -31,6 +31,7 @@ pub struct MockCassandraClient {
     storage: Arc<Mutex<MockStorage>>,
     stats: MockClientStats,
     simulate_errors: bool,
+    null_mode: bool, // If true, discards all data instead of storing
 }
 
 /// Statistics tracking for the mock client
@@ -61,6 +62,19 @@ impl MockCassandraClient {
             storage: Arc::new(Mutex::new(MockStorage::default())),
             stats: MockClientStats::default(),
             simulate_errors: false,
+            null_mode: false,
+        }
+    }
+
+    /// Create a new null client that discards all data (for memory testing)
+    pub fn new_null() -> Self {
+        info!("Creating a null Cassandra client for memory leak testing (discards all data)");
+
+        Self {
+            storage: Arc::new(Mutex::new(MockStorage::default())),
+            stats: MockClientStats::default(),
+            simulate_errors: false,
+            null_mode: true,
         }
     }
 
@@ -120,43 +134,49 @@ impl CassandraClient for MockCassandraClient {
 
         trace!("Mock: Writing batch of {} data points", batch.points.len());
 
-        let mut storage = self.storage.lock().unwrap();
+        if !self.null_mode {
+            let mut storage = self.storage.lock().unwrap();
 
-        // Record the operation
-        storage
-            .operations
-            .push(format!("write_batch({} points)", batch.points.len()));
+            // Record the operation
+            storage
+                .operations
+                .push(format!("write_batch({} points)", batch.points.len()));
 
-        // Store each data point
-        for point in &batch.points {
-            let key = format!(
-                "{}:{}:{}",
-                point.metric.as_str(),
-                point.timestamp.timestamp_millis(),
-                point.data_type()
-            );
+            // Store each data point
+            for point in &batch.points {
+                let key = format!(
+                    "{}:{}:{}",
+                    point.metric.as_str(),
+                    point.timestamp.timestamp_millis(),
+                    point.data_type()
+                );
 
-            // Store a simple representation of the value
-            let value = match &point.value {
-                kairosdb_core::datapoint::DataPointValue::Long(v) => v.to_le_bytes().to_vec(),
-                kairosdb_core::datapoint::DataPointValue::Double(v) => v.to_le_bytes().to_vec(),
-                kairosdb_core::datapoint::DataPointValue::Text(v) => v.as_bytes().to_vec(),
-                kairosdb_core::datapoint::DataPointValue::Binary(v) => v.clone(),
-                kairosdb_core::datapoint::DataPointValue::Complex { real, imaginary } => {
-                    let mut bytes = Vec::new();
-                    bytes.extend_from_slice(&real.to_le_bytes());
-                    bytes.extend_from_slice(&imaginary.to_le_bytes());
-                    bytes
-                }
-                kairosdb_core::datapoint::DataPointValue::Histogram(h) => {
-                    // Store histogram as V2 binary format (same as production)
-                    h.to_v2_bytes()
-                }
-            };
+                // Store a simple representation of the value
+                let value = match &point.value {
+                    kairosdb_core::datapoint::DataPointValue::Long(v) => v.to_le_bytes().to_vec(),
+                    kairosdb_core::datapoint::DataPointValue::Double(v) => v.to_le_bytes().to_vec(),
+                    kairosdb_core::datapoint::DataPointValue::Text(v) => v.as_bytes().to_vec(),
+                    kairosdb_core::datapoint::DataPointValue::Binary(v) => v.clone(),
+                    kairosdb_core::datapoint::DataPointValue::Complex { real, imaginary } => {
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(&real.to_le_bytes());
+                        bytes.extend_from_slice(&imaginary.to_le_bytes());
+                        bytes
+                    }
+                    kairosdb_core::datapoint::DataPointValue::Histogram(h) => {
+                        // Store histogram as V2 binary format (same as production)
+                        h.to_v2_bytes()
+                    }
+                };
 
-            storage.data_points.insert(key, value);
-            self.stats.total_datapoints.fetch_add(1, Ordering::Relaxed);
+                storage.data_points.insert(key, value);
+            }
         }
+
+        // Always update stats regardless of mode
+        self.stats
+            .total_datapoints
+            .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
 
         self.stats.total_queries.fetch_add(1, Ordering::Relaxed);
 

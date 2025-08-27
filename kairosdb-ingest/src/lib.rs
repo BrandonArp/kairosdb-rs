@@ -15,7 +15,9 @@ pub mod json_parser;
 pub mod memory_queue;
 pub mod metrics;
 pub mod mock_client;
+pub mod null_queue;
 pub mod persistent_queue;
+pub mod queue_trait;
 pub mod shutdown;
 
 // Re-export commonly used types
