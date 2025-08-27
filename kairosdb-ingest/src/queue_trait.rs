@@ -50,6 +50,9 @@ pub trait Queue: Send + Sync {
 
     /// Get disk usage in bytes
     fn get_disk_usage_bytes(&self) -> anyhow::Result<u64>;
+
+    /// Manual garbage collection and compaction (no-op for null queue)
+    fn manual_garbage_collection(&self) -> KairosResult<()>;
 }
 
 /// Type alias for boxed queue trait object

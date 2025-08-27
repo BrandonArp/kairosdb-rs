@@ -348,6 +348,39 @@ impl IngestionService {
         Ok(service)
     }
 
+    /// Start background garbage collection task to manage memory usage
+    /// Runs every 30 seconds to trigger Fjall compaction and reduce memory footprint
+    pub fn start_garbage_collection_task(
+        &self,
+        shutdown_manager: Arc<ShutdownManager>,
+    ) -> tokio::task::JoinHandle<()> {
+        let queue = Arc::clone(&self.queue);
+
+        let handle = tokio::spawn(async move {
+            // Run GC every 30 seconds
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Trigger manual garbage collection and compaction
+                        if let Err(e) = queue.manual_garbage_collection() {
+                            warn!("Garbage collection failed: {}", e);
+                        } else {
+                            debug!("Periodic garbage collection completed successfully");
+                        }
+                    }
+                    _ = shutdown_manager.http_server_token().cancelled() => {
+                        info!("Garbage collection task shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Garbage collection task started (interval: 30s)");
+        handle
+    }
+
     /// Start background task to update expensive metrics every 500ms
     pub fn start_metrics_update_task(
         &self,

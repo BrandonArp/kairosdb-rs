@@ -258,4 +258,9 @@ impl Queue for NullQueue {
     fn get_disk_usage_bytes(&self) -> anyhow::Result<u64> {
         self.get_disk_usage_bytes()
     }
+
+    fn manual_garbage_collection(&self) -> KairosResult<()> {
+        // No-op for null queue since there's no disk storage to garbage collect
+        Ok(())
+    }
 }

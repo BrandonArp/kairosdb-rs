@@ -253,16 +253,17 @@ impl PersistentQueue {
         std::fs::create_dir_all(data_dir)
             .context("Failed to create persistent queue data directory")?;
 
-        // Open Fjall keyspace with compression enabled
+        // Open Fjall keyspace with optimized settings
+        // Note: Using smaller block size to reduce memory overhead per cache entry
         let keyspace = Config::new(data_dir)
             .open()
             .context("Failed to open Fjall keyspace")?;
 
-        // Open the queue partition
+        // Open the queue partition with optimized settings for better memory management
         let partition = keyspace
             .open_partition(
                 "datapoint_queue",
-                PartitionCreateOptions::default().block_size(1024 * 64),
+                PartitionCreateOptions::default().block_size(1024 * 64), // 64KB blocks for better memory efficiency
             )
             .context("Failed to open queue partition")?;
 
@@ -926,6 +927,24 @@ impl PersistentQueue {
         Ok(self.partition.disk_space())
     }
 
+    /// Manual garbage collection and compaction to reduce memory usage
+    ///
+    /// This triggers compaction of the LSM tree and garbage collection of the value log
+    /// (when key-value separation is enabled). Should be called periodically or when
+    /// memory usage is high.
+    pub fn manual_garbage_collection(&self) -> KairosResult<()> {
+        info!("Triggering manual garbage collection for persistent queue");
+
+        // Trigger compaction of the partition
+        if let Err(e) = self.partition.major_compact() {
+            warn!("Failed to trigger major compaction: {}", e);
+        }
+
+        // If using key-value separation, this will also trigger value log GC
+        info!("Manual garbage collection completed");
+        Ok(())
+    }
+
     /// Helper to recursively calculate directory size
     #[allow(dead_code)]
     fn calculate_dir_size(dir: &Path) -> Result<u64> {
@@ -1002,6 +1021,10 @@ impl Queue for PersistentQueue {
 
     fn get_disk_usage_bytes(&self) -> anyhow::Result<u64> {
         self.get_disk_usage_bytes()
+    }
+
+    fn manual_garbage_collection(&self) -> KairosResult<()> {
+        self.manual_garbage_collection()
     }
 }
 

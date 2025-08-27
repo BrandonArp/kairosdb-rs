@@ -45,6 +45,9 @@ async fn main() -> Result<()> {
     let metrics_update_handle =
         ingestion_service.start_metrics_update_task(shutdown_manager.clone());
 
+    // Start background garbage collection task to manage Fjall memory usage
+    let gc_handle = ingestion_service.start_garbage_collection_task(shutdown_manager.clone());
+
     // Create shared state
     let state = AppState {
         ingestion_service: Arc::new(ingestion_service),
@@ -126,6 +129,16 @@ async fn main() -> Result<()> {
         );
     } else {
         info!("Metrics update task shutdown complete");
+    }
+
+    // Wait for garbage collection task to complete
+    if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(8), gc_handle).await {
+        warn!(
+            "Garbage collection task didn't shutdown cleanly within 8s: {:?}",
+            e
+        );
+    } else {
+        info!("Garbage collection task shutdown complete");
     }
 
     // Wait for the shutdown task to complete with a reasonable timeout
