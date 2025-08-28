@@ -83,10 +83,10 @@ async fn wait_for_queue_drain_java(java_url: &str) -> Result<u64> {
                           latest.0, latest.1, sorted_points.len());
                     
                     if latest.0 < 100.0 {
-                        // Check if we have enough data to interpolate
+                        // Check if we have enough data to interpolate when queue reached 0
                         if sorted_points.len() >= 2 {
-                            let interpolated_time = interpolate_drain_time(&sorted_points, 100.0);
-                            info!("✅ Java queue drained successfully (size: {} < 100), interpolated drain time: {}", 
+                            let interpolated_time = interpolate_drain_time(&sorted_points, 0.0);
+                            info!("✅ Java queue drained successfully (size: {} < 100), interpolated time to reach 0: {}", 
                                   latest.0, interpolated_time);
                             return Ok(interpolated_time);
                         } else {
@@ -369,40 +369,43 @@ fn parse_scenario(s: &str) -> Result<String, String> {
     }
 }
 
-/// Interpolate the time when queue size would have reached the threshold
-/// Uses linear interpolation between the last two data points where queue crossed the threshold
-fn interpolate_drain_time(data_points: &[(f64, u64)], threshold: f64) -> u64 {
-    // Find the last point above threshold and first point at/below threshold
-    let mut above_threshold: Option<(f64, u64)> = None;
-    let mut below_threshold: Option<(f64, u64)> = None;
-    
-    for &(value, timestamp) in data_points.iter() {
-        if value >= threshold {
-            above_threshold = Some((value, timestamp));
-        } else if above_threshold.is_some() && below_threshold.is_none() {
-            below_threshold = Some((value, timestamp));
-            break;
-        }
+/// Interpolate the time when queue size would have reached the target value (usually 0)
+/// Uses linear interpolation based on the trend in recent data points
+fn interpolate_drain_time(data_points: &[(f64, u64)], target_value: f64) -> u64 {
+    if data_points.len() < 2 {
+        return data_points.last().map(|(_, t)| *t).unwrap_or(0);
     }
     
-    // If we have both points, interpolate
-    if let (Some((v1, t1)), Some((v2, t2))) = (above_threshold, below_threshold) {
-        if v1 != v2 {
-            // Linear interpolation: t = t1 + (threshold - v1) * (t2 - t1) / (v2 - v1)
-            let ratio = (threshold - v1) / (v2 - v1);
-            let interpolated_time = t1 as f64 + ratio * (t2 as f64 - t1 as f64);
-            interpolated_time as u64
-        } else {
-            // Values are the same, use midpoint time
-            (t1 + t2) / 2
-        }
-    } else if let Some((_, timestamp)) = below_threshold {
-        // No point above threshold found, just use the below-threshold timestamp
-        timestamp
-    } else {
-        // Fallback to latest timestamp
-        data_points.last().map(|(_, t)| *t).unwrap_or(0)
+    // Use the last two data points to establish the trend
+    let len = data_points.len();
+    let (v1, t1) = data_points[len - 2];
+    let (v2, t2) = data_points[len - 1];
+    
+    // If we're already at or below target, use the latest timestamp
+    if v2 <= target_value {
+        return t2;
     }
+    
+    // Calculate rate of change (queue decrease per millisecond)
+    let time_diff = t2 as f64 - t1 as f64;
+    if time_diff <= 0.0 {
+        return t2; // No time progression, use latest
+    }
+    
+    let value_change = v2 - v1; // This should be negative if queue is draining
+    if value_change >= 0.0 {
+        // Queue is not decreasing, can't extrapolate to target
+        return t2;
+    }
+    
+    // Linear extrapolation: how long to reach target_value from v2?
+    // time_to_target = (target_value - v2) / (value_change / time_diff)
+    let rate_per_ms = value_change / time_diff;
+    let time_to_target = (target_value - v2) / rate_per_ms;
+    let estimated_time = t2 as f64 + time_to_target;
+    
+    // Ensure we don't return a time in the past
+    estimated_time.max(t2 as f64) as u64
 }
 
 /// Create ThroughputMetrics from PerfTestResults for analysis
