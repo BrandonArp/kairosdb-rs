@@ -12,7 +12,9 @@ use jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 // Use the library modules
-use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService, ShutdownConfig, ShutdownManager};
+use kairosdb_ingest::{
+    create_router, AppState, IngestConfig, IngestionService, ShutdownConfig, ShutdownManager,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,7 +29,7 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting KairosDB Ingestion Service");
-    
+
     // Log allocator information
     #[cfg(feature = "jemalloc")]
     info!("Using jemalloc memory allocator for improved memory management");
@@ -40,7 +42,10 @@ async fn main() -> Result<()> {
 
     // Create shutdown manager with configurable load balancer detection delay
     let detection_delay = config.load_balancer_detection_delay();
-    info!("Load balancer detection delay configured: {}s", detection_delay.as_secs());
+    info!(
+        "Load balancer detection delay configured: {}s",
+        detection_delay.as_secs()
+    );
     let shutdown_config = ShutdownConfig {
         health_check_grace_period: detection_delay,
         ..ShutdownConfig::default()

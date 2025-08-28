@@ -279,14 +279,14 @@ impl PersistentQueue {
 
         // Set initial metrics
         metrics.current_size.set(queue_size as f64);
-        
+
         // Set initial disk usage metric
-        match partition.disk_space() {
-            disk_usage => {
-                metrics.disk_usage_bytes.set(disk_usage as f64);
-                info!("Persistent queue initialized with disk usage: {} bytes", disk_usage);
-            }
-        }
+        let disk_usage = partition.disk_space();
+        metrics.disk_usage_bytes.set(disk_usage as f64);
+        info!(
+            "Persistent queue initialized with disk usage: {} bytes",
+            disk_usage
+        );
 
         Ok(Self {
             keyspace: Arc::new(keyspace),
@@ -949,18 +949,21 @@ impl PersistentQueue {
         }
 
         // If using key-value separation, this will also trigger value log GC
-        
+
         // Update disk usage metrics after GC sweep
         match self.get_disk_usage_bytes() {
             Ok(disk_usage) => {
                 self.metrics.disk_usage_bytes.set(disk_usage as f64);
-                info!("Manual garbage collection completed, updated disk usage: {} bytes", disk_usage);
+                info!(
+                    "Manual garbage collection completed, updated disk usage: {} bytes",
+                    disk_usage
+                );
             }
             Err(e) => {
                 warn!("Manual garbage collection completed but failed to update disk usage metric: {}", e);
             }
         }
-        
+
         Ok(())
     }
 

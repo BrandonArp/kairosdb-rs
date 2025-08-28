@@ -13,17 +13,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::new();
     let java_url = "http://localhost:8080";
-    
+
     info!("🔍 Discovering Java KairosDB metrics...");
-    
+
     // Query for all metrics that might be queue-related
     let search_terms = vec![
-        "queue", "write", "batch", "datastore", "kairosdb", "ingest", "buffer"
+        "queue",
+        "write",
+        "batch",
+        "datastore",
+        "kairosdb",
+        "ingest",
+        "buffer",
     ];
-    
+
     for search_term in search_terms {
         info!("🔍 Searching for metrics containing '{}'...", search_term);
-        
+
         let query_payload = serde_json::json!({
             "start_relative": {"value": "1", "unit": "hours"},
             "metrics": [{
@@ -34,9 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }]
             }]
         });
-        
+
         match client
-            .post(&format!("{}/api/v1/datapoints/query", java_url))
+            .post(format!("{}/api/v1/datapoints/query", java_url))
             .header("Content-Type", "application/json")
             .timeout(Duration::from_secs(10))
             .json(&query_payload)
@@ -49,7 +55,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         extract_metric_names(&result, search_term);
                     }
                 } else {
-                    info!("⚠️  Search for '{}' returned {}", search_term, response.status());
+                    info!(
+                        "⚠️  Search for '{}' returned {}",
+                        search_term,
+                        response.status()
+                    );
                 }
             }
             Err(e) => {
@@ -57,11 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     // Also try to list all metric names if Java KairosDB supports it
     info!("🔍 Trying to list all metric names...");
     match client
-        .get(&format!("{}/api/v1/metricnames", java_url))
+        .get(format!("{}/api/v1/metricnames", java_url))
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -73,10 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         info!("📋 Found {} metric names total", results.len());
                         for result in results {
                             if let Some(name) = result.as_str() {
-                                if name.to_lowercase().contains("queue") || 
-                                   name.to_lowercase().contains("write") ||
-                                   name.to_lowercase().contains("batch") ||
-                                   name.to_lowercase().contains("buffer") {
+                                if name.to_lowercase().contains("queue")
+                                    || name.to_lowercase().contains("write")
+                                    || name.to_lowercase().contains("batch")
+                                    || name.to_lowercase().contains("buffer")
+                                {
                                     info!("📊 Queue-related metric: {}", name);
                                 }
                             }
@@ -102,7 +113,7 @@ fn extract_metric_names(result: &Value, search_term: &str) {
                 for result in results {
                     if let Some(name) = result["name"].as_str() {
                         info!("📊 Found metric ({}): {}", search_term, name);
-                        
+
                         // Also show latest value if available
                         if let Some(values) = result["values"].as_array() {
                             if let Some(last_value) = values.last() {

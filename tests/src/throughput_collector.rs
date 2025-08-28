@@ -1,7 +1,7 @@
 //! Throughput metrics collector for comparing Rust vs Java KairosDB performance
 //!
 //! Collects real-time metrics from both services during performance tests to measure:
-//! 1. Ingest rate (HTTP requests -> disk queue) 
+//! 1. Ingest rate (HTTP requests -> disk queue)
 //! 2. End-to-end throughput (HTTP requests -> Cassandra)
 
 use anyhow::{Context, Result};
@@ -16,22 +16,22 @@ use tracing::{debug, error, warn};
 pub struct ThroughputMetrics {
     pub timestamp: u64,
     pub service_name: String,
-    
+
     // Ingest throughput (HTTP -> Queue)
     pub ingest_rate_datapoints_per_sec: f64,
     pub ingest_rate_requests_per_sec: f64,
     pub ingest_requests_total: u64,
     pub ingest_datapoints_total: u64,
-    
+
     // End-to-end throughput (HTTP -> Cassandra)
     pub end_to_end_rate_datapoints_per_sec: f64,
     pub cassandra_writes_total: u64,
     pub cassandra_write_errors: u64,
-    
+
     // Queue metrics (shows processing lag)
     pub queue_size: u64,
     pub queue_oldest_entry_age_seconds: f64,
-    
+
     // Service health
     pub success_rate_percent: f64,
     pub error_count: u64,
@@ -52,7 +52,7 @@ impl Default for ThroughputCollectorConfig {
             rust_service_url: "http://localhost:8081".to_string(),
             java_service_url: "http://localhost:8080".to_string(),
             collection_interval: Duration::from_secs(5), // Collect every 5 seconds
-            collection_timeout: Duration::from_secs(3),   // 3 second timeout per request
+            collection_timeout: Duration::from_secs(3),  // 3 second timeout per request
         }
     }
 }
@@ -62,11 +62,11 @@ impl Default for ThroughputCollectorConfig {
 pub struct ThroughputCollector {
     client: Client,
     config: ThroughputCollectorConfig,
-    
+
     // Cached previous values for rate calculation
     rust_previous: Option<RustRawMetrics>,
     java_previous: Option<JavaRawMetrics>,
-    
+
     last_collection_time: Option<Instant>,
 }
 
@@ -101,6 +101,7 @@ struct KairosDbQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct KairosDbMetric {
     name: String,
     values: Vec<(u64, f64)>, // [(timestamp, value), ...]
@@ -112,7 +113,7 @@ impl ThroughputCollector {
             .timeout(config.collection_timeout)
             .build()
             .unwrap();
-            
+
         Self {
             client,
             config,
@@ -121,7 +122,7 @@ impl ThroughputCollector {
             last_collection_time: None,
         }
     }
-    
+
     /// Start collecting metrics at configured intervals until stopped
     pub async fn start_background_collection(
         &mut self,
@@ -130,7 +131,7 @@ impl ThroughputCollector {
         let mut metrics_history = Vec::new();
         let mut collection_interval = interval(self.config.collection_interval);
         collection_interval.tick().await; // Skip first tick
-        
+
         loop {
             tokio::select! {
                 _ = collection_interval.tick() => {
@@ -149,10 +150,10 @@ impl ThroughputCollector {
                 }
             }
         }
-        
+
         Ok(metrics_history)
     }
-    
+
     /// Collect current metrics from both services
     pub async fn collect_current_metrics(&mut self) -> Result<Vec<ThroughputMetrics>> {
         let now = Instant::now();
@@ -160,15 +161,13 @@ impl ThroughputCollector {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         // Collect from both services in parallel
-        let (rust_result, java_result) = tokio::join!(
-            self.collect_rust_metrics(),
-            self.collect_java_metrics()
-        );
-        
+        let (rust_result, java_result) =
+            tokio::join!(self.collect_rust_metrics(), self.collect_java_metrics());
+
         let mut metrics = Vec::new();
-        
+
         // Process Rust metrics
         match rust_result {
             Ok(rust_raw) => {
@@ -180,8 +179,8 @@ impl ThroughputCollector {
                 warn!("Failed to collect Rust metrics: {}", e);
             }
         }
-        
-        // Process Java metrics  
+
+        // Process Java metrics
         match java_result {
             Ok(java_raw) => {
                 let java_throughput = self.calculate_java_throughput(&java_raw, timestamp, now);
@@ -192,63 +191,78 @@ impl ThroughputCollector {
                 warn!("Failed to collect Java metrics: {}", e);
             }
         }
-        
+
         self.last_collection_time = Some(now);
         Ok(metrics)
     }
-    
+
     /// Collect raw metrics from Rust service
     async fn collect_rust_metrics(&self) -> Result<RustRawMetrics> {
         let url = format!("{}/api/v1/metrics", self.config.rust_service_url);
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .send()
             .await
             .context("Failed to request Rust metrics")?;
-            
+
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Rust metrics returned {}", response.status()));
+            return Err(anyhow::anyhow!(
+                "Rust metrics returned {}",
+                response.status()
+            ));
         }
-        
+
         let metrics: RustRawMetrics = response
             .json()
             .await
             .context("Failed to parse Rust metrics JSON")?;
-            
-        debug!("Collected Rust metrics: queue_size={}, datapoints_ingested={}", 
-               metrics.queue_size, metrics.datapoints_ingested);
-               
+
+        debug!(
+            "Collected Rust metrics: queue_size={}, datapoints_ingested={}",
+            metrics.queue_size, metrics.datapoints_ingested
+        );
+
         Ok(metrics)
     }
-    
+
     /// Collect raw metrics from Java service via KairosDB query API
     async fn collect_java_metrics(&self) -> Result<JavaRawMetrics> {
         let mut java_metrics = JavaRawMetrics::default();
-        
+
         // Query for http/ingest_count.count (total ingest requests)
         if let Ok(value) = self.query_java_metric("http/ingest_count.count").await {
             java_metrics.ingest_count = value as u64;
         }
-        
+
         // Query for cassandra write batch size count (approximation of writes)
-        if let Ok(value) = self.query_java_metric("datastore/cassandra/data_points/write_batch_size.count").await {
+        if let Ok(value) = self
+            .query_java_metric("datastore/cassandra/data_points/write_batch_size.count")
+            .await
+        {
             java_metrics.cassandra_write_count = value as u64;
         }
-        
+
         // Query for total write batch size (sum of all batch sizes)
-        if let Ok(value) = self.query_java_metric("datastore/cassandra/data_points/write_batch_size.sum").await {
+        if let Ok(value) = self
+            .query_java_metric("datastore/cassandra/data_points/write_batch_size.sum")
+            .await
+        {
             java_metrics.cassandra_write_batch_size_total = value as u64;
         }
-        
-        debug!("Collected Java metrics: ingest_count={}, cassandra_write_count={}", 
-               java_metrics.ingest_count, java_metrics.cassandra_write_count);
-               
+
+        debug!(
+            "Collected Java metrics: ingest_count={}, cassandra_write_count={}",
+            java_metrics.ingest_count, java_metrics.cassandra_write_count
+        );
+
         Ok(java_metrics)
     }
-    
+
     /// Query a specific metric from Java KairosDB
     async fn query_java_metric(&self, metric_name: &str) -> Result<f64> {
-        let query = format!(r#"{{
+        let query = format!(
+            r#"{{
             "start_relative": {{"value": "1", "unit": "hours"}},
             "metrics": [{{
                 "name": "{}",
@@ -257,26 +271,29 @@ impl ThroughputCollector {
                     "sampling": {{"value": 1, "unit": "hours"}}
                 }}]
             }}]
-        }}"#, metric_name);
-        
+        }}"#,
+            metric_name
+        );
+
         let url = format!("{}/api/v1/datapoints/query", self.config.java_service_url);
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Content-Type", "application/json")
             .body(query)
             .send()
             .await
             .context("Failed to query Java metrics")?;
-            
+
         if !response.status().is_success() {
             return Err(anyhow::anyhow!("Java query returned {}", response.status()));
         }
-        
+
         let query_response: KairosDbQueryResponse = response
             .json()
             .await
             .context("Failed to parse Java query response")?;
-            
+
         // Extract latest value from response
         for query in query_response.queries {
             for metric in query.results {
@@ -285,10 +302,10 @@ impl ThroughputCollector {
                 }
             }
         }
-        
+
         Ok(0.0) // Default to 0 if no data found
     }
-    
+
     /// Calculate throughput metrics for Rust service
     fn calculate_rust_throughput(
         &self,
@@ -296,32 +313,39 @@ impl ThroughputCollector {
         timestamp: u64,
         now: Instant,
     ) -> ThroughputMetrics {
-        let (ingest_rate_dps, ingest_rate_rps, e2e_rate_dps) = if let (Some(previous), Some(last_time)) = 
-            (&self.rust_previous, self.last_collection_time) {
-            
-            let elapsed_secs = now.duration_since(last_time).as_secs_f64();
-            if elapsed_secs > 0.0 {
-                let datapoints_delta = current.datapoints_ingested.saturating_sub(previous.datapoints_ingested);
-                let batches_delta = current.batches_processed.saturating_sub(previous.batches_processed);
-                
-                let ingest_rate_dps = datapoints_delta as f64 / elapsed_secs;
-                let ingest_rate_rps = batches_delta as f64 / elapsed_secs;
-                let e2e_rate_dps = ingest_rate_dps; // For Rust, assume processing keeps up
-                
-                (ingest_rate_dps, ingest_rate_rps, e2e_rate_dps)
+        let (ingest_rate_dps, ingest_rate_rps, e2e_rate_dps) =
+            if let (Some(previous), Some(last_time)) =
+                (&self.rust_previous, self.last_collection_time)
+            {
+                let elapsed_secs = now.duration_since(last_time).as_secs_f64();
+                if elapsed_secs > 0.0 {
+                    let datapoints_delta = current
+                        .datapoints_ingested
+                        .saturating_sub(previous.datapoints_ingested);
+                    let batches_delta = current
+                        .batches_processed
+                        .saturating_sub(previous.batches_processed);
+
+                    let ingest_rate_dps = datapoints_delta as f64 / elapsed_secs;
+                    let ingest_rate_rps = batches_delta as f64 / elapsed_secs;
+                    let e2e_rate_dps = ingest_rate_dps; // For Rust, assume processing keeps up
+
+                    (ingest_rate_dps, ingest_rate_rps, e2e_rate_dps)
+                } else {
+                    (0.0, 0.0, 0.0)
+                }
             } else {
                 (0.0, 0.0, 0.0)
-            }
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        
+            };
+
         let success_rate = if current.batches_processed > 0 {
-            ((current.batches_processed - current.ingestion_errors) as f64 / current.batches_processed as f64) * 100.0
+            ((current.batches_processed - current.ingestion_errors) as f64
+                / current.batches_processed as f64)
+                * 100.0
         } else {
             100.0
         };
-        
+
         ThroughputMetrics {
             timestamp,
             service_name: "Rust".to_string(),
@@ -338,7 +362,7 @@ impl ThroughputCollector {
             error_count: current.ingestion_errors + current.cassandra_errors,
         }
     }
-    
+
     /// Calculate throughput metrics for Java service
     fn calculate_java_throughput(
         &self,
@@ -346,26 +370,29 @@ impl ThroughputCollector {
         timestamp: u64,
         now: Instant,
     ) -> ThroughputMetrics {
-        let (ingest_rate_rps, ingest_rate_dps, e2e_rate_dps) = if let (Some(previous), Some(last_time)) = 
-            (&self.java_previous, self.last_collection_time) {
-            
-            let elapsed_secs = now.duration_since(last_time).as_secs_f64();
-            if elapsed_secs > 0.0 {
-                let ingest_delta = current.ingest_count.saturating_sub(previous.ingest_count);
-                let write_delta = current.cassandra_write_batch_size_total.saturating_sub(previous.cassandra_write_batch_size_total);
-                
-                let ingest_rate_rps = ingest_delta as f64 / elapsed_secs;
-                let ingest_rate_dps = write_delta as f64 / elapsed_secs; // Use cassandra write total as datapoints ingested
-                let e2e_rate_dps = write_delta as f64 / elapsed_secs;
-                
-                (ingest_rate_rps, ingest_rate_dps, e2e_rate_dps)
+        let (ingest_rate_rps, ingest_rate_dps, e2e_rate_dps) =
+            if let (Some(previous), Some(last_time)) =
+                (&self.java_previous, self.last_collection_time)
+            {
+                let elapsed_secs = now.duration_since(last_time).as_secs_f64();
+                if elapsed_secs > 0.0 {
+                    let ingest_delta = current.ingest_count.saturating_sub(previous.ingest_count);
+                    let write_delta = current
+                        .cassandra_write_batch_size_total
+                        .saturating_sub(previous.cassandra_write_batch_size_total);
+
+                    let ingest_rate_rps = ingest_delta as f64 / elapsed_secs;
+                    let ingest_rate_dps = write_delta as f64 / elapsed_secs; // Use cassandra write total as datapoints ingested
+                    let e2e_rate_dps = write_delta as f64 / elapsed_secs;
+
+                    (ingest_rate_rps, ingest_rate_dps, e2e_rate_dps)
+                } else {
+                    (0.0, 0.0, 0.0)
+                }
             } else {
                 (0.0, 0.0, 0.0)
-            }
-        } else {
-            (0.0, 0.0, 0.0)
-        };
-        
+            };
+
         ThroughputMetrics {
             timestamp,
             service_name: "Java".to_string(),
@@ -376,13 +403,13 @@ impl ThroughputCollector {
             end_to_end_rate_datapoints_per_sec: e2e_rate_dps,
             cassandra_writes_total: current.cassandra_write_count,
             cassandra_write_errors: 0, // TODO: Query error metrics
-            queue_size: 0, // Java queue metrics not easily accessible
+            queue_size: 0,             // Java queue metrics not easily accessible
             queue_oldest_entry_age_seconds: 0.0,
             success_rate_percent: 100.0, // TODO: Calculate from error metrics
             error_count: 0,
         }
     }
-    
+
     /// Get a one-shot metrics sample from both services
     pub async fn collect_snapshot(&mut self) -> Result<Vec<ThroughputMetrics>> {
         self.collect_current_metrics().await
@@ -406,7 +433,7 @@ impl ThroughputMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_throughput_metrics_creation() {
         let metrics = ThroughputMetrics {
@@ -424,11 +451,11 @@ mod tests {
             success_rate_percent: 99.5,
             error_count: 5,
         };
-        
+
         assert_eq!(metrics.service_name, "Test");
         assert_eq!(metrics.ingest_rate_datapoints_per_sec, 100.0);
     }
-    
+
     #[tokio::test]
     async fn test_collector_creation() {
         let config = ThroughputCollectorConfig::default();

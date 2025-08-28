@@ -534,7 +534,11 @@ impl MetricDataGenerator {
         }
 
         // Calculate mean
-        let mean = if total_count > 0 { sum / total_count as f64 } else { 0.0 };
+        let mean = if total_count > 0 {
+            sum / total_count as f64
+        } else {
+            0.0
+        };
 
         json!({
             "bins": bins_obj,

@@ -36,15 +36,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(first_batch) = batches.first() {
         if let Some(first_dp) = first_batch.first() {
             let mut modified_dp = first_dp.clone();
-            
+
             // Add explicit type field for histogram
             if let Some(obj) = modified_dp.as_object_mut() {
-                obj.insert("type".to_string(), serde_json::Value::String("histogram".to_string()));
+                obj.insert(
+                    "type".to_string(),
+                    serde_json::Value::String("histogram".to_string()),
+                );
             }
-            
+
             info!("Testing with explicit type field:");
-            info!("Modified datapoint: {}", serde_json::to_string_pretty(&modified_dp)?);
-            
+            info!(
+                "Modified datapoint: {}",
+                serde_json::to_string_pretty(&modified_dp)?
+            );
+
             let response = client
                 .post(java_url)
                 .header("Content-Type", "application/json")
@@ -57,10 +63,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let response_text = response.text().await?;
 
             if status.is_success() {
-                info!("✅ Java KairosDB accepted format WITH type field: {}", status);
+                info!(
+                    "✅ Java KairosDB accepted format WITH type field: {}",
+                    status
+                );
                 return Ok(());
             } else {
-                error!("❌ Java KairosDB rejected format WITH type field: {}", status);
+                error!(
+                    "❌ Java KairosDB rejected format WITH type field: {}",
+                    status
+                );
                 error!("Response: {}", response_text);
             }
         }
@@ -68,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(batch) = batches.first() {
         info!("Testing against Java KairosDB...");
-        
+
         let response = client
             .post(java_url)
             .header("Content-Type", "application/json")

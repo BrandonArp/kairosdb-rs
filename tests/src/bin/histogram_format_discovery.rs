@@ -38,7 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }]);
 
-    info!("Sending to Rust: {}", serde_json::to_string_pretty(&histogram_payload)?);
+    info!(
+        "Sending to Rust: {}",
+        serde_json::to_string_pretty(&histogram_payload)?
+    );
 
     let response = client
         .post(rust_ingest_url)
@@ -49,7 +52,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     if !response.status().is_success() {
-        error!("Failed to send to Rust ingest: {} - {}", response.status(), response.text().await?);
+        error!(
+            "Failed to send to Rust ingest: {} - {}",
+            response.status(),
+            response.text().await?
+        );
         return Ok(());
     }
 
@@ -71,7 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }]
     });
 
-    info!("Query payload: {}", serde_json::to_string_pretty(&query_payload)?);
+    info!(
+        "Query payload: {}",
+        serde_json::to_string_pretty(&query_payload)?
+    );
 
     let response = client
         .post(java_query_url)
@@ -85,7 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response_text = response.text().await?;
 
     if !status.is_success() {
-        error!("Failed to query from Java KairosDB: {} - {}", status, response_text);
+        error!(
+            "Failed to query from Java KairosDB: {} - {}",
+            status, response_text
+        );
         return Ok(());
     }
 
@@ -93,7 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 4: Parse and display the histogram format Java KairosDB returns
     let query_result: serde_json::Value = serde_json::from_str(&response_text)?;
-    info!("Full response: {}", serde_json::to_string_pretty(&query_result)?);
+    info!(
+        "Full response: {}",
+        serde_json::to_string_pretty(&query_result)?
+    );
 
     // Extract and analyze the histogram data format
     if let Some(queries) = query_result["queries"].as_array() {
@@ -106,7 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(value_array) = value.as_array() {
                                 if value_array.len() >= 2 {
                                     info!("  Timestamp: {}", value_array[0]);
-                                    info!("  Histogram data: {}", serde_json::to_string_pretty(&value_array[1])?);
+                                    info!(
+                                        "  Histogram data: {}",
+                                        serde_json::to_string_pretty(&value_array[1])?
+                                    );
                                     info!("  Histogram data type: {:?}", value_array[1]);
                                 }
                             }

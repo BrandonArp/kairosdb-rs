@@ -4,17 +4,20 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kairosdb_e2e_tests::performance::*;
-use kairosdb_e2e_tests::throughput_collector::{ThroughputCollector, ThroughputCollectorConfig, ThroughputMetrics};
+use kairosdb_e2e_tests::throughput_collector::ThroughputMetrics;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{info, Level};
 use tracing_subscriber;
-use serde::{Deserialize, Serialize};
-use reqwest::Client;
 
 /// Wait for Rust service queue to drain by monitoring metrics
 /// Tracks queue processing metrics and resets timeout when progress is observed
-async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_tests::performance::PerfTestResults) -> Result<Option<kairosdb_e2e_tests::performance::QueueProcessingMetrics>> {
+async fn wait_for_queue_drain(
+    rust_url: &str,
+    ingestion_results: &kairosdb_e2e_tests::performance::PerfTestResults,
+) -> Result<Option<kairosdb_e2e_tests::performance::QueueProcessingMetrics>> {
     let client = Client::new();
     let mut attempts_since_progress = 0;
     let max_attempts_without_progress = 60; // 5 minutes max wait without progress
@@ -23,14 +26,14 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
     let mut max_observed_size: u64 = 0;
     let start_time = std::time::Instant::now();
     let mut total_checks = 0;
-    
+
     loop {
         attempts_since_progress += 1;
         total_checks += 1;
-        
+
         // Check Rust service metrics
         match client
-            .get(&format!("{}/api/v1/metrics", rust_url))
+            .get(format!("{}/api/v1/metrics", rust_url))
             .timeout(Duration::from_secs(5))
             .send()
             .await
@@ -38,16 +41,20 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
             Ok(response) => {
                 if let Ok(text) = response.text().await {
                     if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
+                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64())
+                        {
                             // Track initial and maximum queue sizes
                             if initial_queue_size.is_none() {
                                 initial_queue_size = Some(queue_size);
-                                info!("📊 Starting queue drain monitoring (initial size: {})", queue_size);
+                                info!(
+                                    "📊 Starting queue drain monitoring (initial size: {})",
+                                    queue_size
+                                );
                             }
                             max_observed_size = max_observed_size.max(queue_size);
-                            
+
                             info!("📊 Queue size: {}", queue_size);
-                            
+
                             // Check for progress (queue size decreasing)
                             if let Some(last_size) = last_queue_size {
                                 if queue_size < last_size {
@@ -55,7 +62,7 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
                                 }
                             }
                             last_queue_size = Some(queue_size);
-                            
+
                             if queue_size < 100 {
                                 let elapsed = start_time.elapsed();
                                 let initial_size = initial_queue_size.unwrap_or(0);
@@ -65,35 +72,40 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
                                 } else {
                                     0.0
                                 };
-                                
+
                                 // Calculate throughput estimates based on ingestion results
                                 let avg_batch_size = if ingestion_results.total_requests > 0 {
-                                    ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                                    ingestion_results.total_datapoints_sent as f64
+                                        / ingestion_results.total_requests as f64
                                 } else {
                                     0.0
                                 };
-                                
-                                let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
-                                    processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
-                                } else {
-                                    0.0
-                                };
-                                
+
+                                let batches_per_second =
+                                    if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                                        processed_items as f64
+                                            / avg_batch_size
+                                            / elapsed.as_secs() as f64
+                                    } else {
+                                        0.0
+                                    };
+
                                 let datapoints_per_second = batches_per_second * avg_batch_size;
-                                
-                                let metrics = kairosdb_e2e_tests::performance::QueueProcessingMetrics {
-                                    initial_queue_size: initial_size,
-                                    peak_queue_size: max_observed_size,
-                                    final_queue_size: queue_size,
-                                    total_items_processed: processed_items,
-                                    processing_time_seconds: elapsed.as_secs_f64(),
-                                    items_per_second: processing_rate,
-                                    total_status_checks: total_checks,
-                                    estimated_batch_size: avg_batch_size,
-                                    estimated_batches_per_second: batches_per_second,
-                                    estimated_datapoints_per_second: datapoints_per_second,
-                                };
-                                
+
+                                let metrics =
+                                    kairosdb_e2e_tests::performance::QueueProcessingMetrics {
+                                        initial_queue_size: initial_size,
+                                        peak_queue_size: max_observed_size,
+                                        final_queue_size: queue_size,
+                                        total_items_processed: processed_items,
+                                        processing_time_seconds: elapsed.as_secs_f64(),
+                                        items_per_second: processing_rate,
+                                        total_status_checks: total_checks,
+                                        estimated_batch_size: avg_batch_size,
+                                        estimated_batches_per_second: batches_per_second,
+                                        estimated_datapoints_per_second: datapoints_per_second,
+                                    };
+
                                 info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
                                 return Ok(Some(metrics));
                             }
@@ -102,35 +114,39 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
                 }
             }
             Err(e) => {
-                info!("⚠️  Could not check queue status: {} (attempt {} since progress)", e, attempts_since_progress);
+                info!(
+                    "⚠️  Could not check queue status: {} (attempt {} since progress)",
+                    e, attempts_since_progress
+                );
             }
         }
-        
+
         if attempts_since_progress >= max_attempts_without_progress {
             let elapsed = start_time.elapsed();
             let initial_size = initial_queue_size.unwrap_or(0);
             let current_size = last_queue_size.unwrap_or(0);
             let processed_items = max_observed_size.saturating_sub(current_size);
-            
+
             // Calculate partial metrics for timeout case
             let avg_batch_size = if ingestion_results.total_requests > 0 {
-                ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                ingestion_results.total_datapoints_sent as f64
+                    / ingestion_results.total_requests as f64
             } else {
                 0.0
             };
-            
+
             let processing_rate = if elapsed.as_secs() > 0 {
                 processed_items as f64 / elapsed.as_secs() as f64
             } else {
                 0.0
             };
-            
+
             let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
                 processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
             } else {
                 0.0
             };
-            
+
             let metrics = kairosdb_e2e_tests::performance::QueueProcessingMetrics {
                 initial_queue_size: initial_size,
                 peak_queue_size: max_observed_size,
@@ -143,11 +159,14 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
                 estimated_batches_per_second: batches_per_second,
                 estimated_datapoints_per_second: batches_per_second * avg_batch_size,
             };
-            
-            info!("⚠️  Queue drain timeout after {} attempts without progress", max_attempts_without_progress);
+
+            info!(
+                "⚠️  Queue drain timeout after {} attempts without progress",
+                max_attempts_without_progress
+            );
             return Ok(Some(metrics)); // Return partial metrics
         }
-        
+
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
@@ -156,17 +175,17 @@ async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_t
 /// Returns the timestamp of the successful metric response that confirmed queue is empty
 async fn wait_for_queue_drain_java(java_url: &str) -> Result<u64> {
     info!("⏳ Waiting for Java KairosDB queues to drain...");
-    
+
     let client = Client::new();
     let mut attempts = 0;
     let max_attempts = 360; // 30 minutes max wait (10x original - Java metrics can be very slow during high load)
-    
-    
+
     loop {
         attempts += 1;
-        
+
         // Query the single queue metric we care about (get history for interpolation)
-        match query_java_queue_metric_history(&client, java_url, "queue/file_queue.size.min").await {
+        match query_java_queue_metric_history(&client, java_url, "queue/file_queue.size.min").await
+        {
             Ok(data_points) => {
                 if data_points.is_empty() {
                     info!("⚠️  No recent data for queue metric - continuing to wait");
@@ -174,11 +193,11 @@ async fn wait_for_queue_drain_java(java_url: &str) -> Result<u64> {
                     // Sort by timestamp (should already be sorted but ensure it)
                     let mut sorted_points = data_points;
                     sorted_points.sort_by_key(|(_, timestamp)| *timestamp);
-                    
+
                     let latest = sorted_points.last().unwrap();
                     info!("📊 Java queue metric 'queue/file_queue.size.min': {} at timestamp {} ({} total points)", 
                           latest.0, latest.1, sorted_points.len());
-                    
+
                     if latest.0 < 100.0 {
                         // Check if we have enough data to interpolate when queue reached 0
                         if sorted_points.len() >= 2 {
@@ -187,15 +206,22 @@ async fn wait_for_queue_drain_java(java_url: &str) -> Result<u64> {
                                   latest.0, interpolated_time);
                             return Ok(interpolated_time);
                         } else {
-                            info!("✅ Java queue drained successfully (size: {} < 100)", latest.0);
+                            info!(
+                                "✅ Java queue drained successfully (size: {} < 100)",
+                                latest.0
+                            );
                             return Ok(latest.1);
                         }
                     }
-                    
+
                     // Show trend if we have multiple points
                     if sorted_points.len() >= 2 {
                         let first = &sorted_points[0];
-                        let trend = if latest.0 < first.0 { "decreasing" } else { "increasing" };
+                        let trend = if latest.0 < first.0 {
+                            "decreasing"
+                        } else {
+                            "increasing"
+                        };
                         info!("📈 Queue trend: {} -> {} ({})", first.0, latest.0, trend);
                     }
                 }
@@ -205,24 +231,27 @@ async fn wait_for_queue_drain_java(java_url: &str) -> Result<u64> {
                 if e.to_string().contains("timeout") || e.to_string().contains("Timeout") {
                     info!("⏰ Timeout querying queue metric - continuing to wait");
                 } else {
-                    info!("⚠️  Could not query queue metric: {} - continuing to wait", e);
+                    info!(
+                        "⚠️  Could not query queue metric: {} - continuing to wait",
+                        e
+                    );
                 }
             }
         }
-        
+
         if attempts >= max_attempts {
             return Err(anyhow::anyhow!("Java queue drain timeout after {} attempts - cannot get successful metric response", max_attempts));
         }
-        
+
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
 /// Query a specific Java KairosDB queue metric, returning recent data points as (value, timestamp) pairs
 async fn query_java_queue_metric_history(
-    client: &Client, 
-    java_url: &str, 
-    metric_name: &str
+    client: &Client,
+    java_url: &str,
+    metric_name: &str,
 ) -> Result<Vec<(f64, u64)>> {
     let query_payload = serde_json::json!({
         "start_relative": {"value": "10", "unit": "minutes"},
@@ -230,24 +259,27 @@ async fn query_java_queue_metric_history(
             "name": metric_name
         }]
     });
-    
+
     let response = client
-        .post(&format!("{}/api/v1/datapoints/query", java_url))
+        .post(format!("{}/api/v1/datapoints/query", java_url))
         .header("Content-Type", "application/json")
         .timeout(Duration::from_secs(10))
         .json(&query_payload)
         .send()
         .await?;
-    
+
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("Java query failed with status {}", response.status()));
+        return Err(anyhow::anyhow!(
+            "Java query failed with status {}",
+            response.status()
+        ));
     }
-    
+
     let query_result: serde_json::Value = response.json().await?;
-    
+
     // Extract all values from the query response
     let mut data_points = Vec::new();
-    
+
     if let Some(queries) = query_result["queries"].as_array() {
         if let Some(first_query) = queries.first() {
             if let Some(results) = first_query["results"].as_array() {
@@ -269,49 +301,8 @@ async fn query_java_queue_metric_history(
             }
         }
     }
-    
-    Ok(data_points)
-}
 
-/// Fallback basic Java service stability check
-async fn wait_for_java_service_stability(java_url: &str) -> Result<()> {
-    info!("⏳ Checking Java service stability (fallback)...");
-    
-    let client = Client::new();
-    let mut successful_checks = 0;
-    let required_successful_checks = 3;
-    
-    for attempt in 1..=10 {
-        match client
-            .get(&format!("{}/api/v1/version", java_url))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                successful_checks += 1;
-                info!("✅ Java service stability check {}/{}", successful_checks, required_successful_checks);
-                
-                if successful_checks >= required_successful_checks {
-                    info!("✅ Java service stable");
-                    return Ok(());
-                }
-            }
-            Ok(response) => {
-                info!("⚠️  Java service returned {}", response.status());
-                successful_checks = 0;
-            }
-            Err(e) => {
-                info!("⚠️  Java service check failed: {} (attempt {})", e, attempt);
-                successful_checks = 0;
-            }
-        }
-        
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    
-    info!("✅ Java stability check completed");
-    Ok(())
+    Ok(data_points)
 }
 
 /// KairosDB Performance Comparison CLI - Compare Rust vs Java implementations
@@ -387,7 +378,7 @@ enum Commands {
         #[arg(long)]
         skip: Option<String>,
 
-        /// Only run specific scenarios (comma-separated list) 
+        /// Only run specific scenarios (comma-separated list)
         #[arg(long)]
         only: Option<String>,
 
@@ -411,7 +402,7 @@ pub struct ComparisonResults {
     pub java_results: PerfTestResults,
     pub comparison: ComparisonAnalysis,
     pub timestamp: String,
-    
+
     // Enhanced throughput measurements
     pub throughput_history: Vec<ThroughputMetrics>,
     pub throughput_analysis: ThroughputAnalysis,
@@ -434,25 +425,25 @@ pub struct ThroughputAnalysis {
     pub rust_avg_e2e_rate_dps: f64,
     pub java_avg_ingest_rate_rps: f64,
     pub java_avg_e2e_rate_dps: f64,
-    
+
     // Peak rates observed
     pub rust_peak_ingest_rate_dps: f64,
     pub rust_peak_e2e_rate_dps: f64,
     pub java_peak_ingest_rate_rps: f64,
     pub java_peak_e2e_rate_dps: f64,
-    
+
     // Queue analysis
     pub rust_avg_queue_size: f64,
     pub rust_max_queue_size: u64,
     pub rust_queue_efficiency: f64, // ingest_rate / e2e_rate
-    
+
     // Processing lag analysis
     pub rust_processing_lag_detected: bool,
     pub java_processing_lag_detected: bool,
-    
+
     // Throughput comparison
-    pub ingest_rate_improvement_ratio: f64,  // Rust / Java
-    pub e2e_rate_improvement_ratio: f64,     // Rust / Java
+    pub ingest_rate_improvement_ratio: f64, // Rust / Java
+    pub e2e_rate_improvement_ratio: f64,    // Rust / Java
 }
 
 fn parse_scenario(s: &str) -> Result<String, String> {
@@ -472,41 +463,44 @@ fn interpolate_drain_time(data_points: &[(f64, u64)], target_value: f64) -> u64 
     if data_points.len() < 2 {
         return data_points.last().map(|(_, t)| *t).unwrap_or(0);
     }
-    
+
     // Use the last two data points to establish the trend
     let len = data_points.len();
     let (v1, t1) = data_points[len - 2];
     let (v2, t2) = data_points[len - 1];
-    
+
     // If we're already at or below target, use the latest timestamp
     if v2 <= target_value {
         return t2;
     }
-    
+
     // Calculate rate of change (queue decrease per millisecond)
     let time_diff = t2 as f64 - t1 as f64;
     if time_diff <= 0.0 {
         return t2; // No time progression, use latest
     }
-    
+
     let value_change = v2 - v1; // This should be negative if queue is draining
     if value_change >= 0.0 {
         // Queue is not decreasing, can't extrapolate to target
         return t2;
     }
-    
+
     // Linear extrapolation: how long to reach target_value from v2?
     // time_to_target = (target_value - v2) / (value_change / time_diff)
     let rate_per_ms = value_change / time_diff;
     let time_to_target = (target_value - v2) / rate_per_ms;
     let estimated_time = t2 as f64 + time_to_target;
-    
+
     // Ensure we don't return a time in the past
     estimated_time.max(t2 as f64) as u64
 }
 
 /// Create ThroughputMetrics from PerfTestResults for analysis
-fn create_throughput_metrics_from_results(results: &PerfTestResults, service_name: &str) -> ThroughputMetrics {
+fn create_throughput_metrics_from_results(
+    results: &PerfTestResults,
+    service_name: &str,
+) -> ThroughputMetrics {
     ThroughputMetrics {
         timestamp: chrono::Utc::now().timestamp() as u64 * 1000, // Convert to milliseconds
         service_name: service_name.to_string(),
@@ -515,9 +509,9 @@ fn create_throughput_metrics_from_results(results: &PerfTestResults, service_nam
         ingest_requests_total: results.total_requests,
         ingest_datapoints_total: results.total_datapoints_sent,
         end_to_end_rate_datapoints_per_sec: results.throughput_datapoints_per_sec, // Same as ingest for test results
-        cassandra_writes_total: results.total_datapoints_sent, // Approximation
+        cassandra_writes_total: results.total_datapoints_sent,                     // Approximation
         cassandra_write_errors: results.failed_requests,
-        queue_size: 0, // Not available from test results
+        queue_size: 0,                       // Not available from test results
         queue_oldest_entry_age_seconds: 0.0, // Not available from test results
         success_rate_percent: if results.total_requests > 0 {
             (results.successful_requests as f64 / results.total_requests as f64) * 100.0
@@ -595,7 +589,17 @@ async fn main() -> Result<()> {
             skip,
             only,
             parallel,
-        } => run_comparison_suite(&cli.rust_url, &cli.java_url, &cli.output_dir, skip, only, !parallel).await,
+        } => {
+            run_comparison_suite(
+                &cli.rust_url,
+                &cli.java_url,
+                &cli.output_dir,
+                skip,
+                only,
+                !parallel,
+            )
+            .await
+        }
 
         Commands::List => list_scenarios(),
 
@@ -615,7 +619,10 @@ async fn run_comparison(
     info!("Scenario: {}", scenario_name);
     info!("Rust URL: {}", rust_url);
     info!("Java URL: {}", java_url);
-    info!("Mode: {}", if sequential { "Sequential" } else { "Parallel" });
+    info!(
+        "Mode: {}",
+        if sequential { "Sequential" } else { "Parallel" }
+    );
 
     // Get base config
     let mut rust_config = TestScenarios::custom(scenario_name, overrides.clone())
@@ -629,37 +636,44 @@ async fn run_comparison(
     let test_start = Instant::now();
 
     // We'll create throughput metrics from actual test results instead of external collection
-    
+
     let (rust_results, java_results) = if sequential {
         info!("Running tests sequentially...");
-        
+
         info!("🦀 Starting Rust test...");
         let mut rust_runner = PerfTestRunner::new(rust_config.clone());
         let rust_results = rust_runner.run().await?;
-        
-        info!("✅ Rust test completed. {} datapoints in {} requests", 
-              rust_results.total_datapoints_sent, rust_results.total_requests);
-        
+
+        info!(
+            "✅ Rust test completed. {} datapoints in {} requests",
+            rust_results.total_datapoints_sent, rust_results.total_requests
+        );
+
         // Wait for queues to drain before starting Java test
         info!("⏳ Waiting for Rust queues to drain...");
         let _rust_queue_metrics = wait_for_queue_drain(rust_url, &rust_results).await?;
-        
+
         info!("☕ Starting Java test...");
         let mut java_runner = PerfTestRunner::new(java_config.clone());
         let java_results = java_runner.run().await?;
-        
-        info!("✅ Java test completed. {} datapoints in {} requests", 
-              java_results.total_datapoints_sent, java_results.total_requests);
-        
+
+        info!(
+            "✅ Java test completed. {} datapoints in {} requests",
+            java_results.total_datapoints_sent, java_results.total_requests
+        );
+
         // Wait for Java queues to drain for clean final state
         info!("⏳ Waiting for Java queues to drain...");
         let java_drain_timestamp = wait_for_queue_drain_java(java_url).await?;
-        info!("📅 Java queue drain completed at timestamp: {}", java_drain_timestamp);
-        
+        info!(
+            "📅 Java queue drain completed at timestamp: {}",
+            java_drain_timestamp
+        );
+
         (rust_results, java_results)
     } else {
         info!("Running tests in parallel...");
-        
+
         let rust_handle = {
             let config = rust_config.clone();
             tokio::spawn(async move {
@@ -679,29 +693,37 @@ async fn run_comparison(
         let (rust_result, java_result) = tokio::try_join!(rust_handle, java_handle)?;
         let rust_results = rust_result?;
         let java_results = java_result?;
-        
+
         info!("✅ Both tests completed in parallel");
-        info!("   Rust: {} datapoints in {} requests", 
-              rust_results.total_datapoints_sent, rust_results.total_requests);
-        info!("   Java: {} datapoints in {} requests", 
-              java_results.total_datapoints_sent, java_results.total_requests);
-        
+        info!(
+            "   Rust: {} datapoints in {} requests",
+            rust_results.total_datapoints_sent, rust_results.total_requests
+        );
+        info!(
+            "   Java: {} datapoints in {} requests",
+            java_results.total_datapoints_sent, java_results.total_requests
+        );
+
         (rust_results, java_results)
     };
 
     let total_elapsed = test_start.elapsed();
-    info!("Comparison completed in {:.1}s", total_elapsed.as_secs_f64());
+    info!(
+        "Comparison completed in {:.1}s",
+        total_elapsed.as_secs_f64()
+    );
 
     // Analyze results (both traditional and throughput)
     let analysis = analyze_results(&rust_results, &java_results);
-    
+
     // Create throughput metrics from actual test results
-    let mut throughput_history = Vec::new();
-    throughput_history.push(create_throughput_metrics_from_results(&rust_results, "Rust"));
-    throughput_history.push(create_throughput_metrics_from_results(&java_results, "Java"));
-    
+    let throughput_history = vec![
+        create_throughput_metrics_from_results(&rust_results, "Rust"),
+        create_throughput_metrics_from_results(&java_results, "Java"),
+    ];
+
     let throughput_analysis = analyze_throughput(&throughput_history);
-    
+
     let comparison_results = ComparisonResults {
         scenario_name: scenario_name.to_string(),
         test_config: rust_config, // Use rust config as reference
@@ -720,7 +742,10 @@ async fn run_comparison(
     let report_file = output_dir.join(format!("comparison_{}_detailed.json", scenario_name));
     let json_content = serde_json::to_string_pretty(&comparison_results)?;
     std::fs::write(&report_file, json_content)?;
-    println!("\n📄 Detailed comparison report saved to: {}", report_file.display());
+    println!(
+        "\n📄 Detailed comparison report saved to: {}",
+        report_file.display()
+    );
 
     // Save to CSV for trending
     let csv_path = output_dir.join("comparison_trends.csv");
@@ -772,7 +797,7 @@ async fn run_comparison_suite(
         println!("{}", "=".repeat(60));
 
         match run_comparison(
-            &name,
+            name,
             rust_url,
             java_url,
             output_dir,
@@ -797,17 +822,26 @@ async fn run_comparison_suite(
     println!("🎯 Comparison Suite Complete");
     println!("{}", "=".repeat(60));
     println!("📄 Individual reports saved to: {}", output_dir.display());
-    println!("📊 Trending data: {}/comparison_trends.csv", output_dir.display());
+    println!(
+        "📊 Trending data: {}/comparison_trends.csv",
+        output_dir.display()
+    );
 
     Ok(())
 }
 
-fn analyze_results(rust_results: &PerfTestResults, java_results: &PerfTestResults) -> ComparisonAnalysis {
-    let throughput_ratio = rust_results.throughput_datapoints_per_sec / java_results.throughput_datapoints_per_sec;
+fn analyze_results(
+    rust_results: &PerfTestResults,
+    java_results: &PerfTestResults,
+) -> ComparisonAnalysis {
+    let throughput_ratio =
+        rust_results.throughput_datapoints_per_sec / java_results.throughput_datapoints_per_sec;
     let latency_ratio = java_results.latency_stats.p95_ms / rust_results.latency_stats.p95_ms;
-    
-    let rust_success_rate = rust_results.successful_requests as f64 / rust_results.total_requests as f64 * 100.0;
-    let java_success_rate = java_results.successful_requests as f64 / java_results.total_requests as f64 * 100.0;
+
+    let rust_success_rate =
+        rust_results.successful_requests as f64 / rust_results.total_requests as f64 * 100.0;
+    let java_success_rate =
+        java_results.successful_requests as f64 / java_results.total_requests as f64 * 100.0;
 
     // Determine winner based on throughput and success rate
     let winner = if rust_success_rate > 95.0 && java_success_rate > 95.0 {
@@ -846,77 +880,114 @@ fn print_comparison_results(results: &ComparisonResults) {
     println!("\n{}", "=".repeat(60));
     println!("🏁 Performance Comparison Results");
     println!("{}", "=".repeat(60));
-    
+
     println!("📋 Scenario: {}", results.scenario_name);
     println!("⏱️  Timestamp: {}", results.timestamp);
-    
+
     println!("\n🦀 Rust Results:");
     print_service_results(&results.rust_results);
-    
+
     println!("\n☕ Java Results:");
     print_service_results(&results.java_results);
-    
+
     println!("\n📊 Traditional Performance Analysis:");
     println!("🏆 Winner: {}", results.comparison.winner);
-    println!("📈 Throughput Ratio (Rust/Java): {:.2}x", results.comparison.throughput_improvement_ratio);
-    println!("⚡ Latency Improvement (Java P95 / Rust P95): {:.2}x", results.comparison.latency_improvement_ratio);
-    println!("✅ Success Rate - Rust: {:.1}%", results.comparison.success_rate_rust);
-    println!("✅ Success Rate - Java: {:.1}%", results.comparison.success_rate_java);
+    println!(
+        "📈 Throughput Ratio (Rust/Java): {:.2}x",
+        results.comparison.throughput_improvement_ratio
+    );
+    println!(
+        "⚡ Latency Improvement (Java P95 / Rust P95): {:.2}x",
+        results.comparison.latency_improvement_ratio
+    );
+    println!(
+        "✅ Success Rate - Rust: {:.1}%",
+        results.comparison.success_rate_rust
+    );
+    println!(
+        "✅ Success Rate - Java: {:.1}%",
+        results.comparison.success_rate_java
+    );
     println!("📝 Summary: {}", results.comparison.summary);
-    
+
     // Enhanced throughput analysis
     println!("\n🔍 Detailed Throughput Analysis:");
     print_throughput_analysis(&results.throughput_analysis);
-    
+
     println!("\n{}", "=".repeat(60));
 }
 
 fn print_service_results(results: &PerfTestResults) {
-    println!("  📊 Total Requests: {} ({} success, {} failed)", 
-             results.total_requests, results.successful_requests, results.failed_requests);
-    println!("  📈 Throughput: {:.1} datapoints/sec, {:.1} requests/sec",
-             results.throughput_datapoints_per_sec, results.throughput_requests_per_sec);
-    println!("  ⏱️  Latency - P95: {:.1}ms, P99: {:.1}ms, Mean: {:.1}ms",
-             results.latency_stats.p95_ms, results.latency_stats.p99_ms, results.latency_stats.mean_ms);
-    println!("  ✅ Success Rate: {:.1}%", 
-             (results.successful_requests as f64 / results.total_requests as f64) * 100.0);
+    println!(
+        "  📊 Total Requests: {} ({} success, {} failed)",
+        results.total_requests, results.successful_requests, results.failed_requests
+    );
+    println!(
+        "  📈 Throughput: {:.1} datapoints/sec, {:.1} requests/sec",
+        results.throughput_datapoints_per_sec, results.throughput_requests_per_sec
+    );
+    println!(
+        "  ⏱️  Latency - P95: {:.1}ms, P99: {:.1}ms, Mean: {:.1}ms",
+        results.latency_stats.p95_ms, results.latency_stats.p99_ms, results.latency_stats.mean_ms
+    );
+    println!(
+        "  ✅ Success Rate: {:.1}%",
+        (results.successful_requests as f64 / results.total_requests as f64) * 100.0
+    );
 }
 
 fn print_throughput_analysis(analysis: &ThroughputAnalysis) {
     println!("  🦀 Rust Service Throughput:");
-    println!("    📥 Ingest Rate: {:.1} dps/s avg, {:.1} dps/s peak", 
-             analysis.rust_avg_ingest_rate_dps, analysis.rust_peak_ingest_rate_dps);
-    println!("    📤 End-to-End Rate: {:.1} dps/s avg, {:.1} dps/s peak", 
-             analysis.rust_avg_e2e_rate_dps, analysis.rust_peak_e2e_rate_dps);
-    println!("    📊 Queue: {:.0} avg size, {} max size", 
-             analysis.rust_avg_queue_size, analysis.rust_max_queue_size);
-    println!("    ⚡ Efficiency: {:.2} (ingest/e2e ratio)", analysis.rust_queue_efficiency);
+    println!(
+        "    📥 Ingest Rate: {:.1} dps/s avg, {:.1} dps/s peak",
+        analysis.rust_avg_ingest_rate_dps, analysis.rust_peak_ingest_rate_dps
+    );
+    println!(
+        "    📤 End-to-End Rate: {:.1} dps/s avg, {:.1} dps/s peak",
+        analysis.rust_avg_e2e_rate_dps, analysis.rust_peak_e2e_rate_dps
+    );
+    println!(
+        "    📊 Queue: {:.0} avg size, {} max size",
+        analysis.rust_avg_queue_size, analysis.rust_max_queue_size
+    );
+    println!(
+        "    ⚡ Efficiency: {:.2} (ingest/e2e ratio)",
+        analysis.rust_queue_efficiency
+    );
     if analysis.rust_processing_lag_detected {
         println!("    ⚠️  Processing lag detected (queue growing faster than draining)");
     }
-    
+
     println!("  ☕ Java Service Throughput:");
-    println!("    📥 Ingest Rate: {:.1} req/s avg, {:.1} req/s peak", 
-             analysis.java_avg_ingest_rate_rps, analysis.java_peak_ingest_rate_rps);
-    println!("    📤 End-to-End Rate: {:.1} dps/s avg, {:.1} dps/s peak", 
-             analysis.java_avg_e2e_rate_dps, analysis.java_peak_e2e_rate_dps);
+    println!(
+        "    📥 Ingest Rate: {:.1} req/s avg, {:.1} req/s peak",
+        analysis.java_avg_ingest_rate_rps, analysis.java_peak_ingest_rate_rps
+    );
+    println!(
+        "    📤 End-to-End Rate: {:.1} dps/s avg, {:.1} dps/s peak",
+        analysis.java_avg_e2e_rate_dps, analysis.java_peak_e2e_rate_dps
+    );
     if analysis.java_processing_lag_detected {
         println!("    ⚠️  Processing lag detected");
     }
-    
+
     println!("  🔄 Throughput Comparisons:");
-    println!("    📈 Ingest Rate Improvement: {:.2}x (Rust vs Java)", 
-             analysis.ingest_rate_improvement_ratio);
-    println!("    📈 End-to-End Rate Improvement: {:.2}x (Rust vs Java)", 
-             analysis.e2e_rate_improvement_ratio);
-    
+    println!(
+        "    📈 Ingest Rate Improvement: {:.2}x (Rust vs Java)",
+        analysis.ingest_rate_improvement_ratio
+    );
+    println!(
+        "    📈 End-to-End Rate Improvement: {:.2}x (Rust vs Java)",
+        analysis.e2e_rate_improvement_ratio
+    );
+
     // Performance insights
     if analysis.ingest_rate_improvement_ratio > 1.5 {
         println!("    ✅ Rust shows significant ingest rate advantage");
     } else if analysis.ingest_rate_improvement_ratio < 0.8 {
         println!("    ⚠️  Java shows better ingest rate performance");
     }
-    
+
     if analysis.e2e_rate_improvement_ratio > 1.2 {
         println!("    ✅ Rust shows better end-to-end throughput");
     } else if analysis.e2e_rate_improvement_ratio < 0.9 {
@@ -928,33 +999,53 @@ fn save_csv_summary(results: &ComparisonResults, csv_path: &PathBuf) -> Result<(
     let file_exists = csv_path.exists();
     let mut wtr = csv::WriterBuilder::new()
         .has_headers(!file_exists)
-        .from_writer(std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(csv_path)?);
+        .from_writer(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(csv_path)?,
+        );
 
     // Write header if new file
     if !file_exists {
-        wtr.write_record(&[
-            "timestamp", "scenario", "winner", 
-            "rust_throughput_dps", "java_throughput_dps", "throughput_ratio",
-            "rust_p95_latency", "java_p95_latency", "latency_ratio",
-            "rust_success_rate", "java_success_rate",
-            "rust_requests", "java_requests",
+        wtr.write_record([
+            "timestamp",
+            "scenario",
+            "winner",
+            "rust_throughput_dps",
+            "java_throughput_dps",
+            "throughput_ratio",
+            "rust_p95_latency",
+            "java_p95_latency",
+            "latency_ratio",
+            "rust_success_rate",
+            "java_success_rate",
+            "rust_requests",
+            "java_requests",
             // Enhanced throughput metrics
-            "rust_ingest_rate_dps", "rust_e2e_rate_dps", 
-            "java_ingest_rate_rps", "java_e2e_rate_dps",
-            "ingest_improvement_ratio", "e2e_improvement_ratio",
-            "rust_queue_size_avg", "rust_queue_efficiency"
+            "rust_ingest_rate_dps",
+            "rust_e2e_rate_dps",
+            "java_ingest_rate_rps",
+            "java_e2e_rate_dps",
+            "ingest_improvement_ratio",
+            "e2e_improvement_ratio",
+            "rust_queue_size_avg",
+            "rust_queue_efficiency",
         ])?;
     }
 
-    wtr.write_record(&[
+    wtr.write_record([
         &results.timestamp,
         &results.scenario_name,
         &results.comparison.winner,
-        &results.rust_results.throughput_datapoints_per_sec.to_string(),
-        &results.java_results.throughput_datapoints_per_sec.to_string(),
+        &results
+            .rust_results
+            .throughput_datapoints_per_sec
+            .to_string(),
+        &results
+            .java_results
+            .throughput_datapoints_per_sec
+            .to_string(),
         &results.comparison.throughput_improvement_ratio.to_string(),
         &results.rust_results.latency_stats.p95_ms.to_string(),
         &results.java_results.latency_stats.p95_ms.to_string(),
@@ -964,14 +1055,35 @@ fn save_csv_summary(results: &ComparisonResults, csv_path: &PathBuf) -> Result<(
         &results.rust_results.total_requests.to_string(),
         &results.java_results.total_requests.to_string(),
         // Enhanced throughput metrics
-        &results.throughput_analysis.rust_avg_ingest_rate_dps.to_string(),
-        &results.throughput_analysis.rust_avg_e2e_rate_dps.to_string(),
-        &results.throughput_analysis.java_avg_ingest_rate_rps.to_string(),
-        &results.throughput_analysis.java_avg_e2e_rate_dps.to_string(),
-        &results.throughput_analysis.ingest_rate_improvement_ratio.to_string(),
-        &results.throughput_analysis.e2e_rate_improvement_ratio.to_string(),
+        &results
+            .throughput_analysis
+            .rust_avg_ingest_rate_dps
+            .to_string(),
+        &results
+            .throughput_analysis
+            .rust_avg_e2e_rate_dps
+            .to_string(),
+        &results
+            .throughput_analysis
+            .java_avg_ingest_rate_rps
+            .to_string(),
+        &results
+            .throughput_analysis
+            .java_avg_e2e_rate_dps
+            .to_string(),
+        &results
+            .throughput_analysis
+            .ingest_rate_improvement_ratio
+            .to_string(),
+        &results
+            .throughput_analysis
+            .e2e_rate_improvement_ratio
+            .to_string(),
         &results.throughput_analysis.rust_avg_queue_size.to_string(),
-        &results.throughput_analysis.rust_queue_efficiency.to_string(),
+        &results
+            .throughput_analysis
+            .rust_queue_efficiency
+            .to_string(),
     ])?;
 
     wtr.flush()?;
@@ -990,7 +1102,9 @@ fn list_scenarios() -> Result<()> {
     println!("  perf_compare run large_scale --duration 300     # 5-minute load test");
     println!("  perf_compare run stress_test --parallel         # Run tests simultaneously");
     println!("  perf_compare suite --skip stress_test           # Run all except stress test");
-    println!("  perf_compare check                              # Validate both services are healthy");
+    println!(
+        "  perf_compare check                              # Validate both services are healthy"
+    );
 
     Ok(())
 }
@@ -1003,7 +1117,7 @@ async fn check_services(rust_url: &str, java_url: &str) -> Result<()> {
     // Check Rust service
     print!("🦀 Rust service ({})... ", rust_url);
     match client
-        .get(&format!("{}/health", rust_url))
+        .get(format!("{}/health", rust_url))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -1016,7 +1130,7 @@ async fn check_services(rust_url: &str, java_url: &str) -> Result<()> {
     // Check Java service
     print!("☕ Java service ({})... ", java_url);
     match client
-        .get(&format!("{}/api/v1/health/check", java_url))
+        .get(format!("{}/api/v1/health/check", java_url))
         .timeout(Duration::from_secs(5))
         .send()
         .await
@@ -1035,79 +1149,113 @@ async fn check_services(rust_url: &str, java_url: &str) -> Result<()> {
 
 /// Analyze throughput metrics history to provide insights
 fn analyze_throughput(throughput_history: &[ThroughputMetrics]) -> ThroughputAnalysis {
-    let rust_metrics: Vec<_> = throughput_history.iter()
+    let rust_metrics: Vec<_> = throughput_history
+        .iter()
         .filter(|m| m.service_name == "Rust")
         .collect();
-    let java_metrics: Vec<_> = throughput_history.iter()
+    let java_metrics: Vec<_> = throughput_history
+        .iter()
         .filter(|m| m.service_name == "Java")
         .collect();
-    
+
     // Calculate averages and peaks for Rust
     let (rust_avg_ingest_rate, rust_peak_ingest_rate) = if !rust_metrics.is_empty() {
-        let avg = rust_metrics.iter().map(|m| m.ingest_rate_datapoints_per_sec).sum::<f64>() / rust_metrics.len() as f64;
-        let peak = rust_metrics.iter().map(|m| m.ingest_rate_datapoints_per_sec).fold(0.0, f64::max);
+        let avg = rust_metrics
+            .iter()
+            .map(|m| m.ingest_rate_datapoints_per_sec)
+            .sum::<f64>()
+            / rust_metrics.len() as f64;
+        let peak = rust_metrics
+            .iter()
+            .map(|m| m.ingest_rate_datapoints_per_sec)
+            .fold(0.0, f64::max);
         (avg, peak)
     } else {
         (0.0, 0.0)
     };
-    
+
     let (rust_avg_e2e_rate, rust_peak_e2e_rate) = if !rust_metrics.is_empty() {
-        let avg = rust_metrics.iter().map(|m| m.end_to_end_rate_datapoints_per_sec).sum::<f64>() / rust_metrics.len() as f64;
-        let peak = rust_metrics.iter().map(|m| m.end_to_end_rate_datapoints_per_sec).fold(0.0, f64::max);
+        let avg = rust_metrics
+            .iter()
+            .map(|m| m.end_to_end_rate_datapoints_per_sec)
+            .sum::<f64>()
+            / rust_metrics.len() as f64;
+        let peak = rust_metrics
+            .iter()
+            .map(|m| m.end_to_end_rate_datapoints_per_sec)
+            .fold(0.0, f64::max);
         (avg, peak)
     } else {
         (0.0, 0.0)
     };
-    
+
     // Calculate averages and peaks for Java
     let (java_avg_ingest_rate, java_peak_ingest_rate) = if !java_metrics.is_empty() {
-        let avg = java_metrics.iter().map(|m| m.ingest_rate_requests_per_sec).sum::<f64>() / java_metrics.len() as f64;
-        let peak = java_metrics.iter().map(|m| m.ingest_rate_requests_per_sec).fold(0.0, f64::max);
+        let avg = java_metrics
+            .iter()
+            .map(|m| m.ingest_rate_requests_per_sec)
+            .sum::<f64>()
+            / java_metrics.len() as f64;
+        let peak = java_metrics
+            .iter()
+            .map(|m| m.ingest_rate_requests_per_sec)
+            .fold(0.0, f64::max);
         (avg, peak)
     } else {
         (0.0, 0.0)
     };
-    
+
     let (java_avg_e2e_rate, java_peak_e2e_rate) = if !java_metrics.is_empty() {
-        let avg = java_metrics.iter().map(|m| m.end_to_end_rate_datapoints_per_sec).sum::<f64>() / java_metrics.len() as f64;
-        let peak = java_metrics.iter().map(|m| m.end_to_end_rate_datapoints_per_sec).fold(0.0, f64::max);
+        let avg = java_metrics
+            .iter()
+            .map(|m| m.end_to_end_rate_datapoints_per_sec)
+            .sum::<f64>()
+            / java_metrics.len() as f64;
+        let peak = java_metrics
+            .iter()
+            .map(|m| m.end_to_end_rate_datapoints_per_sec)
+            .fold(0.0, f64::max);
         (avg, peak)
     } else {
         (0.0, 0.0)
     };
-    
+
     // Queue analysis for Rust
     let rust_avg_queue_size = if !rust_metrics.is_empty() {
-        rust_metrics.iter().map(|m| m.queue_size as f64).sum::<f64>() / rust_metrics.len() as f64
+        rust_metrics
+            .iter()
+            .map(|m| m.queue_size as f64)
+            .sum::<f64>()
+            / rust_metrics.len() as f64
     } else {
         0.0
     };
-    
+
     let rust_max_queue_size = rust_metrics.iter().map(|m| m.queue_size).max().unwrap_or(0);
-    
+
     let rust_queue_efficiency = if rust_avg_e2e_rate > 0.0 {
         rust_avg_ingest_rate / rust_avg_e2e_rate
     } else {
         1.0
     };
-    
+
     // Processing lag detection
     let rust_processing_lag_detected = rust_queue_efficiency > 1.2; // Ingest significantly faster than processing
     let java_processing_lag_detected = false; // Can't easily detect from Java metrics
-    
+
     // Throughput improvement ratios
     let ingest_rate_improvement_ratio = if java_avg_ingest_rate > 0.0 {
         rust_avg_ingest_rate / java_avg_ingest_rate
     } else {
         1.0
     };
-    
+
     let e2e_rate_improvement_ratio = if java_avg_e2e_rate > 0.0 {
-        rust_avg_e2e_rate / java_avg_e2e_rate  
+        rust_avg_e2e_rate / java_avg_e2e_rate
     } else {
         1.0
     };
-    
+
     ThroughputAnalysis {
         rust_avg_ingest_rate_dps: rust_avg_ingest_rate,
         rust_avg_e2e_rate_dps: rust_avg_e2e_rate,
@@ -1117,7 +1265,7 @@ fn analyze_throughput(throughput_history: &[ThroughputMetrics]) -> ThroughputAna
         rust_peak_e2e_rate_dps: rust_peak_e2e_rate,
         java_peak_ingest_rate_rps: java_peak_ingest_rate,
         java_peak_e2e_rate_dps: java_peak_e2e_rate,
-        rust_avg_queue_size: rust_avg_queue_size,
+        rust_avg_queue_size,
         rust_max_queue_size,
         rust_queue_efficiency,
         rust_processing_lag_detected,

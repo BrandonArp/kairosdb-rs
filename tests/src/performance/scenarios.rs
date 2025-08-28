@@ -239,9 +239,13 @@ pub struct ScenarioOverrides {
 
 /// Wait for Rust service queue to drain after performance test completion
 /// Tracks queue processing metrics and resets timeout when progress is observed
-async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str, ingestion_results: &crate::performance::PerfTestResults) -> anyhow::Result<Option<crate::performance::QueueProcessingMetrics>> {
+async fn wait_for_queue_drain_internal(
+    client: &reqwest::Client,
+    rust_url: &str,
+    ingestion_results: &crate::performance::PerfTestResults,
+) -> anyhow::Result<Option<crate::performance::QueueProcessingMetrics>> {
     use std::time::{Duration, Instant};
-    
+
     let mut attempts_since_progress = 0;
     let max_attempts_without_progress = 60; // 5 minutes max wait without progress
     let mut last_queue_size: Option<u64> = None;
@@ -249,14 +253,14 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
     let mut max_observed_size: u64 = 0;
     let start_time = Instant::now();
     let mut total_checks = 0;
-    
+
     loop {
         attempts_since_progress += 1;
         total_checks += 1;
-        
+
         // Check Rust service metrics
         match client
-            .get(&format!("{}/api/v1/metrics", rust_url))
+            .get(format!("{}/api/v1/metrics", rust_url))
             .timeout(Duration::from_secs(5))
             .send()
             .await
@@ -264,16 +268,20 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
             Ok(response) => {
                 if let Ok(text) = response.text().await {
                     if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
+                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64())
+                        {
                             // Track initial and maximum queue sizes
                             if initial_queue_size.is_none() {
                                 initial_queue_size = Some(queue_size);
-                                tracing::info!("📊 Starting queue drain monitoring (initial size: {})", queue_size);
+                                tracing::info!(
+                                    "📊 Starting queue drain monitoring (initial size: {})",
+                                    queue_size
+                                );
                             }
                             max_observed_size = max_observed_size.max(queue_size);
-                            
+
                             tracing::info!("📊 Queue size: {}", queue_size);
-                            
+
                             // Check for progress (queue size decreasing)
                             if let Some(last_size) = last_queue_size {
                                 if queue_size < last_size {
@@ -281,7 +289,7 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
                                 }
                             }
                             last_queue_size = Some(queue_size);
-                            
+
                             if queue_size < 100 {
                                 let elapsed = start_time.elapsed();
                                 let initial_size = initial_queue_size.unwrap_or(0);
@@ -291,22 +299,26 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
                                 } else {
                                     0.0
                                 };
-                                
+
                                 // Calculate throughput estimates based on ingestion results
                                 let avg_batch_size = if ingestion_results.total_requests > 0 {
-                                    ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                                    ingestion_results.total_datapoints_sent as f64
+                                        / ingestion_results.total_requests as f64
                                 } else {
                                     0.0
                                 };
-                                
-                                let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
-                                    processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
-                                } else {
-                                    0.0
-                                };
-                                
+
+                                let batches_per_second =
+                                    if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                                        processed_items as f64
+                                            / avg_batch_size
+                                            / elapsed.as_secs() as f64
+                                    } else {
+                                        0.0
+                                    };
+
                                 let datapoints_per_second = batches_per_second * avg_batch_size;
-                                
+
                                 let metrics = crate::performance::QueueProcessingMetrics {
                                     initial_queue_size: initial_size,
                                     peak_queue_size: max_observed_size,
@@ -319,8 +331,11 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
                                     estimated_batches_per_second: batches_per_second,
                                     estimated_datapoints_per_second: datapoints_per_second,
                                 };
-                                
-                                tracing::info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
+
+                                tracing::info!(
+                                    "✅ Queue drained successfully (size: {} < 100)",
+                                    queue_size
+                                );
                                 return Ok(Some(metrics));
                             }
                         }
@@ -328,36 +343,40 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
                 }
             }
             Err(e) => {
-                tracing::info!("⚠️  Could not check queue status: {} (attempt {} since progress)", 
-                              e, attempts_since_progress);
+                tracing::info!(
+                    "⚠️  Could not check queue status: {} (attempt {} since progress)",
+                    e,
+                    attempts_since_progress
+                );
             }
         }
-        
+
         if attempts_since_progress >= max_attempts_without_progress {
             let elapsed = start_time.elapsed();
             let initial_size = initial_queue_size.unwrap_or(0);
             let current_size = last_queue_size.unwrap_or(0);
             let processed_items = max_observed_size.saturating_sub(current_size);
-            
+
             // Calculate partial metrics for timeout case
             let avg_batch_size = if ingestion_results.total_requests > 0 {
-                ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                ingestion_results.total_datapoints_sent as f64
+                    / ingestion_results.total_requests as f64
             } else {
                 0.0
             };
-            
+
             let processing_rate = if elapsed.as_secs() > 0 {
                 processed_items as f64 / elapsed.as_secs() as f64
             } else {
                 0.0
             };
-            
+
             let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
                 processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
             } else {
                 0.0
             };
-            
+
             let metrics = crate::performance::QueueProcessingMetrics {
                 initial_queue_size: initial_size,
                 peak_queue_size: max_observed_size,
@@ -370,11 +389,14 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str,
                 estimated_batches_per_second: batches_per_second,
                 estimated_datapoints_per_second: batches_per_second * avg_batch_size,
             };
-            
-            tracing::info!("⚠️  Queue drain timeout after {} attempts without progress", max_attempts_without_progress);
+
+            tracing::info!(
+                "⚠️  Queue drain timeout after {} attempts without progress",
+                max_attempts_without_progress
+            );
             return Ok(Some(metrics)); // Return partial metrics
         }
-        
+
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
@@ -436,9 +458,12 @@ impl PerfTestSuite {
     }
 
     /// Run all scenarios in the suite with queue monitoring after each test
-    pub async fn run_all_with_queue_monitoring(&mut self, service_url: &str) -> anyhow::Result<Vec<(String, PerfTestResults)>> {
+    pub async fn run_all_with_queue_monitoring(
+        &mut self,
+        service_url: &str,
+    ) -> anyhow::Result<Vec<(String, PerfTestResults)>> {
         use reqwest::Client;
-        
+
         let client = Client::new();
         let mut results = Vec::new();
 
@@ -450,14 +475,15 @@ impl PerfTestSuite {
 
             // Wait for queue to drain for accurate test completion timing
             tracing::info!("⏳ Waiting for queue to drain after scenario '{}'...", name);
-            let queue_metrics = match wait_for_queue_drain_internal(&client, service_url, &result).await {
-                Ok(metrics) => metrics,
-                Err(e) => {
-                    tracing::warn!("Queue drain failed for scenario '{}': {}", name, e);
-                    None
-                }
-            };
-            
+            let queue_metrics =
+                match wait_for_queue_drain_internal(&client, service_url, &result).await {
+                    Ok(metrics) => metrics,
+                    Err(e) => {
+                        tracing::warn!("Queue drain failed for scenario '{}': {}", name, e);
+                        None
+                    }
+                };
+
             // Add queue metrics to the result
             let mut final_result = result;
             final_result.queue_processing_metrics = queue_metrics;

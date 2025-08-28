@@ -98,13 +98,28 @@ impl PerfTestReporter {
             println!("  Peak queue size: {}", queue_metrics.peak_queue_size);
             println!("  Final queue size: {}", queue_metrics.final_queue_size);
             println!("  Items processed: {}", queue_metrics.total_items_processed);
-            println!("  Processing time: {:.1}s", queue_metrics.processing_time_seconds);
-            println!("  Processing rate: {:.1} items/sec", queue_metrics.items_per_second);
-            
+            println!(
+                "  Processing time: {:.1}s",
+                queue_metrics.processing_time_seconds
+            );
+            println!(
+                "  Processing rate: {:.1} items/sec",
+                queue_metrics.items_per_second
+            );
+
             println!("\n📈 Queue Throughput Estimates:");
-            println!("  Avg batch size: {:.1}", queue_metrics.estimated_batch_size);
-            println!("  Batches/sec: {:.1}", queue_metrics.estimated_batches_per_second);
-            println!("  Datapoints/sec: {:.0}", queue_metrics.estimated_datapoints_per_second);
+            println!(
+                "  Avg batch size: {:.1}",
+                queue_metrics.estimated_batch_size
+            );
+            println!(
+                "  Batches/sec: {:.1}",
+                queue_metrics.estimated_batches_per_second
+            );
+            println!(
+                "  Datapoints/sec: {:.0}",
+                queue_metrics.estimated_datapoints_per_second
+            );
             println!("  Status checks: {}", queue_metrics.total_status_checks);
         }
 
@@ -349,6 +364,7 @@ mod tests {
                 max_ms: 1000.0,
             },
             error_details: vec!["Connection timeout".to_string()],
+            queue_processing_metrics: None,
         }
     }
 
