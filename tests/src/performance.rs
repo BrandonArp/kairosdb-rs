@@ -60,6 +60,7 @@ pub struct PerfTestResults {
     pub throughput_requests_per_sec: f64,
     pub latency_stats: LatencyStats,
     pub error_details: Vec<String>,
+    pub queue_processing_metrics: Option<QueueProcessingMetrics>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -70,6 +71,20 @@ pub struct LatencyStats {
     pub p99_ms: f64,
     pub min_ms: f64,
     pub max_ms: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QueueProcessingMetrics {
+    pub initial_queue_size: u64,
+    pub peak_queue_size: u64,
+    pub final_queue_size: u64,
+    pub total_items_processed: u64,
+    pub processing_time_seconds: f64,
+    pub items_per_second: f64,
+    pub total_status_checks: u32,
+    pub estimated_batch_size: f64,
+    pub estimated_batches_per_second: f64,
+    pub estimated_datapoints_per_second: f64,
 }
 
 // Type aliases for complex types to satisfy clippy
@@ -179,6 +194,7 @@ impl PerfTestRunner {
                 max_ms: 0.0,
             },
             error_details: Vec::new(),
+            queue_processing_metrics: None,
         };
 
         let test_duration = Duration::from_secs(self.config.duration_seconds);

@@ -14,7 +14,7 @@ use reqwest::Client;
 
 /// Wait for Rust service queue to drain by monitoring metrics
 /// Tracks queue processing metrics and resets timeout when progress is observed
-async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
+async fn wait_for_queue_drain(rust_url: &str, ingestion_results: &kairosdb_e2e_tests::performance::PerfTestResults) -> Result<Option<kairosdb_e2e_tests::performance::QueueProcessingMetrics>> {
     let client = Client::new();
     let mut attempts_since_progress = 0;
     let max_attempts_without_progress = 60; // 5 minutes max wait without progress
@@ -66,15 +66,36 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
                                     0.0
                                 };
                                 
+                                // Calculate throughput estimates based on ingestion results
+                                let avg_batch_size = if ingestion_results.total_requests > 0 {
+                                    ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                                } else {
+                                    0.0
+                                };
+                                
+                                let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                                    processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
+                                } else {
+                                    0.0
+                                };
+                                
+                                let datapoints_per_second = batches_per_second * avg_batch_size;
+                                
+                                let metrics = kairosdb_e2e_tests::performance::QueueProcessingMetrics {
+                                    initial_queue_size: initial_size,
+                                    peak_queue_size: max_observed_size,
+                                    final_queue_size: queue_size,
+                                    total_items_processed: processed_items,
+                                    processing_time_seconds: elapsed.as_secs_f64(),
+                                    items_per_second: processing_rate,
+                                    total_status_checks: total_checks,
+                                    estimated_batch_size: avg_batch_size,
+                                    estimated_batches_per_second: batches_per_second,
+                                    estimated_datapoints_per_second: datapoints_per_second,
+                                };
+                                
                                 info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
-                                info!("📈 Queue processing metrics:");
-                                info!("   - Initial size: {}", initial_size);
-                                info!("   - Peak size: {}", max_observed_size);
-                                info!("   - Items processed: {}", processed_items);
-                                info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
-                                info!("   - Processing rate: {:.1} items/sec", processing_rate);
-                                info!("   - Total checks: {}", total_checks);
-                                return Ok(());
+                                return Ok(Some(metrics));
                             }
                         }
                     }
@@ -91,15 +112,40 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
             let current_size = last_queue_size.unwrap_or(0);
             let processed_items = max_observed_size.saturating_sub(current_size);
             
+            // Calculate partial metrics for timeout case
+            let avg_batch_size = if ingestion_results.total_requests > 0 {
+                ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+            } else {
+                0.0
+            };
+            
+            let processing_rate = if elapsed.as_secs() > 0 {
+                processed_items as f64 / elapsed.as_secs() as f64
+            } else {
+                0.0
+            };
+            
+            let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
+            } else {
+                0.0
+            };
+            
+            let metrics = kairosdb_e2e_tests::performance::QueueProcessingMetrics {
+                initial_queue_size: initial_size,
+                peak_queue_size: max_observed_size,
+                final_queue_size: current_size,
+                total_items_processed: processed_items,
+                processing_time_seconds: elapsed.as_secs_f64(),
+                items_per_second: processing_rate,
+                total_status_checks: total_checks,
+                estimated_batch_size: avg_batch_size,
+                estimated_batches_per_second: batches_per_second,
+                estimated_datapoints_per_second: batches_per_second * avg_batch_size,
+            };
+            
             info!("⚠️  Queue drain timeout after {} attempts without progress", max_attempts_without_progress);
-            info!("📊 Partial processing metrics:");
-            info!("   - Initial size: {}", initial_size);
-            info!("   - Peak size: {}", max_observed_size);
-            info!("   - Current size: {}", current_size);
-            info!("   - Items processed: {}", processed_items);
-            info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
-            info!("   - Total checks: {}", total_checks);
-            return Ok(()); // Continue anyway
+            return Ok(Some(metrics)); // Return partial metrics
         }
         
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -596,7 +642,7 @@ async fn run_comparison(
         
         // Wait for queues to drain before starting Java test
         info!("⏳ Waiting for Rust queues to drain...");
-        wait_for_queue_drain(rust_url).await?;
+        let _rust_queue_metrics = wait_for_queue_drain(rust_url, &rust_results).await?;
         
         info!("☕ Starting Java test...");
         let mut java_runner = PerfTestRunner::new(java_config.clone());

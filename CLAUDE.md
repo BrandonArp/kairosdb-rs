@@ -370,16 +370,24 @@ cd tests && cargo run --bin perf_test -- run large_scale --duration 600
 - **Histogram-Focused**: Generates realistic histogram data with configurable sample counts (10s to thousands)
 - **High Cardinality**: Thousands of metrics with consistent tag patterns (service, environment, region, etc.)
 - **Realistic Distributions**: Normal, exponential, and bimodal sample distributions
-- **Queue Monitoring**: Waits for service queues to drain after each test for accurate completion timing (timeout resets on progress)
-- **Comprehensive Reporting**: Latency stats (P95, P99), throughput, success rates, bottleneck analysis
+- **Queue Processing Analytics**: Comprehensive tracking of queue drain behavior with throughput estimates
+- **Comprehensive Reporting**: Latency stats (P95, P99), ingestion throughput, queue processing metrics, bottleneck analysis
 - **Trending Data**: CSV output for tracking performance over time
 - **Continuous Monitoring**: Long-running tests for stability validation
 
 ### Performance Metrics Collected
+
+**Ingestion Metrics:**
 - Throughput: datapoints/second, requests/second
 - Latency: mean, median, P95, P99, min, max
 - Success rate and error analysis
 - Efficiency scoring and bottleneck identification
+
+**Queue Processing Metrics:**
+- Queue size tracking (initial, peak, final)
+- Items processed and processing time
+- Processing rates (items/sec, batches/sec, datapoints/sec)
+- Status check frequency and timeout behavior
 - Memory and resource utilization estimates
 
 ### Logging Configuration for Performance Testing

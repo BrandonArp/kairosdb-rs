@@ -239,7 +239,7 @@ pub struct ScenarioOverrides {
 
 /// Wait for Rust service queue to drain after performance test completion
 /// Tracks queue processing metrics and resets timeout when progress is observed
-async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str) -> anyhow::Result<()> {
+async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str, ingestion_results: &crate::performance::PerfTestResults) -> anyhow::Result<Option<crate::performance::QueueProcessingMetrics>> {
     use std::time::{Duration, Instant};
     
     let mut attempts_since_progress = 0;
@@ -292,15 +292,36 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str)
                                     0.0
                                 };
                                 
+                                // Calculate throughput estimates based on ingestion results
+                                let avg_batch_size = if ingestion_results.total_requests > 0 {
+                                    ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+                                } else {
+                                    0.0
+                                };
+                                
+                                let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                                    processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
+                                } else {
+                                    0.0
+                                };
+                                
+                                let datapoints_per_second = batches_per_second * avg_batch_size;
+                                
+                                let metrics = crate::performance::QueueProcessingMetrics {
+                                    initial_queue_size: initial_size,
+                                    peak_queue_size: max_observed_size,
+                                    final_queue_size: queue_size,
+                                    total_items_processed: processed_items,
+                                    processing_time_seconds: elapsed.as_secs_f64(),
+                                    items_per_second: processing_rate,
+                                    total_status_checks: total_checks,
+                                    estimated_batch_size: avg_batch_size,
+                                    estimated_batches_per_second: batches_per_second,
+                                    estimated_datapoints_per_second: datapoints_per_second,
+                                };
+                                
                                 tracing::info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
-                                tracing::info!("📈 Queue processing metrics:");
-                                tracing::info!("   - Initial size: {}", initial_size);
-                                tracing::info!("   - Peak size: {}", max_observed_size);
-                                tracing::info!("   - Items processed: {}", processed_items);
-                                tracing::info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
-                                tracing::info!("   - Processing rate: {:.1} items/sec", processing_rate);
-                                tracing::info!("   - Total checks: {}", total_checks);
-                                return Ok(());
+                                return Ok(Some(metrics));
                             }
                         }
                     }
@@ -318,15 +339,40 @@ async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str)
             let current_size = last_queue_size.unwrap_or(0);
             let processed_items = max_observed_size.saturating_sub(current_size);
             
+            // Calculate partial metrics for timeout case
+            let avg_batch_size = if ingestion_results.total_requests > 0 {
+                ingestion_results.total_datapoints_sent as f64 / ingestion_results.total_requests as f64
+            } else {
+                0.0
+            };
+            
+            let processing_rate = if elapsed.as_secs() > 0 {
+                processed_items as f64 / elapsed.as_secs() as f64
+            } else {
+                0.0
+            };
+            
+            let batches_per_second = if elapsed.as_secs() > 0 && avg_batch_size > 0.0 {
+                processed_items as f64 / avg_batch_size / elapsed.as_secs() as f64
+            } else {
+                0.0
+            };
+            
+            let metrics = crate::performance::QueueProcessingMetrics {
+                initial_queue_size: initial_size,
+                peak_queue_size: max_observed_size,
+                final_queue_size: current_size,
+                total_items_processed: processed_items,
+                processing_time_seconds: elapsed.as_secs_f64(),
+                items_per_second: processing_rate,
+                total_status_checks: total_checks,
+                estimated_batch_size: avg_batch_size,
+                estimated_batches_per_second: batches_per_second,
+                estimated_datapoints_per_second: batches_per_second * avg_batch_size,
+            };
+            
             tracing::info!("⚠️  Queue drain timeout after {} attempts without progress", max_attempts_without_progress);
-            tracing::info!("📊 Partial processing metrics:");
-            tracing::info!("   - Initial size: {}", initial_size);
-            tracing::info!("   - Peak size: {}", max_observed_size);
-            tracing::info!("   - Current size: {}", current_size);
-            tracing::info!("   - Items processed: {}", processed_items);
-            tracing::info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
-            tracing::info!("   - Total checks: {}", total_checks);
-            return Ok(()); // Continue anyway
+            return Ok(Some(metrics)); // Return partial metrics
         }
         
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -366,7 +412,7 @@ impl PerfTestSuite {
             let mut runner = PerfTestRunner::new(config.clone());
             let result = runner.run().await?;
 
-            // Generate and save report
+            // Generate and save report (no queue monitoring for this function)
             let reporter = PerfTestReporter::new(name.clone(), config.clone());
             reporter.print_results(&result);
 
@@ -404,25 +450,33 @@ impl PerfTestSuite {
 
             // Wait for queue to drain for accurate test completion timing
             tracing::info!("⏳ Waiting for queue to drain after scenario '{}'...", name);
-            if let Err(e) = wait_for_queue_drain_internal(&client, service_url).await {
-                tracing::warn!("Queue drain failed for scenario '{}': {}", name, e);
-            }
+            let queue_metrics = match wait_for_queue_drain_internal(&client, service_url, &result).await {
+                Ok(metrics) => metrics,
+                Err(e) => {
+                    tracing::warn!("Queue drain failed for scenario '{}': {}", name, e);
+                    None
+                }
+            };
+            
+            // Add queue metrics to the result
+            let mut final_result = result;
+            final_result.queue_processing_metrics = queue_metrics;
 
             // Generate and save report
             let reporter = PerfTestReporter::new(name.clone(), config.clone());
-            reporter.print_results(&result);
+            reporter.print_results(&final_result);
 
-            if let Err(e) = reporter.save_to_file(&result, &self.output_dir) {
+            if let Err(e) = reporter.save_to_file(&final_result, &self.output_dir) {
                 tracing::warn!("Failed to save report for {}: {}", name, e);
             }
 
             // Save to trending CSV
             let csv_path = self.output_dir.join("performance_trends.csv");
-            if let Err(e) = reporter.save_csv_summary(&result, &csv_path) {
+            if let Err(e) = reporter.save_csv_summary(&final_result, &csv_path) {
                 tracing::warn!("Failed to save CSV summary: {}", e);
             }
 
-            results.push((name.clone(), result));
+            results.push((name.clone(), final_result));
 
             // Brief pause between scenarios
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
