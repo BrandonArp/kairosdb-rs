@@ -31,8 +31,8 @@ docker_build_with_restart(
   ],
 )
 
-# Local resource to build the Rust binary
-local_resource('build-kairosdb-ingest', 'cargo build --release --bin kairosdb-ingest --features profiling',
+# Local resource to build the Rust binary with jemalloc for better memory management
+local_resource('build-kairosdb-ingest', 'cargo build --release --bin kairosdb-ingest --features profiling,jemalloc',
   deps=[
     'kairosdb-ingest/src', 
     'kairosdb-core/src', 

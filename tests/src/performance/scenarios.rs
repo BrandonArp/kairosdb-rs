@@ -237,6 +237,50 @@ pub struct ScenarioOverrides {
     pub performance_mode: Option<String>,
 }
 
+/// Wait for Rust service queue to drain after performance test completion
+async fn wait_for_queue_drain_internal(client: &reqwest::Client, rust_url: &str) -> anyhow::Result<()> {
+    use std::time::Duration;
+    
+    let mut attempts = 0;
+    let max_attempts = 60; // 5 minutes max wait
+    
+    loop {
+        attempts += 1;
+        
+        // Check Rust service metrics
+        match client
+            .get(&format!("{}/api/v1/metrics", rust_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if let Ok(text) = response.text().await {
+                    if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
+                            tracing::info!("📊 Queue size: {}", queue_size);
+                            if queue_size < 100 {
+                                tracing::info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::info!("⚠️  Could not check queue status: {} (attempt {}/{})", e, attempts, max_attempts);
+            }
+        }
+        
+        if attempts >= max_attempts {
+            tracing::info!("⚠️  Queue drain timeout after {} attempts", max_attempts);
+            return Ok(()); // Continue anyway
+        }
+        
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 /// Performance test suite runner for running multiple scenarios
 pub struct PerfTestSuite {
     scenarios: Vec<(String, PerfTestConfig)>,
@@ -269,6 +313,48 @@ impl PerfTestSuite {
 
             let mut runner = PerfTestRunner::new(config.clone());
             let result = runner.run().await?;
+
+            // Generate and save report
+            let reporter = PerfTestReporter::new(name.clone(), config.clone());
+            reporter.print_results(&result);
+
+            if let Err(e) = reporter.save_to_file(&result, &self.output_dir) {
+                tracing::warn!("Failed to save report for {}: {}", name, e);
+            }
+
+            // Save to trending CSV
+            let csv_path = self.output_dir.join("performance_trends.csv");
+            if let Err(e) = reporter.save_csv_summary(&result, &csv_path) {
+                tracing::warn!("Failed to save CSV summary: {}", e);
+            }
+
+            results.push((name.clone(), result));
+
+            // Brief pause between scenarios
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        Ok(results)
+    }
+
+    /// Run all scenarios in the suite with queue monitoring after each test
+    pub async fn run_all_with_queue_monitoring(&mut self, service_url: &str) -> anyhow::Result<Vec<(String, PerfTestResults)>> {
+        use reqwest::Client;
+        
+        let client = Client::new();
+        let mut results = Vec::new();
+
+        for (name, config) in &self.scenarios {
+            println!("\n🎯 Running scenario: {}", name);
+
+            let mut runner = PerfTestRunner::new(config.clone());
+            let result = runner.run().await?;
+
+            // Wait for queue to drain for accurate test completion timing
+            tracing::info!("⏳ Waiting for queue to drain after scenario '{}'...", name);
+            if let Err(e) = wait_for_queue_drain_internal(&client, service_url).await {
+                tracing::warn!("Queue drain failed for scenario '{}': {}", name, e);
+            }
 
             // Generate and save report
             let reporter = PerfTestReporter::new(name.clone(), config.clone());

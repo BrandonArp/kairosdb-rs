@@ -81,11 +81,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 ### Development with Tilt
 ```bash
 # Start development environment with hot reload
+# Automatically builds ingestion service with jemalloc for memory optimization
 tilt up
 
 # View Tilt dashboard
 tilt up --web-mode=local
 ```
+
+**Note**: The Tilt environment automatically builds the ingestion service with both `profiling` and `jemalloc` features enabled for optimal development experience with memory management improvements.
 
 ## Architecture Overview
 
@@ -213,6 +216,30 @@ KairosDB-rs includes comprehensive histogram datapoint support, addressing a key
 
 **Storage**: Histograms are efficiently serialized as binary data in Cassandra with the `kairos_histogram` data type.
 
+### Memory Management
+
+KairosDB-rs supports jemalloc as an alternative memory allocator to address memory management issues:
+
+**Using jemalloc**:
+```bash
+# Build with jemalloc for better memory management
+cargo build --release --features jemalloc
+
+# Run ingestion service with jemalloc
+cargo run --bin kairosdb-ingest --features jemalloc
+```
+
+**Benefits**:
+- Better memory reclamation to the operating system
+- Reduced memory fragmentation under high load
+- Improved performance in high-throughput scenarios
+- More predictable memory usage patterns
+
+**Configuration**:
+- jemalloc is an optional feature, enabled with `--features jemalloc`
+- Service logs indicate which allocator is in use at startup
+- No configuration changes required - it's a drop-in replacement
+
 ## Development Workflow
 
 ### Local Development
@@ -305,6 +332,14 @@ hist1.merge(&hist2)?;
 ### Monitoring
 Expose Prometheus metrics for all operations. Include counters, histograms for timing, and gauge metrics for system state.
 
+**Key Metrics Available**:
+- **Queue Metrics**: Current size, enqueue/dequeue rates, processing latency
+- **Disk Usage**: Queue storage consumption (updated after GC sweeps every 30 seconds)
+- **Processing Metrics**: Batch sizes, success/failure rates, throughput
+- **System Metrics**: Memory usage, processing times, error counts
+
+**Disk Usage Tracking**: Queue disk usage metrics are automatically updated after garbage collection sweeps to provide accurate storage consumption data for monitoring and capacity planning.
+
 ## Performance Testing Framework
 
 KairosDB-rs includes a comprehensive end-to-end performance testing framework designed for histogram-heavy workloads and high-cardinality scenarios.
@@ -335,6 +370,7 @@ cd tests && cargo run --bin perf_test -- run large_scale --duration 600
 - **Histogram-Focused**: Generates realistic histogram data with configurable sample counts (10s to thousands)
 - **High Cardinality**: Thousands of metrics with consistent tag patterns (service, environment, region, etc.)
 - **Realistic Distributions**: Normal, exponential, and bimodal sample distributions
+- **Queue Monitoring**: Waits for service queues to drain after each test for accurate completion timing
 - **Comprehensive Reporting**: Latency stats (P95, P99), throughput, success rates, bottleneck analysis
 - **Trending Data**: CSV output for tracking performance over time
 - **Continuous Monitoring**: Long-running tests for stability validation

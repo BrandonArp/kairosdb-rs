@@ -3,6 +3,14 @@ use std::sync::Arc;
 use tokio::{net::TcpListener, signal};
 use tracing::{error, info, warn};
 
+// Use jemalloc as the global allocator when the feature is enabled
+#[cfg(feature = "jemalloc")]
+use jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 // Use the library modules
 use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService, ShutdownConfig, ShutdownManager};
 
@@ -19,6 +27,12 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Starting KairosDB Ingestion Service");
+    
+    // Log allocator information
+    #[cfg(feature = "jemalloc")]
+    info!("Using jemalloc memory allocator for improved memory management");
+    #[cfg(not(feature = "jemalloc"))]
+    info!("Using system default memory allocator");
 
     // Load configuration
     let config = Arc::new(IngestConfig::load()?);

@@ -79,6 +79,9 @@ prost-types = "0.14"
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.4"
 
+# Memory allocator
+jemallocator = "0.5"
+
 [profile.release]
 lto = true
 codegen-units = 1

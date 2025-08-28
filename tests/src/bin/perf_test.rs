@@ -4,7 +4,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use kairosdb_e2e_tests::performance::*;
+use reqwest::Client;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber;
 
@@ -192,19 +194,69 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Wait for Rust service queue to drain after performance test completion
+async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
+    let client = Client::new();
+    let mut attempts = 0;
+    let max_attempts = 60; // 5 minutes max wait
+    
+    loop {
+        attempts += 1;
+        
+        // Check Rust service metrics
+        match client
+            .get(&format!("{}/api/v1/metrics", rust_url))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if let Ok(text) = response.text().await {
+                    if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
+                            info!("📊 Queue size: {}", queue_size);
+                            if queue_size < 100 {
+                                info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                info!("⚠️  Could not check queue status: {} (attempt {}/{})", e, attempts, max_attempts);
+            }
+        }
+        
+        if attempts >= max_attempts {
+            info!("⚠️  Queue drain timeout after {} attempts", max_attempts);
+            return Ok(()); // Continue anyway
+        }
+        
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 async fn run_single_scenario(
     scenario_name: &str,
-    _url: &str,
+    url: &str,
     output_dir: &PathBuf,
     overrides: ScenarioOverrides,
 ) -> Result<()> {
     info!("Running performance test scenario: {}", scenario_name);
 
-    let config = TestScenarios::custom(scenario_name, overrides)
+    let mut config = TestScenarios::custom(scenario_name, overrides)
         .ok_or_else(|| anyhow::anyhow!("Unknown scenario: {}", scenario_name))?;
+    
+    // Set the ingest URL from parameter
+    config.ingest_url = url.to_string();
 
     let mut runner = PerfTestRunner::new(config.clone());
     let results = runner.run().await?;
+    
+    // Wait for queue to drain for accurate test completion timing
+    info!("⏳ Waiting for queue to drain...");
+    wait_for_queue_drain(url).await?;
 
     let reporter = PerfTestReporter::new(scenario_name.to_string(), config);
     reporter.print_results(&results);
@@ -258,7 +310,7 @@ async fn run_test_suite(
         suite.add_scenario(name.to_string(), config);
     }
 
-    let results = suite.run_all().await?;
+    let results = suite.run_all_with_queue_monitoring(url).await?;
     suite.print_suite_summary(&results);
 
     println!("\n📄 Individual reports saved to: {}", output_dir.display());

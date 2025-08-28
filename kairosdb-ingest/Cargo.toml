@@ -87,9 +87,15 @@ flume = "0.11"
 # CPU profiling support
 pprof = { version = "0.15", features = ["flamegraph", "protobuf-codec"], optional = true }
 
+# Memory allocator for better memory management
+jemallocator = { workspace = true, optional = true }
+
 [features]
 # Enable CPU profiling with pprof
 profiling = ["pprof"]
+
+# Enable jemalloc for better memory management
+jemalloc = ["jemallocator"]
 
 [dev-dependencies]
 tempfile = "3.8"

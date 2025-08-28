@@ -239,6 +239,18 @@ cwd = "kairosdb-query"
 command = "cargo"
 args = ["run", "--release", "--bin", "kairosdb-query"]
 
+[tasks.run-ingest-jemalloc]
+description = "Run the ingest service with jemalloc allocator"
+cwd = "kairosdb-ingest"
+command = "cargo"
+args = ["run", "--bin", "kairosdb-ingest", "--features", "jemalloc"]
+
+[tasks.run-ingest-jemalloc-release]
+description = "Run the ingest service with jemalloc allocator (release mode)"
+cwd = "kairosdb-ingest"
+command = "cargo"
+args = ["run", "--release", "--bin", "kairosdb-ingest", "--features", "jemalloc"]
+
 [tasks.run-datastore-demo]
 description = "Run the datastore demo"
 cwd = "kairosdb-core"
@@ -380,6 +392,8 @@ echo ""
 echo "🚀 Services:"
 echo "  run-ingest      - Run the ingest service"
 echo "  run-ingest-release - Run the ingest service (release mode)"
+echo "  run-ingest-jemalloc - Run the ingest service with jemalloc allocator"
+echo "  run-ingest-jemalloc-release - Run the ingest service with jemalloc (release mode)"
 echo "  run-query       - Run the query service"
 echo "  run-query-release - Run the query service (release mode)"
 echo "  run-datastore-demo - Run the datastore demo"

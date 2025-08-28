@@ -35,7 +35,7 @@ USER kairosdb
 # Ingest service target
 FROM base AS ingest
 
-# Copy binary (will be built locally and synced by Tilt)
+# Copy binary (will be built locally with jemalloc and synced by Tilt)
 COPY --chown=kairosdb:kairosdb target/release/kairosdb-ingest /app/kairosdb-ingest
 
 # Add metadata labels
