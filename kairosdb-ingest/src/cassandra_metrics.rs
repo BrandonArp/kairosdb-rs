@@ -154,7 +154,8 @@ impl CassandraOperationMetrics {
     /// Record successful data point write with timing
     pub fn record_datapoint_write(&self, duration: std::time::Duration) {
         self.datapoints_written_total.inc();
-        self.datapoint_write_duration_seconds.observe(duration.as_secs_f64());
+        self.datapoint_write_duration_seconds
+            .observe(duration.as_secs_f64());
     }
 
     /// Record data point write error
@@ -167,10 +168,12 @@ impl CassandraOperationMetrics {
         // Record in both general string_index and specific metric_name counters
         self.string_index_writes_total.inc();
         self.metric_name_index_writes_total.inc();
-        
+
         let duration_secs = duration.as_secs_f64();
-        self.string_index_write_duration_seconds.observe(duration_secs);
-        self.metric_name_index_write_duration_seconds.observe(duration_secs);
+        self.string_index_write_duration_seconds
+            .observe(duration_secs);
+        self.metric_name_index_write_duration_seconds
+            .observe(duration_secs);
     }
 
     /// Record string index write error (metric names)
@@ -182,7 +185,8 @@ impl CassandraOperationMetrics {
     /// Record successful row_keys index write with timing
     pub fn record_row_keys_index_write(&self, duration: std::time::Duration) {
         self.row_keys_index_writes_total.inc();
-        self.row_keys_index_write_duration_seconds.observe(duration.as_secs_f64());
+        self.row_keys_index_write_duration_seconds
+            .observe(duration.as_secs_f64());
     }
 
     /// Record row_keys index write error
@@ -193,7 +197,8 @@ impl CassandraOperationMetrics {
     /// Record successful row_key_time_index write with timing
     pub fn record_row_key_time_index_write(&self, duration: std::time::Duration) {
         self.row_key_time_index_writes_total.inc();
-        self.row_key_time_index_write_duration_seconds.observe(duration.as_secs_f64());
+        self.row_key_time_index_write_duration_seconds
+            .observe(duration.as_secs_f64());
     }
 
     /// Record row_key_time_index write error
@@ -203,7 +208,8 @@ impl CassandraOperationMetrics {
 
     /// Record complete batch processing with timing and size
     pub fn record_batch_processed(&self, duration: std::time::Duration, batch_size: usize) {
-        self.batch_processing_duration_seconds.observe(duration.as_secs_f64());
+        self.batch_processing_duration_seconds
+            .observe(duration.as_secs_f64());
         self.batch_size_processed.observe(batch_size as f64);
     }
 

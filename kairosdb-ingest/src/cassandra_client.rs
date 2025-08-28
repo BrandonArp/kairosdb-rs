@@ -135,11 +135,10 @@ impl MultiWorkerCassandraClient {
         let stats = Arc::new(MultiWorkerStats::default());
 
         // Create shared cache manager for all workers
-        let shared_cache_manager = Arc::new(
-            CacheManager::with_config(cache_config)
-                .await
-                .map_err(|e| KairosError::Internal(format!("Failed to create cache manager: {}", e)))?
-        );
+        let shared_cache_manager =
+            Arc::new(CacheManager::with_config(cache_config).await.map_err(|e| {
+                KairosError::Internal(format!("Failed to create cache manager: {}", e))
+            })?);
 
         // Spawn worker tasks
         let mut worker_handles = Vec::with_capacity(num_workers);
@@ -207,7 +206,11 @@ impl MultiWorkerCassandraClient {
     }
 
     /// Create a new multi-worker Cassandra client (creates its own channels)
-    pub async fn new(config: CassandraConfig, cache_config: CacheConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+    pub async fn new(
+        config: CassandraConfig,
+        cache_config: CacheConfig,
+        num_workers: Option<usize>,
+    ) -> KairosResult<Self> {
         // Create MPMC channels for work distribution and responses
         let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
         let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
@@ -524,10 +527,12 @@ impl MultiWorkerCassandraClient {
         );
 
         let total_duration = internal_start.elapsed();
-        
+
         // Record batch processing metrics
-        resources.metrics.record_batch_processed(total_duration, batch.points.len());
-        
+        resources
+            .metrics
+            .record_batch_processed(total_duration, batch.points.len());
+
         trace!(
             "Sequential worker batch completed successfully in {:?} total",
             total_duration
@@ -587,7 +592,7 @@ impl MultiWorkerCassandraClient {
                 tags_string
             );
             row_keys_entries.insert(row_keys_entry_key, data_point.clone());
-            
+
             // Collect unique row_key_time_index entries (one per unique metric + row_time)
             let row_key_time_index_key = format!(
                 "row_key_time_index:{}:data_points:{}",
@@ -885,10 +890,7 @@ impl CassandraClient for MultiWorkerCassandraClient {
 
 impl MultiWorkerCassandraClient {
     async fn get_stats_internal(&self, _include_ones_count: bool) -> CassandraStats {
-        let cache_stats = self
-            .shared_cache_manager
-            .get_stats()
-            .await;
+        let cache_stats = self.shared_cache_manager.get_stats().await;
 
         // Calculate averages
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);

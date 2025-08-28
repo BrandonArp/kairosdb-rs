@@ -3,8 +3,8 @@
 //! Provides comprehensive Prometheus metrics for the foyer hybrid cache
 //! including memory usage, disk usage, hit/miss ratios, and rotation events.
 
-use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 use crate::cache_manager::CacheStats;
+use prometheus::{register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram};
 
 /// Comprehensive cache metrics for monitoring performance
 #[derive(Debug, Clone)]
@@ -14,7 +14,7 @@ pub struct CacheMetrics {
     pub memory_capacity_bytes: Gauge,
     pub memory_utilization_ratio: Gauge,
 
-    // Disk usage metrics  
+    // Disk usage metrics
     pub disk_usage_bytes: Gauge,
     pub disk_capacity_bytes: Gauge,
     pub disk_utilization_ratio: Gauge,
@@ -58,7 +58,7 @@ impl CacheMetrics {
         )?;
 
         let memory_capacity_bytes = register_gauge!(
-            "kairosdb_cache_memory_capacity_bytes", 
+            "kairosdb_cache_memory_capacity_bytes",
             "Configured memory capacity of cache in bytes"
         )?;
 
@@ -74,7 +74,7 @@ impl CacheMetrics {
 
         let disk_capacity_bytes = register_gauge!(
             "kairosdb_cache_disk_capacity_bytes",
-            "Configured disk capacity of cache in bytes" 
+            "Configured disk capacity of cache in bytes"
         )?;
 
         let disk_utilization_ratio = register_gauge!(
@@ -98,7 +98,7 @@ impl CacheMetrics {
         )?;
 
         let hit_ratio_secondary = register_gauge!(
-            "kairosdb_cache_hit_ratio_secondary", 
+            "kairosdb_cache_hit_ratio_secondary",
             "Hit ratio for secondary cache during overlap periods (0.0 to 1.0)"
         )?;
 
@@ -107,13 +107,11 @@ impl CacheMetrics {
             "Combined hit ratio across all active caches (0.0 to 1.0)"
         )?;
 
-        let cache_hits_total = register_counter!(
-            "kairosdb_cache_hits_total",
-            "Total number of cache hits"
-        )?;
+        let cache_hits_total =
+            register_counter!("kairosdb_cache_hits_total", "Total number of cache hits")?;
 
         let cache_misses_total = register_counter!(
-            "kairosdb_cache_misses_total", 
+            "kairosdb_cache_misses_total",
             "Total number of cache misses"
         )?;
 
@@ -138,7 +136,7 @@ impl CacheMetrics {
         )?;
 
         let cache_generations_total = register_counter!(
-            "kairosdb_cache_generations_total", 
+            "kairosdb_cache_generations_total",
             "Total number of cache generations created"
         )?;
 
@@ -164,7 +162,7 @@ impl CacheMetrics {
         )?;
 
         let cache_maintenance_duration = register_histogram!(
-            "kairosdb_cache_maintenance_duration_seconds", 
+            "kairosdb_cache_maintenance_duration_seconds",
             "Duration of cache maintenance operations in seconds",
             vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0]
         )?;
@@ -199,9 +197,10 @@ impl CacheMetrics {
     /// Update all metrics from cache stats
     pub fn update_from_stats(&self, stats: &CacheStats) {
         // Memory metrics
-        self.memory_usage_bytes.set(stats.primary_memory_usage as f64);
+        self.memory_usage_bytes
+            .set(stats.primary_memory_usage as f64);
         self.memory_capacity_bytes.set(stats.memory_capacity as f64);
-        
+
         if stats.memory_capacity > 0 {
             let utilization = stats.primary_memory_usage as f64 / stats.memory_capacity as f64;
             self.memory_utilization_ratio.set(utilization);
@@ -210,15 +209,17 @@ impl CacheMetrics {
         // Disk metrics
         self.disk_usage_bytes.set(stats.primary_disk_usage as f64);
         self.disk_capacity_bytes.set(stats.disk_capacity as f64);
-        
+
         if stats.disk_capacity > 0 {
             let utilization = stats.primary_disk_usage as f64 / stats.disk_capacity as f64;
             self.disk_utilization_ratio.set(utilization);
         }
 
         // Total usage across all caches
-        self.total_memory_usage_bytes.set(stats.total_memory_usage() as f64);
-        self.total_disk_usage_bytes.set(stats.total_disk_usage() as f64);
+        self.total_memory_usage_bytes
+            .set(stats.total_memory_usage() as f64);
+        self.total_disk_usage_bytes
+            .set(stats.total_disk_usage() as f64);
 
         // Hit ratios
         self.hit_ratio_primary.set(stats.primary_hit_ratio);
@@ -240,7 +241,8 @@ impl CacheMetrics {
         }
 
         // Age metrics
-        self.primary_cache_age_seconds.set(stats.primary_age_seconds as f64);
+        self.primary_cache_age_seconds
+            .set(stats.primary_age_seconds as f64);
         if let Some(secondary_age) = stats.secondary_age_seconds {
             self.secondary_cache_age_seconds.set(secondary_age as f64);
         } else {
@@ -248,7 +250,8 @@ impl CacheMetrics {
         }
 
         // Overlap period status
-        self.overlap_period_active.set(if stats.in_overlap_period { 1.0 } else { 0.0 });
+        self.overlap_period_active
+            .set(if stats.in_overlap_period { 1.0 } else { 0.0 });
     }
 
     /// Record a cache hit
@@ -279,12 +282,14 @@ impl CacheMetrics {
 
     /// Record cache operation timing
     pub fn record_cache_operation_duration(&self, duration: std::time::Duration) {
-        self.cache_operation_duration.observe(duration.as_secs_f64());
+        self.cache_operation_duration
+            .observe(duration.as_secs_f64());
     }
 
     /// Record cache maintenance timing
     pub fn record_maintenance_duration(&self, duration: std::time::Duration) {
-        self.cache_maintenance_duration.observe(duration.as_secs_f64());
+        self.cache_maintenance_duration
+            .observe(duration.as_secs_f64());
     }
 }
 

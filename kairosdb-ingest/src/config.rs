@@ -289,11 +289,11 @@ impl Default for HealthConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            memory_capacity: 128 * 1024 * 1024,      // 128MB in memory
-            disk_capacity: 1024 * 1024 * 1024,       // 1GB on disk
+            memory_capacity: 128 * 1024 * 1024, // 128MB in memory
+            disk_capacity: 1024 * 1024 * 1024,  // 1GB on disk
             disk_cache_dir: "cache/index".to_string(),
-            rotation_interval_seconds: 30 * 60,      // 30 minutes
-            overlap_period_seconds: 10 * 60,         // 10 minutes
+            rotation_interval_seconds: 30 * 60, // 30 minutes
+            overlap_period_seconds: 10 * 60,    // 10 minutes
         }
     }
 }
@@ -477,11 +477,15 @@ impl IngestConfig {
         }
 
         if self.cache.memory_capacity == 0 {
-            return Err(anyhow::anyhow!("Cache memory capacity must be greater than 0"));
+            return Err(anyhow::anyhow!(
+                "Cache memory capacity must be greater than 0"
+            ));
         }
 
         if self.cache.disk_capacity == 0 {
-            return Err(anyhow::anyhow!("Cache disk capacity must be greater than 0"));
+            return Err(anyhow::anyhow!(
+                "Cache disk capacity must be greater than 0"
+            ));
         }
 
         if self.cache.disk_cache_dir.is_empty() {
@@ -489,11 +493,15 @@ impl IngestConfig {
         }
 
         if self.cache.rotation_interval_seconds == 0 {
-            return Err(anyhow::anyhow!("Cache rotation interval must be greater than 0"));
+            return Err(anyhow::anyhow!(
+                "Cache rotation interval must be greater than 0"
+            ));
         }
 
         if self.cache.overlap_period_seconds == 0 {
-            return Err(anyhow::anyhow!("Cache overlap period must be greater than 0"));
+            return Err(anyhow::anyhow!(
+                "Cache overlap period must be greater than 0"
+            ));
         }
 
         if self.cache.overlap_period_seconds >= self.cache.rotation_interval_seconds {

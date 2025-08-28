@@ -218,8 +218,8 @@ impl CassandraClient for MockCassandraClient {
             cache_in_overlap_period: false,
             cache_primary_age_seconds: 0,
             cache_memory_capacity: 128 * 1024 * 1024, // 128MB mock capacity
-            cache_disk_capacity: 1024 * 1024 * 1024, // 1GB mock capacity
-            cache_primary_memory_usage: 12500, // Mock values for testing
+            cache_disk_capacity: 1024 * 1024 * 1024,  // 1GB mock capacity
+            cache_primary_memory_usage: 12500,        // Mock values for testing
             cache_secondary_memory_usage: None,
             cache_total_memory_usage: 12500,
             cache_primary_disk_usage: 50000, // Mock disk usage
