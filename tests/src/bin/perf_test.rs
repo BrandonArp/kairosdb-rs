@@ -195,13 +195,15 @@ async fn main() -> Result<()> {
 }
 
 /// Wait for Rust service queue to drain after performance test completion
+/// Resets timeout when progress is observed (queue size decreasing)
 async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
     let client = Client::new();
-    let mut attempts = 0;
-    let max_attempts = 60; // 5 minutes max wait
+    let mut attempts_since_progress = 0;
+    let max_attempts_without_progress = 60; // 5 minutes max wait without progress
+    let mut last_queue_size: Option<u64> = None;
     
     loop {
-        attempts += 1;
+        attempts_since_progress += 1;
         
         // Check Rust service metrics
         match client
@@ -215,6 +217,16 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
                     if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
                             info!("📊 Queue size: {}", queue_size);
+                            
+                            // Check for progress (queue size decreasing)
+                            if let Some(last_size) = last_queue_size {
+                                if queue_size < last_size {
+                                    info!("📈 Queue progress: {} -> {} (reset timeout)", last_size, queue_size);
+                                    attempts_since_progress = 0; // Reset timeout on progress
+                                }
+                            }
+                            last_queue_size = Some(queue_size);
+                            
                             if queue_size < 100 {
                                 info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
                                 return Ok(());
@@ -224,12 +236,19 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
                 }
             }
             Err(e) => {
-                info!("⚠️  Could not check queue status: {} (attempt {}/{})", e, attempts, max_attempts);
+                info!("⚠️  Could not check queue status: {} (attempt {} since progress)", 
+                      e, attempts_since_progress);
             }
         }
         
-        if attempts >= max_attempts {
-            info!("⚠️  Queue drain timeout after {} attempts", max_attempts);
+        if attempts_since_progress >= max_attempts_without_progress {
+            if let Some(size) = last_queue_size {
+                info!("⚠️  Queue drain timeout after {} attempts without progress (last size: {})", 
+                      max_attempts_without_progress, size);
+            } else {
+                info!("⚠️  Queue drain timeout after {} attempts without progress", 
+                      max_attempts_without_progress);
+            }
             return Ok(()); // Continue anyway
         }
         
