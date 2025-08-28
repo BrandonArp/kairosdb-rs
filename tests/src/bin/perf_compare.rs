@@ -13,14 +13,20 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 
 /// Wait for Rust service queue to drain by monitoring metrics
+/// Tracks queue processing metrics and resets timeout when progress is observed
 async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
     let client = Client::new();
     let mut attempts_since_progress = 0;
     let max_attempts_without_progress = 60; // 5 minutes max wait without progress
     let mut last_queue_size: Option<u64> = None;
+    let mut initial_queue_size: Option<u64> = None;
+    let mut max_observed_size: u64 = 0;
+    let start_time = std::time::Instant::now();
+    let mut total_checks = 0;
     
     loop {
         attempts_since_progress += 1;
+        total_checks += 1;
         
         // Check Rust service metrics
         match client
@@ -33,19 +39,41 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
                 if let Ok(text) = response.text().await {
                     if let Ok(metrics) = serde_json::from_str::<serde_json::Value>(&text) {
                         if let Some(queue_size) = metrics.get("queue_size").and_then(|v| v.as_u64()) {
+                            // Track initial and maximum queue sizes
+                            if initial_queue_size.is_none() {
+                                initial_queue_size = Some(queue_size);
+                                info!("📊 Starting queue drain monitoring (initial size: {})", queue_size);
+                            }
+                            max_observed_size = max_observed_size.max(queue_size);
+                            
                             info!("📊 Queue size: {}", queue_size);
                             
                             // Check for progress (queue size decreasing)
                             if let Some(last_size) = last_queue_size {
                                 if queue_size < last_size {
-                                    info!("📈 Queue progress: {} -> {} (reset timeout)", last_size, queue_size);
                                     attempts_since_progress = 0; // Reset timeout on progress
                                 }
                             }
                             last_queue_size = Some(queue_size);
                             
                             if queue_size < 100 {
+                                let elapsed = start_time.elapsed();
+                                let initial_size = initial_queue_size.unwrap_or(0);
+                                let processed_items = max_observed_size.saturating_sub(queue_size);
+                                let processing_rate = if elapsed.as_secs() > 0 {
+                                    processed_items as f64 / elapsed.as_secs() as f64
+                                } else {
+                                    0.0
+                                };
+                                
                                 info!("✅ Queue drained successfully (size: {} < 100)", queue_size);
+                                info!("📈 Queue processing metrics:");
+                                info!("   - Initial size: {}", initial_size);
+                                info!("   - Peak size: {}", max_observed_size);
+                                info!("   - Items processed: {}", processed_items);
+                                info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
+                                info!("   - Processing rate: {:.1} items/sec", processing_rate);
+                                info!("   - Total checks: {}", total_checks);
                                 return Ok(());
                             }
                         }
@@ -58,13 +86,19 @@ async fn wait_for_queue_drain(rust_url: &str) -> Result<()> {
         }
         
         if attempts_since_progress >= max_attempts_without_progress {
-            if let Some(size) = last_queue_size {
-                info!("⚠️  Queue drain timeout after {} attempts without progress (last size: {})", 
-                      max_attempts_without_progress, size);
-            } else {
-                info!("⚠️  Queue drain timeout after {} attempts without progress", 
-                      max_attempts_without_progress);
-            }
+            let elapsed = start_time.elapsed();
+            let initial_size = initial_queue_size.unwrap_or(0);
+            let current_size = last_queue_size.unwrap_or(0);
+            let processed_items = max_observed_size.saturating_sub(current_size);
+            
+            info!("⚠️  Queue drain timeout after {} attempts without progress", max_attempts_without_progress);
+            info!("📊 Partial processing metrics:");
+            info!("   - Initial size: {}", initial_size);
+            info!("   - Peak size: {}", max_observed_size);
+            info!("   - Current size: {}", current_size);
+            info!("   - Items processed: {}", processed_items);
+            info!("   - Processing time: {:.1}s", elapsed.as_secs_f64());
+            info!("   - Total checks: {}", total_checks);
             return Ok(()); // Continue anyway
         }
         
