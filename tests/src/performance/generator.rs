@@ -459,6 +459,7 @@ impl MetricDataGenerator {
                 let histogram = self.generate_realistic_histogram(boundaries).await;
                 vec![json!({
                     "name": template.name,
+                    "type": "histogram",
                     "datapoints": [[timestamp, histogram]],
                     "tags": tags
                 })]
@@ -526,18 +527,22 @@ impl MetricDataGenerator {
             }
         }
 
-        // Convert to cumulative counts
-        for i in 1..counts.len() {
-            counts[i] += counts[i - 1];
+        // Create bins object in KairosDB format: {"0.1": 10, "1.0": 20, ...}
+        let mut bins_obj = serde_json::Map::new();
+        for (i, &boundary) in boundaries.iter().enumerate() {
+            bins_obj.insert(boundary.to_string(), json!(counts[i]));
         }
 
+        // Calculate mean
+        let mean = if total_count > 0 { sum / total_count as f64 } else { 0.0 };
+
         json!({
-            "boundaries": boundaries,
-            "counts": counts,
-            "total_count": total_count,
+            "bins": bins_obj,
             "sum": sum,
             "min": min_val,
-            "max": max_val
+            "max": max_val,
+            "mean": mean,
+            "precision": 7  // Default KairosDB precision
         })
     }
 

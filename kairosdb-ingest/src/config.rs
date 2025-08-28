@@ -170,6 +170,10 @@ pub struct HealthConfig {
 
     /// Cassandra health check query
     pub cassandra_health_query: String,
+
+    /// Delay in seconds after health checks start failing during shutdown
+    /// This allows load balancers to detect the unhealthy state before draining connections
+    pub load_balancer_detection_delay_seconds: u64,
 }
 
 impl Default for IngestConfig {
@@ -254,6 +258,7 @@ impl Default for HealthConfig {
             liveness_path: "/health/live".to_string(),
             check_timeout_ms: 5000,
             cassandra_health_query: "SELECT now() FROM system.local".to_string(),
+            load_balancer_detection_delay_seconds: 3, // Default 3 seconds for load balancer detection
         }
     }
 }
@@ -442,6 +447,11 @@ impl IngestConfig {
     /// Get the health check timeout as a Duration
     pub fn health_check_timeout(&self) -> Duration {
         Duration::from_millis(self.health.check_timeout_ms)
+    }
+
+    /// Get the load balancer detection delay as a Duration
+    pub fn load_balancer_detection_delay(&self) -> Duration {
+        Duration::from_secs(self.health.load_balancer_detection_delay_seconds)
     }
 
     /// Check if compression is enabled

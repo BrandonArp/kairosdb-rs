@@ -4,7 +4,7 @@ use tokio::{net::TcpListener, signal};
 use tracing::{error, info, warn};
 
 // Use the library modules
-use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService, ShutdownManager};
+use kairosdb_ingest::{create_router, AppState, IngestConfig, IngestionService, ShutdownConfig, ShutdownManager};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,8 +24,14 @@ async fn main() -> Result<()> {
     let config = Arc::new(IngestConfig::load()?);
     info!("Configuration loaded successfully");
 
-    // Create shutdown manager for coordinated graceful shutdown
-    let shutdown_manager = Arc::new(ShutdownManager::new());
+    // Create shutdown manager with configurable load balancer detection delay
+    let detection_delay = config.load_balancer_detection_delay();
+    info!("Load balancer detection delay configured: {}s", detection_delay.as_secs());
+    let shutdown_config = ShutdownConfig {
+        health_check_grace_period: detection_delay,
+        ..ShutdownConfig::default()
+    };
+    let shutdown_manager = Arc::new(ShutdownManager::new_with_config(shutdown_config));
 
     // Initialize ingestion service
     let (ingestion_service, null_queue_work_channel) =

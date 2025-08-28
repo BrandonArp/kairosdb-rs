@@ -122,6 +122,31 @@ KairosDB-rs is a high-performance Rust rewrite of KairosDB with microservices ar
 - `KAIROSDB_WORKER_THREADS`: Processing threads (default: 4)
 - `KAIROSDB_MAX_MEMORY_MB`: Memory limit for backpressure (default: 1024)
 - `KAIROSDB_DEFAULT_SYNC`: Default sync-to-disk behavior (default: false)
+- `KAIROSDB_HEALTH_LOAD_BALANCER_DETECTION_DELAY_SECONDS`: Load balancer detection delay (default: 3)
+
+### Health Check & Graceful Shutdown
+The ingest service supports configurable graceful shutdown behavior to work optimally with load balancers:
+
+#### Load Balancer Detection Delay
+```yaml
+health:
+  load_balancer_detection_delay_seconds: 3  # Default development
+  # load_balancer_detection_delay_seconds: 5  # Recommended for production
+```
+
+**Purpose**: This delay allows load balancers to detect that the service has become unhealthy before starting to drain existing connections. This prevents new requests from being routed to a shutting-down instance.
+
+**Shutdown Sequence**:
+1. Service receives shutdown signal (SIGTERM, SIGINT)
+2. Health checks immediately start failing (returns 503 status)
+3. Wait `load_balancer_detection_delay_seconds` for load balancers to notice
+4. Begin draining existing connections gracefully
+5. Complete shutdown after all connections are closed
+
+**Configuration Options**:
+- **Development**: 3 seconds (faster local testing)
+- **Production**: 5+ seconds (conservative for enterprise load balancers)
+- **Environment Variable**: `KAIROSDB_HEALTH_LOAD_BALANCER_DETECTION_DELAY_SECONDS=10`
 
 ### Query Service Specific  
 - `KAIROSDB_QUERY_BIND_ADDRESS`: HTTP bind address (default: 0.0.0.0:8081)
@@ -345,29 +370,95 @@ RUST_LOG=trace cargo make perf-test-small
 
 ⚠️ **Performance Impact**: TRACE logging can reduce throughput by 10x+ due to per-datapoint output.
 
+## Performance Comparison Framework
+
+KairosDB-rs includes a dedicated performance comparison tool to benchmark the Rust implementation against the Java reference implementation, both running via Tilt.
+
+### Quick Start
+```bash
+# Check that both services are healthy and accessible
+cargo make perf-compare-check
+
+# Run quick comparison (30 seconds, suitable for development)
+cargo make perf-compare-quick
+
+# Run full comparison test suite across all scenarios
+cargo make perf-compare
+```
+
+### Service Setup
+The comparison tool expects both services running via Tilt:
+- **Java KairosDB**: http://localhost:8080 (reference implementation)
+- **Rust Ingest Service**: http://localhost:8081 (new implementation)
+
+Start both services:
+```bash
+tilt up
+# Wait for all services to be ready
+cargo make perf-compare-check  # Verify health
+```
+
+### Comparison Modes
+```bash
+# Sequential testing (default - more stable, avoids resource contention)
+cd tests && cargo run --bin perf_compare -- run small_scale
+
+# Parallel testing (faster but may cause resource contention on same machine)
+cd tests && cargo run --bin perf_compare -- run small_scale --parallel
+
+# Custom scenarios with overrides
+cd tests && cargo run --bin perf_compare -- run medium_scale --duration 180 --batch-size 50
+```
+
+### Available Scenarios
+All performance test scenarios can be used for comparison:
+- `small_scale`: Quick validation (50 metrics, 30s)
+- `medium_scale`: Standard comparison (500 metrics, 2m)
+- `large_scale`: Load testing (2k metrics, 5m)  
+- `stress_test`: Breaking point analysis (5k metrics, 10m)
+- `high_cardinality`: Tag explosion testing
+- `high_frequency`: Many small batches
+- `large_batch`: Fewer large batches
+- `memory_pressure`: Large histogram testing
+
+### Comparison Metrics
+The tool analyzes and compares:
+- **Throughput**: Datapoints per second, requests per second
+- **Latency**: P95, P99, mean response times
+- **Success Rate**: Percentage of successful requests
+- **Error Analysis**: Detailed failure breakdown
+- **Winner Determination**: Based on throughput and success rates
+
+### Reporting
+Results are saved in multiple formats:
+- **Console Output**: Real-time comparison summary
+- **JSON Reports**: `target/perf_compare_reports/comparison_<scenario>_detailed.json`
+- **CSV Trending**: `target/perf_compare_reports/comparison_trends.csv`
+
 ### CLI Usage Examples
 ```bash
-# List all available scenarios
-cd tests && cargo run --bin perf_test -- list
+# List available scenarios
+cd tests && cargo run --bin perf_compare -- list
 
-# Run with custom parameters
-cd tests && cargo run --bin perf_test -- run medium_scale \
-  --metrics 1000 --duration 300 --batch-size 200
+# Run specific scenario
+cd tests && cargo run --bin perf_compare -- run large_scale
 
-# Run test suite excluding stress tests
-cd tests && cargo run --bin perf_test -- suite --skip stress_test
+# Run test suite excluding stress tests  
+cd tests && cargo run --bin perf_compare -- suite --skip stress_test
 
-# Start continuous monitoring (every 5 minutes)
-cd tests && cargo run --bin perf_test -- monitor \
-  --interval 300 --scenario medium_scale
+# Run only specific scenarios
+cd tests && cargo run --bin perf_compare -- suite --only "small_scale,medium_scale"
 
-# Generate sample config file
-cd tests && cargo run --bin perf_test -- config
+# Custom service URLs
+cd tests && cargo run --bin perf_compare -- \
+  --rust-url http://localhost:8081 \
+  --java-url http://localhost:8080 \
+  run medium_scale
 ```
 
 ### Integration with CI/CD
-Performance tests are designed to integrate with CI pipelines:
-- **perf-test-small**: Quick validation suitable for PR checks
-- **perf-test-medium**: More comprehensive testing for staging deployments
-- Reports saved as JSON and CSV for trending analysis
-- Configurable failure thresholds and performance regression detection
+Comparison tests can be integrated into development workflows:
+- **perf-compare-quick**: Quick validation suitable for PR checks
+- **perf-compare**: Comprehensive testing for release validation
+- JSON and CSV reports for tracking performance regression over time
+- Clear winner determination and performance improvement ratios

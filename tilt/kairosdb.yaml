@@ -88,18 +88,10 @@ spec:
             httpGet:
               path: /api/v1/health/check
               port: 8080
-            initialDelaySeconds: 120
+            initialDelaySeconds: 5
             periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 5
-          livenessProbe:
-            httpGet:
-              path: /api/v1/health/check
-              port: 8080
-            initialDelaySeconds: 180
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
       volumes:
         - name: config-volume
           configMap:

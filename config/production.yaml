@@ -45,6 +45,7 @@ health:
   liveness_path: "/live"
   check_timeout_ms: 5000
   cassandra_health_query: "SELECT now() FROM system.local"
+  load_balancer_detection_delay_seconds: 15  # Longer delay for production load balancers
 
 # Metrics configuration
 metrics:

@@ -301,6 +301,29 @@ echo "👁️  Starting performance monitoring..."
 cd tests && cargo run --bin perf_test -- --url http://localhost:8081 monitor --interval 300 --scenario medium_scale
 '''
 
+# === Performance Comparison Tasks ===
+
+[tasks.perf-compare]
+description = "Compare Rust vs Java KairosDB performance (requires Tilt)"
+script = '''
+echo "⚡ Running Rust vs Java performance comparison..."
+cd tests && cargo run --release --bin perf_compare -- suite
+'''
+
+[tasks.perf-compare-quick]
+description = "Quick performance comparison between Rust and Java"
+script = '''
+echo "🏃 Running quick performance comparison..."
+cd tests && cargo run --release --bin perf_compare -- run small_scale
+'''
+
+[tasks.perf-compare-check]
+description = "Check if both Rust and Java services are healthy"
+script = '''
+echo "🔍 Checking service health..."
+cd tests && cargo run --bin perf_compare -- check
+'''
+
 # === Clean Tasks ===
 
 [tasks.clean]
@@ -372,6 +395,11 @@ echo "  perf-test-medium - Run CI-appropriate performance test"
 echo "  perf-test-large - Run load testing scenario"
 echo "  perf-test-stress - Run stress test to find limits"
 echo "  perf-monitor    - Start continuous monitoring"
+echo ""
+echo "🥊 Performance Comparison (Rust vs Java):"
+echo "  perf-compare      - Run full comparison test suite"
+echo "  perf-compare-quick - Run quick comparison test"
+echo "  perf-compare-check - Check if both services are healthy"
 echo ""
 echo "🧹 Maintenance:"
 echo "  clean           - Clean build artifacts"

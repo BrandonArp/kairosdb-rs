@@ -15,7 +15,7 @@ pub use reporter::*;
 pub use scenarios::*;
 
 /// Performance test configuration
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PerfTestConfig {
     pub ingest_url: String,
     pub metrics_count: usize,
@@ -49,7 +49,7 @@ impl Default for PerfTestConfig {
 }
 
 /// Performance test results
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PerfTestResults {
     pub total_datapoints_sent: u64,
     pub total_requests: u64,
@@ -62,7 +62,7 @@ pub struct PerfTestResults {
     pub error_details: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LatencyStats {
     pub mean_ms: f64,
     pub median_ms: f64,

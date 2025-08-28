@@ -12,3 +12,4 @@ pub mod health;
 pub mod performance;
 pub mod query_engine_tests;
 pub mod rust_query;
+pub mod throughput_collector;

@@ -223,7 +223,7 @@ impl TestScenarios {
 }
 
 /// Scenario override parameters for customization
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScenarioOverrides {
     pub ingest_url: Option<String>,
     pub metrics_count: Option<usize>,
