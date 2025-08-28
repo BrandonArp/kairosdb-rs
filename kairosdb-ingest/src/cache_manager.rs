@@ -81,22 +81,6 @@ impl CacheState {
         elapsed >= rotation_interval && self.secondary.is_some()
     }
 
-    /// Start the overlap period by creating secondary cache
-    async fn start_overlap(&mut self) -> Result<(), CacheError> {
-        if self.secondary.is_none() {
-            let generation = generate_generation();
-            self.secondary = Some(create_hybrid_cache(&self.config, generation).await?);
-            self.secondary_created = Some(Instant::now());
-            self.secondary_generation = generation;
-
-            debug!(
-                "Started cache overlap period. Primary generation: {}, Secondary generation: {}",
-                self.primary_generation, self.secondary_generation
-            );
-        }
-        Ok(())
-    }
-
     /// Rotate caches (secondary becomes primary)
     fn rotate(&mut self) {
         if let Some(secondary) = self.secondary.take() {
@@ -150,6 +134,7 @@ impl CacheState {
 #[derive(Clone)]
 pub struct CacheManager {
     state: Arc<RwLock<Option<CacheState>>>,
+    #[allow(dead_code)] // Used in Debug impl and passed to CacheState
     config: CacheConfig,
     metrics: Arc<CacheMetrics>,
 }
@@ -231,7 +216,6 @@ impl CacheManager {
     /// Perform maintenance: check for overlap start or rotation
     async fn maybe_maintain(&self) -> Result<(), CacheError> {
         let start_time = Instant::now();
-        let mut needs_maintenance = false;
         let should_start_overlap;
         let should_rotate;
 
@@ -241,13 +225,12 @@ impl CacheManager {
             if let Some(state) = state_guard.as_ref() {
                 should_start_overlap = state.should_start_overlap();
                 should_rotate = state.should_rotate();
-                needs_maintenance = should_start_overlap || should_rotate;
             } else {
                 return Ok(());
             }
         }
 
-        if needs_maintenance {
+        if should_start_overlap || should_rotate {
             // Get write lock for maintenance
             // Handle start overlap case - need to avoid holding lock across await
             if should_start_overlap {
@@ -307,10 +290,22 @@ impl CacheManager {
                 disk_capacity: state.config.disk_capacity,
                 primary_memory_usage: 0, // TODO: Implement when foyer stats API is available
                 primary_disk_usage: 0,
-                secondary_memory_usage: None,
-                secondary_disk_usage: None,
+                secondary_memory_usage: if state.secondary.is_some() {
+                    Some(0)
+                } else {
+                    None
+                }, // TODO: Real stats
+                secondary_disk_usage: if state.secondary.is_some() {
+                    Some(0)
+                } else {
+                    None
+                }, // TODO: Real stats
                 primary_hit_ratio: 0.0,
-                secondary_hit_ratio: None,
+                secondary_hit_ratio: if state.secondary.is_some() {
+                    Some(0.0)
+                } else {
+                    None
+                },
             }
         } else {
             CacheStats::empty()
@@ -428,8 +423,11 @@ async fn cleanup_cache_directory(path: &str) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
     use tempfile::TempDir;
+
+    use std::sync::OnceLock;
+
+    static TEST_METRICS: OnceLock<Arc<CacheMetrics>> = OnceLock::new();
 
     async fn test_cache_manager() -> CacheManager {
         let temp_dir = TempDir::new().unwrap();
@@ -437,11 +435,22 @@ mod tests {
             memory_capacity: 1024 * 1024,    // 1MB
             disk_capacity: 10 * 1024 * 1024, // 10MB
             disk_cache_dir: temp_dir.path().to_string_lossy().to_string(),
-            rotation_interval: Duration::from_millis(100),
-            overlap_period: Duration::from_millis(50),
+            rotation_interval_seconds: 1, // 1 second for fast testing
+            overlap_period_seconds: 1,    // 1 second overlap
         };
 
-        CacheManager::with_config(config).await.unwrap()
+        let state = CacheState::new(config.clone()).await.unwrap();
+
+        // Use shared metrics instance to avoid duplicate registration
+        let metrics = TEST_METRICS
+            .get_or_init(|| Arc::new(CacheMetrics::new().unwrap()))
+            .clone();
+
+        CacheManager {
+            state: Arc::new(RwLock::new(Some(state))),
+            config,
+            metrics,
+        }
     }
 
     #[tokio::test]
@@ -462,17 +471,23 @@ mod tests {
         // Add item to primary
         assert!(manager.should_write_index("test.metric").await);
 
-        // Wait for overlap period to start
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // With 1-second rotation and 1-second overlap, overlap should start immediately
+        // but we need to trigger maintenance
         let _ = manager.maybe_maintain().await; // Trigger maintenance to start overlap
         let stats = manager.get_stats().await;
-        assert!(stats.in_overlap_period);
+        assert!(
+            stats.in_overlap_period,
+            "Overlap period should have started immediately"
+        );
 
-        // Wait for full rotation
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for full rotation (1 second from creation)
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let _ = manager.maybe_maintain().await; // Trigger maintenance to complete rotation
         let stats = manager.get_stats().await;
-        assert!(!stats.in_overlap_period);
+        assert!(
+            !stats.in_overlap_period,
+            "Should not be in overlap period after rotation"
+        );
     }
 
     #[tokio::test]
@@ -480,19 +495,19 @@ mod tests {
         let manager = test_cache_manager().await;
         let initial_stats = manager.get_stats().await;
 
-        // Trigger rotation
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Start overlap immediately
         let _ = manager.maybe_maintain().await; // Start overlap
 
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Wait for rotation to be eligible (1+ seconds from creation)
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let _ = manager.maybe_maintain().await; // Complete rotation
 
         let final_stats = manager.get_stats().await;
 
         // Generations should be different after rotation
         assert_ne!(
-            initial_stats.primary_generation,
-            final_stats.primary_generation
+            initial_stats.primary_generation, final_stats.primary_generation,
+            "Primary generation should change after rotation"
         );
     }
 
@@ -524,12 +539,18 @@ mod tests {
 
         // Add item to trigger maintenance and start overlap
         assert!(manager.should_write_index("test.metric").await);
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Start overlap immediately since overlap_start = 0ms
         let _ = manager.maybe_maintain().await;
 
         let overlap_stats = manager.get_stats().await;
-        assert!(overlap_stats.in_overlap_period);
-        assert!(overlap_stats.secondary_memory_usage.is_some());
+        assert!(
+            overlap_stats.in_overlap_period,
+            "Should be in overlap period"
+        );
+        assert!(
+            overlap_stats.secondary_memory_usage.is_some(),
+            "Should have secondary cache memory usage"
+        );
 
         // Total memory should be higher during overlap
         assert!(overlap_stats.total_memory_usage() >= initial_memory);

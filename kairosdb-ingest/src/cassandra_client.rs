@@ -101,6 +101,7 @@ pub struct MultiWorkerCassandraClient {
 
 impl MultiWorkerCassandraClient {
     /// Create a new multi-worker Cassandra client with external channels
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_with_channels(
         config: CassandraConfig,
         cache_config: CacheConfig,

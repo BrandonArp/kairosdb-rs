@@ -290,7 +290,7 @@ mod tests {
         assert!(client.has_operation("write_batch"));
 
         // Check stats
-        let stats = client.get_stats();
+        let stats = client.get_stats().await;
         assert_eq!(stats.total_datapoints_written, 1);
         assert!(stats.total_queries > 0);
     }
@@ -313,7 +313,7 @@ mod tests {
         assert!(client.write_batch(&batch).await.is_err());
 
         // Check error stats
-        let stats = client.get_stats();
+        let stats = client.get_stats().await;
         assert!(stats.failed_queries > 0);
     }
 
@@ -344,12 +344,13 @@ mod tests {
         let client = MockCassandraClient::new();
 
         // Regular stats should have None for ones count
-        let stats = client.get_stats();
-        assert!(stats.bloom_filter_primary_ones_count.is_none());
-        assert!(stats.bloom_filter_secondary_ones_count.is_none());
+        let stats = client.get_stats().await;
+        // Cache hit ratio should be set from mock values
+        assert_eq!(stats.cache_primary_hit_ratio, 0.85);
+        assert!(stats.cache_secondary_hit_ratio.is_none());
 
-        // Detailed stats should have Some values for ones count (mock values)
-        let detailed_stats = client.get_detailed_stats();
-        assert!(detailed_stats.bloom_filter_primary_ones_count.is_none()); // Mock still returns None since it's not calculating actual ones
+        // Detailed stats should match basic stats for mock client
+        let detailed_stats = client.get_detailed_stats().await;
+        assert_eq!(detailed_stats.cache_primary_hit_ratio, 0.85); // Mock provides 85% hit ratio
     }
 }

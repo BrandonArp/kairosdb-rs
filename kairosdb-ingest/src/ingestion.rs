@@ -1307,24 +1307,18 @@ mod tests {
             "Prometheus metric should match atomic metric"
         );
 
-        // Test that bloom filter ones count metrics are also updated (mock returns None, so should be 0)
-        let _primary_ones = service
+        // Cache metrics should now be tracked instead of bloom filter metrics
+        let cache_hit_ratio = service
             .metrics
             .prometheus_metrics
-            .bloom_filter_primary_ones_gauge
-            .get();
-        let secondary_ones = service
-            .metrics
-            .prometheus_metrics
-            .bloom_filter_secondary_ones_gauge
+            .cache_hit_ratio_gauge
             .get();
 
-        // Mock client doesn't provide actual ones count, but the metrics should still be initialized
-        // Primary ones gauge should be 0 (not set since mock returns None)
-        // Secondary ones gauge should be 0 (explicitly set when None)
-        assert_eq!(
-            secondary_ones, 0.0,
-            "Secondary ones gauge should be 0 when no secondary filter"
+        // Cache hit ratio should be set (mock provides 85% hit ratio)
+        assert!(
+            cache_hit_ratio > 0.8,
+            "Cache hit ratio should be around 85% from mock: {}",
+            cache_hit_ratio
         );
     }
 }
