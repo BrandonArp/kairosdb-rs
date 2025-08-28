@@ -495,8 +495,7 @@ impl MultiWorkerCassandraClient {
                 }
             }
 
-            // Write to row_key_time_index table for time-based queries
-            Self::write_row_key_time_index_entry(resources, &row_key, stats).await?;
+            // Note: row_key_time_index entries are now written with cache deduplication in index processing
         }
 
         let datapoints_duration = datapoints_start.elapsed();
@@ -547,6 +546,7 @@ impl MultiWorkerCassandraClient {
         let mut tag_names = HashSet::new();
         let mut tag_values = HashSet::new();
         let mut row_keys_entries = HashMap::new();
+        let mut row_key_time_index_entries = HashMap::new();
 
         // Collect all unique metric names, tags, and row_keys entries
         for data_point in &batch.points {
@@ -587,14 +587,23 @@ impl MultiWorkerCassandraClient {
                 tags_string
             );
             row_keys_entries.insert(row_keys_entry_key, data_point.clone());
+            
+            // Collect unique row_key_time_index entries (one per unique metric + row_time)
+            let row_key_time_index_key = format!(
+                "row_key_time_index:{}:data_points:{}",
+                data_point.metric.as_str(),
+                row_key.row_time.timestamp_millis()
+            );
+            row_key_time_index_entries.insert(row_key_time_index_key, row_key);
         }
 
         trace!(
-            "Writing indexes for {} metrics, {} tag keys, {} tag values, {} row_keys entries",
+            "Writing indexes for {} metrics, {} tag keys, {} tag values, {} row_keys entries, {} row_key_time_index entries",
             metric_names.len(),
             tag_names.len(),
             tag_values.len(),
-            row_keys_entries.len()
+            row_keys_entries.len(),
+            row_key_time_index_entries.len()
         );
 
         let mut indexes_written = 0u64;
@@ -683,6 +692,17 @@ impl MultiWorkerCassandraClient {
             }
         }
 
+        // Write row_key_time_index entries (with cache deduplication)
+        for (cache_key, row_key) in &row_key_time_index_entries {
+            if cache_manager.should_write_index(cache_key).await {
+                Self::write_row_key_time_index_entry_cached(resources, row_key, stats).await?;
+                indexes_written += 1;
+            } else {
+                // Cache hit - row_key_time_index write was skipped
+                resources.metrics.record_cache_hit();
+            }
+        }
+
         // NOTE: Java KairosDB does NOT write tag_names or tag_values during ingestion
         // Only metric_names are written to string_index during ingestion
         // Commenting out tag index writes to match Java KairosDB behavior exactly
@@ -751,8 +771,8 @@ impl MultiWorkerCassandraClient {
         }
     }
 
-    /// Write a row key time index entry for time-based queries
-    async fn write_row_key_time_index_entry(
+    /// Write a row key time index entry for time-based queries (with cache miss tracking)
+    async fn write_row_key_time_index_entry_cached(
         resources: &SharedCassandraResources,
         row_key: &RowKey,
         stats: &Arc<MultiWorkerStats>,
@@ -779,6 +799,7 @@ impl MultiWorkerCassandraClient {
                 stats.total_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_writes.fetch_add(1, Ordering::Relaxed);
                 resources.metrics.record_row_key_time_index_write(duration);
+                resources.metrics.record_cache_miss(); // We wrote because cache said to
                 Ok(())
             }
             Err(e) => {
