@@ -24,6 +24,8 @@ pub struct CassandraStats {
     pub cache_total_memory_usage: u64,
     pub cache_primary_disk_usage: u64,
     pub cache_secondary_disk_usage: Option<u64>,
+    pub cache_primary_hit_ratio: f64,
+    pub cache_secondary_hit_ratio: Option<f64>,
 
     // Detailed Cassandra operation metrics
     pub datapoint_writes: u64,

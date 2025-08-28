@@ -215,15 +215,17 @@ impl CassandraClient for MockCassandraClient {
                 0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
-            bloom_filter_in_overlap_period: false,
-            bloom_filter_primary_age_seconds: 0,
-            bloom_filter_expected_items: 0,
-            bloom_filter_false_positive_rate: 0.0,
-            bloom_filter_primary_memory_bytes: 12500, // Mock values for testing
-            bloom_filter_secondary_memory_bytes: None,
-            bloom_filter_total_memory_bytes: 12500,
-            bloom_filter_primary_ones_count: None, // Not calculated in mock
-            bloom_filter_secondary_ones_count: None,
+            cache_in_overlap_period: false,
+            cache_primary_age_seconds: 0,
+            cache_memory_capacity: 128 * 1024 * 1024, // 128MB mock capacity
+            cache_disk_capacity: 1024 * 1024 * 1024, // 1GB mock capacity
+            cache_primary_memory_usage: 12500, // Mock values for testing
+            cache_secondary_memory_usage: None,
+            cache_total_memory_usage: 12500,
+            cache_primary_disk_usage: 50000, // Mock disk usage
+            cache_secondary_disk_usage: None,
+            cache_primary_hit_ratio: 0.85, // Mock 85% hit ratio
+            cache_secondary_hit_ratio: None,
 
             // Mock detailed metrics (all zeros since mock doesn't track them)
             datapoint_writes: total_datapoints,

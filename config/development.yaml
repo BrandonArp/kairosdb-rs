@@ -28,6 +28,14 @@ ingestion:
   performance_mode: "parse_and_store_mode"  # Options: no_parse_mode, parse_only_mode, parse_and_store_mode
   default_sync: false  # Default to fast mode for development - can be overridden with ?sync=true
 
+# Cache configuration
+cache:
+  memory_capacity: 134217728  # 128MB in memory cache
+  disk_capacity: 1073741824   # 1GB disk cache
+  disk_cache_dir: "cache/index"
+  rotation_interval_seconds: 1800  # 30 minutes
+  overlap_period_seconds: 600      # 10 minutes
+
 # Performance configuration
 performance:
   max_memory_mb: 32768  # 32GB for demo purposes

@@ -5,6 +5,7 @@
 
 // Core modules
 pub mod cache_manager;
+pub mod cache_metrics;
 pub mod cassandra;
 pub mod cassandra_client;
 pub mod config;

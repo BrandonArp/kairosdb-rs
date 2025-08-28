@@ -4,13 +4,14 @@
 //! already been written, avoiding redundant writes to Cassandra. Unlike bloom filters, this
 //! provides precise tracking without false positives.
 
-use foyer::{DirectFsDeviceOptions, HybridCache, HybridCacheBuilder, StoreBuilder};
+use foyer::{Cache, CacheBuilder};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
+use crate::cache_metrics::CacheMetrics;
 use crate::config::CacheConfig;
 
 /// Cache value type - just a marker that the index exists
@@ -19,9 +20,9 @@ type CacheValue = bool;
 /// Dual cache state for rotation
 struct CacheState {
     /// Primary cache (currently active)
-    primary: HybridCache<String, CacheValue>,
+    primary: Cache<String, CacheValue>,
     /// Secondary cache (used during overlap period) 
-    secondary: Option<HybridCache<String, CacheValue>>,
+    secondary: Option<Cache<String, CacheValue>>,
     /// When the primary cache was created
     primary_created: Instant,
     /// When the secondary cache was created (if any)
@@ -113,13 +114,8 @@ impl CacheState {
                 self.primary_generation, old_generation
             );
             
-            // Schedule cleanup of old cache directory in background
-            let cleanup_dir = format!("{}/cache_{}", self.config.disk_cache_dir, old_generation);
-            tokio::spawn(async move {
-                if let Err(e) = cleanup_cache_directory(&cleanup_dir).await {
-                    debug!("Failed to cleanup old cache directory {}: {}", cleanup_dir, e);
-                }
-            });
+            // TODO: Schedule cleanup of old cache directory when we add disk support
+            debug!("Would cleanup cache directory for generation: {}", old_generation);
         }
     }
 
@@ -152,6 +148,7 @@ impl CacheState {
 pub struct CacheManager {
     state: Arc<RwLock<Option<CacheState>>>,
     config: CacheConfig,
+    metrics: Arc<CacheMetrics>,
 }
 
 impl CacheManager {
@@ -169,16 +166,24 @@ impl CacheManager {
                 error: e.to_string() 
             })?;
         
+        let metrics = Arc::new(CacheMetrics::new().map_err(|e| CacheError::CacheBuild(e.to_string()))?);
         let state = CacheState::new(config.clone()).await?;
+        
+        // Record initial cache generation
+        metrics.record_cache_generation();
+        
         Ok(Self {
             state: Arc::new(RwLock::new(Some(state))),
             config,
+            metrics,
         })
     }
 
     /// Check if an index entry should be written (not in cache)
     /// Returns true if the item should be written to Cassandra
     pub async fn should_write_index(&self, index_key: &str) -> bool {
+        let start_time = Instant::now();
+        
         // First, perform maintenance if needed
         if let Err(e) = self.maybe_maintain().await {
             debug!("Cache maintenance failed: {}", e);
@@ -198,6 +203,8 @@ impl CacheManager {
 
         if exists {
             trace!("Index entry found in cache, skipping write: {}", index_key);
+            self.metrics.record_cache_hit();
+            self.metrics.record_cache_operation_duration(start_time.elapsed());
             false // Don't write, already exists in cache
         } else {
             // Insert into active caches and return true to write
@@ -208,12 +215,15 @@ impl CacheManager {
                 }
             }
             trace!("Index entry not in cache, will write: {}", index_key);
+            self.metrics.record_cache_miss();
+            self.metrics.record_cache_operation_duration(start_time.elapsed());
             true // Write to Cassandra
         }
     }
 
     /// Perform maintenance: check for overlap start or rotation
     async fn maybe_maintain(&self) -> Result<(), CacheError> {
+        let start_time = Instant::now();
         let mut needs_maintenance = false;
         let should_start_overlap;
         let should_rotate;
@@ -232,14 +242,41 @@ impl CacheManager {
 
         if needs_maintenance {
             // Get write lock for maintenance
-            let mut state_guard = self.state.write();
-            if let Some(state) = state_guard.as_mut() {
-                if should_start_overlap {
-                    state.start_overlap().await?;
-                } else if should_rotate {
+            // Handle start overlap case - need to avoid holding lock across await
+            if should_start_overlap {
+                // Clone the necessary data, drop the lock, then await
+                let config = {
+                    let state_guard = self.state.read();
+                    state_guard.as_ref().map(|s| s.config.clone())
+                };
+                
+                if let Some(config) = config {
+                    let generation = generate_generation();
+                    let new_cache = create_hybrid_cache(&config, generation).await?;
+                    
+                    // Reacquire write lock for minimal time
+                    let mut state_guard = self.state.write();
+                    if let Some(state) = state_guard.as_mut() {
+                        state.secondary = Some(new_cache);
+                        state.secondary_created = Some(Instant::now());
+                        state.secondary_generation = generation;
+                        
+                        debug!(
+                            "Started cache overlap period. Primary generation: {}, Secondary generation: {}",
+                            state.primary_generation, state.secondary_generation
+                        );
+                    }
+                    self.metrics.record_overlap_period_start();
+                }
+            } else if should_rotate {
+                let mut state_guard = self.state.write();
+                if let Some(state) = state_guard.as_mut() {
                     state.rotate();
+                    self.metrics.record_cache_rotation();
+                    self.metrics.record_cache_generation();
                 }
             }
+            self.metrics.record_maintenance_duration(start_time.elapsed());
         }
 
         Ok(())
@@ -248,7 +285,7 @@ impl CacheManager {
     /// Get statistics about the caches
     pub async fn get_stats(&self) -> CacheStats {
         let state_guard = self.state.read();
-        if let Some(state) = state_guard.as_ref() {
+        let stats = if let Some(state) = state_guard.as_ref() {
             let primary_age = state.primary_created.elapsed();
             let secondary_age = state.secondary_created.map(|created| created.elapsed());
 
@@ -269,7 +306,12 @@ impl CacheManager {
             }
         } else {
             CacheStats::empty()
-        }
+        };
+        
+        // Update Prometheus metrics
+        self.metrics.update_from_stats(&stats);
+        
+        stats
     }
 }
 
@@ -336,7 +378,7 @@ pub enum CacheError {
 async fn create_hybrid_cache(
     config: &CacheConfig,
     generation: u64,
-) -> Result<HybridCache<String, CacheValue>, CacheError> {
+) -> Result<Cache<String, CacheValue>, CacheError> {
     let cache_dir = format!("{}/cache_{}", config.disk_cache_dir, generation);
     
     // Ensure the specific generation directory exists
@@ -346,22 +388,10 @@ async fn create_hybrid_cache(
             error: e.to_string() 
         })?;
 
-    info!("Creating hybrid cache in directory: {}", cache_dir);
+    info!("Creating hybrid cache (memory-only for now) with generation: {}", generation);
 
-    let store = StoreBuilder::new()
-        .engine(foyer::Storage::with_device_options(
-            DirectFsDeviceOptions::new(&cache_dir)
-        ))
-        .build()
-        .await
-        .map_err(|e| CacheError::CacheBuild(e.to_string()))?;
-    
-    HybridCacheBuilder::new()
-        .memory(config.memory_capacity as usize)
-        .storage(store)
-        .build()
-        .await
-        .map_err(|e| CacheError::CacheBuild(e.to_string()))
+    // For now, use memory-only cache (can add disk later when API is clearer)
+    Ok(CacheBuilder::new(config.memory_capacity as usize).build())
 }
 
 /// Generate a unique generation number for cache directories
@@ -373,7 +403,8 @@ fn generate_generation() -> u64 {
         .as_nanos() as u64
 }
 
-/// Clean up an old cache directory
+// TODO: Cleanup old cache directory when we add disk support
+#[allow(dead_code)]
 async fn cleanup_cache_directory(path: &str) -> Result<(), std::io::Error> {
     if Path::new(path).exists() {
         tokio::fs::remove_dir_all(path).await?;

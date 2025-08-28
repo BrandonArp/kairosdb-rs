@@ -826,7 +826,7 @@ impl CassandraClient for MultiWorkerCassandraClient {
 }
 
 impl MultiWorkerCassandraClient {
-    async fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
+    async fn get_stats_internal(&self, _include_ones_count: bool) -> CassandraStats {
         let cache_stats = self
             .shared_cache_manager
             .get_stats()
@@ -883,6 +883,8 @@ impl MultiWorkerCassandraClient {
             cache_total_memory_usage: cache_stats.total_memory_usage(),
             cache_primary_disk_usage: cache_stats.primary_disk_usage,
             cache_secondary_disk_usage: cache_stats.secondary_disk_usage,
+            cache_primary_hit_ratio: cache_stats.primary_hit_ratio,
+            cache_secondary_hit_ratio: cache_stats.secondary_hit_ratio,
 
             // Detailed operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),
