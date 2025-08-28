@@ -9,6 +9,14 @@ use tower::ServiceBuilder;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 
+// Use jemalloc as the global allocator when the feature is enabled
+#[cfg(feature = "jemalloc")]
+use jemallocator::Jemalloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 // Import the new datastore abstraction
 use kairosdb_core::datastore::{cassandra_legacy::CassandraLegacyStore, TimeSeriesStore};
 

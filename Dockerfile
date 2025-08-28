@@ -9,7 +9,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
-    ca-certificates
+    ca-certificates \
+    make
 apt-get clean
 rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 EOF
@@ -23,10 +24,10 @@ COPY kairosdb-ingest ./kairosdb-ingest
 COPY kairosdb-query ./kairosdb-query
 COPY tests ./tests
 
-# Build both applications and strip the binaries
+# Build both applications with jemalloc and strip the binaries
 RUN <<EOF
-cargo build --release --package kairosdb-ingest --bin kairosdb-ingest
-cargo build --release --package kairosdb-query --bin kairosdb-query
+cargo build --release --package kairosdb-ingest --bin kairosdb-ingest --features jemalloc
+cargo build --release --package kairosdb-query --bin kairosdb-query --features jemalloc
 strip target/release/kairosdb-ingest
 strip target/release/kairosdb-query
 EOF

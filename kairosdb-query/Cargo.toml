@@ -1,14 +1,15 @@
 [package]
 name = "kairosdb-query"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "KairosDB query service - handles time series data queries"
-license = "Apache-2.0"
-repository = "https://github.com/example/kairosdb-rs"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.0", features = ["full"] }
+tokio = { workspace = true }
 
 # Web framework
 axum = { workspace = true }
@@ -16,19 +17,19 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Logging and tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 # Time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 
 # Validation
 validator = { workspace = true }
@@ -41,6 +42,15 @@ moka = { version = "0.12", features = ["future"] }
 
 # Core library
 kairosdb-core = { path = "../kairosdb-core" }
+
+# Memory allocator for better memory management
+jemallocator = { workspace = true, optional = true }
+
+[features]
+default = ["jemalloc"]
+
+# Enable jemalloc for better memory management
+jemalloc = ["jemallocator"]
 
 [dev-dependencies]
 tokio-test = "0.4"

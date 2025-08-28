@@ -91,6 +91,8 @@ pprof = { version = "0.15", features = ["flamegraph", "protobuf-codec"], optiona
 jemallocator = { workspace = true, optional = true }
 
 [features]
+default = ["jemalloc"]
+
 # Enable CPU profiling with pprof
 profiling = ["pprof"]
 
