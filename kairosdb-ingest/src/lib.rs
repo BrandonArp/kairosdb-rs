@@ -8,6 +8,7 @@ pub mod cache_manager;
 pub mod cache_metrics;
 pub mod cassandra;
 pub mod cassandra_client;
+pub mod cassandra_metrics;
 pub mod config;
 pub mod handlers;
 pub mod http_metrics;

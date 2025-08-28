@@ -32,6 +32,7 @@ use scylla::statement::Consistency;
 
 use crate::cache_manager::CacheManager;
 use crate::cassandra::{CassandraClient, CassandraStats};
+use crate::cassandra_metrics::{CassandraOperationMetrics, OperationTimer};
 use crate::config::{CacheConfig, CassandraConfig};
 
 /// Work item sent to worker tasks via MPMC channel
@@ -59,6 +60,7 @@ struct SharedCassandraResources {
     insert_row_key_time_index: PreparedStatement,
     insert_row_keys: PreparedStatement,
     insert_string_index: PreparedStatement,
+    metrics: Arc<CassandraOperationMetrics>,
 }
 
 /// Statistics for the multi-worker client
@@ -314,7 +316,12 @@ impl MultiWorkerCassandraClient {
             KairosError::cassandra(format!("Failed to prepare string index statement: {}", e))
         })?;
 
-        info!("All shared CQL statements prepared successfully");
+        // Initialize Cassandra operation metrics
+        let metrics = Arc::new(CassandraOperationMetrics::new().map_err(|e| {
+            KairosError::Internal(format!("Failed to initialize Cassandra metrics: {}", e))
+        })?);
+
+        info!("All shared CQL statements prepared successfully with metrics");
 
         Ok(SharedCassandraResources {
             session: session.clone(),
@@ -323,6 +330,7 @@ impl MultiWorkerCassandraClient {
             insert_row_key_time_index,
             insert_row_keys,
             insert_string_index,
+            metrics,
         })
     }
 
@@ -460,7 +468,8 @@ impl MultiWorkerCassandraClient {
             let column_key_bytes = column_name.to_bytes();
             let value_bytes = &cassandra_value.bytes;
 
-            // Write to data_points table
+            // Write to data_points table with timing
+            let datapoint_timer = OperationTimer::start();
             match resources
                 .session
                 .execute_unpaged(
@@ -470,12 +479,15 @@ impl MultiWorkerCassandraClient {
                 .await
             {
                 Ok(_) => {
+                    let duration = datapoint_timer.stop();
                     stats.total_queries.fetch_add(1, Ordering::Relaxed);
                     stats.datapoint_writes.fetch_add(1, Ordering::Relaxed);
+                    resources.metrics.record_datapoint_write(duration);
                 }
                 Err(e) => {
                     stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                     stats.datapoint_write_errors.fetch_add(1, Ordering::Relaxed);
+                    resources.metrics.record_datapoint_write_error();
                     return Err(KairosError::cassandra(format!(
                         "Failed to write data point: {}",
                         e
@@ -513,6 +525,10 @@ impl MultiWorkerCassandraClient {
         );
 
         let total_duration = internal_start.elapsed();
+        
+        // Record batch processing metrics
+        resources.metrics.record_batch_processed(total_duration, batch.points.len());
+        
         trace!(
             "Sequential worker batch completed successfully in {:?} total",
             total_duration
@@ -590,6 +606,9 @@ impl MultiWorkerCassandraClient {
                 let entry = StringIndexEntry::metric_name(metric_name);
                 Self::write_string_index_sequentially(resources, &entry, stats).await?;
                 indexes_written += 1;
+            } else {
+                // Cache hit - metric name index write was skipped
+                resources.metrics.record_cache_hit();
             }
         }
 
@@ -623,6 +642,7 @@ impl MultiWorkerCassandraClient {
                 let mtime = scylla::value::CqlTimeuuid::from_bytes(uuid.into_bytes());
                 let value: Option<String> = None;
 
+                let timer = OperationTimer::start();
                 match resources
                     .session
                     .execute_unpaged(
@@ -640,19 +660,26 @@ impl MultiWorkerCassandraClient {
                     .await
                 {
                     Ok(_) => {
+                        let duration = timer.stop();
                         stats.total_queries.fetch_add(1, Ordering::Relaxed);
                         stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                        resources.metrics.record_row_keys_index_write(duration);
+                        resources.metrics.record_cache_miss(); // We wrote because cache said to
                         indexes_written += 1;
                     }
                     Err(e) => {
                         stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                         stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                        resources.metrics.record_row_keys_index_write_error();
                         return Err(KairosError::cassandra(format!(
                             "Failed to write row_keys: {}",
                             e
                         )));
                     }
                 }
+            } else {
+                // Cache hit - index write was skipped
+                resources.metrics.record_cache_hit();
             }
         }
 
@@ -694,6 +721,7 @@ impl MultiWorkerCassandraClient {
         let column_name = entry.index_column();
         let value_bytes = vec![0u8]; // Empty value for string index
 
+        let timer = OperationTimer::start();
         match resources
             .session
             .execute_unpaged(
@@ -703,13 +731,18 @@ impl MultiWorkerCassandraClient {
             .await
         {
             Ok(_) => {
+                let duration = timer.stop();
                 stats.total_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                // Record as metric name index write (most common string index type)
+                resources.metrics.record_metric_name_index_write(duration);
+                resources.metrics.record_cache_miss(); // We wrote because cache said to
                 Ok(())
             }
             Err(e) => {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                resources.metrics.record_metric_name_index_write_error();
                 Err(KairosError::cassandra(format!(
                     "Failed to write string index: {}",
                     e
@@ -732,6 +765,7 @@ impl MultiWorkerCassandraClient {
         // Java KairosDB stores null in the value column - the presence of the row is what matters
         let value: Option<String> = None;
 
+        let timer = OperationTimer::start();
         match resources
             .session
             .execute_unpaged(
@@ -741,13 +775,16 @@ impl MultiWorkerCassandraClient {
             .await
         {
             Ok(_) => {
+                let duration = timer.stop();
                 stats.total_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_writes.fetch_add(1, Ordering::Relaxed);
+                resources.metrics.record_row_key_time_index_write(duration);
                 Ok(())
             }
             Err(e) => {
                 stats.failed_queries.fetch_add(1, Ordering::Relaxed);
                 stats.index_write_errors.fetch_add(1, Ordering::Relaxed);
+                resources.metrics.record_row_key_time_index_write_error();
                 Err(KairosError::cassandra(format!(
                     "Failed to write row_key_time_index: {}",
                     e
