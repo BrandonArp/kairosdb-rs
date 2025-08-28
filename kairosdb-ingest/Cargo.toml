@@ -73,8 +73,8 @@ sysinfo = "0.37"
 # Hex encoding for binary data
 hex = "0.4"
 
-# Bloom filter for index deduplication
-probabilistic-collections = "0.7"
+# Hybrid cache for index deduplication
+foyer = { workspace = true }
 
 # Persistent queue storage with LZ4 compression for space efficiency
 fjall = { version = "2.11", features = ["lz4"] }

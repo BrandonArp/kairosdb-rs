@@ -4,7 +4,7 @@
 //! including JSON parsing, data ingestion, and HTTP handlers.
 
 // Core modules
-pub mod bloom_manager;
+pub mod cache_manager;
 pub mod cassandra;
 pub mod cassandra_client;
 pub mod config;

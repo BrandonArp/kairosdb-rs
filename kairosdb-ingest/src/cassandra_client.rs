@@ -30,9 +30,9 @@ use scylla::client::PoolSize;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::statement::Consistency;
 
-use crate::bloom_manager::BloomManager;
+use crate::cache_manager::CacheManager;
 use crate::cassandra::{CassandraClient, CassandraStats};
-use crate::config::CassandraConfig;
+use crate::config::{CacheConfig, CassandraConfig};
 
 /// Work item sent to worker tasks via MPMC channel
 #[derive(Debug)]
@@ -93,7 +93,7 @@ pub struct MultiWorkerCassandraClient {
     response_rx: Receiver<WorkResponse>, // For backward compatibility with write_batch
     stats: Arc<MultiWorkerStats>,
     shared_resources: SharedCassandraResources, // Keep for schema operations
-    shared_bloom_manager: Arc<BloomManager>,    // Shared across all workers
+    shared_cache_manager: Arc<CacheManager>,    // Shared across all workers
     _worker_handles: Vec<tokio::task::JoinHandle<()>>, // Keep handles alive
 }
 
@@ -101,6 +101,7 @@ impl MultiWorkerCassandraClient {
     /// Create a new multi-worker Cassandra client with external channels
     pub async fn new_with_channels(
         config: CassandraConfig,
+        cache_config: CacheConfig,
         num_workers: Option<usize>,
         work_tx: Sender<WorkItem>,
         work_rx: Receiver<WorkItem>,
@@ -131,8 +132,12 @@ impl MultiWorkerCassandraClient {
         // Create shared stats
         let stats = Arc::new(MultiWorkerStats::default());
 
-        // Create shared bloom manager for all workers
-        let shared_bloom_manager = Arc::new(BloomManager::new());
+        // Create shared cache manager for all workers
+        let shared_cache_manager = Arc::new(
+            CacheManager::with_config(cache_config)
+                .await
+                .map_err(|e| KairosError::Internal(format!("Failed to create cache manager: {}", e)))?
+        );
 
         // Spawn worker tasks
         let mut worker_handles = Vec::with_capacity(num_workers);
@@ -143,7 +148,7 @@ impl MultiWorkerCassandraClient {
                 response_tx.clone(),
                 shared_resources.clone(),
                 stats.clone(),
-                shared_bloom_manager.clone(),
+                shared_cache_manager.clone(),
                 shutdown_token.clone(),
             );
             worker_handles.push(worker_handle);
@@ -163,7 +168,7 @@ impl MultiWorkerCassandraClient {
             response_rx,
             stats,
             shared_resources: shared_resources.clone(),
-            shared_bloom_manager,
+            shared_cache_manager,
             _worker_handles: worker_handles,
         })
     }
@@ -200,7 +205,7 @@ impl MultiWorkerCassandraClient {
     }
 
     /// Create a new multi-worker Cassandra client (creates its own channels)
-    pub async fn new(config: CassandraConfig, num_workers: Option<usize>) -> KairosResult<Self> {
+    pub async fn new(config: CassandraConfig, cache_config: CacheConfig, num_workers: Option<usize>) -> KairosResult<Self> {
         // Create MPMC channels for work distribution and responses
         let (work_tx, work_rx) = flume::unbounded::<WorkItem>();
         let (response_tx, response_rx) = flume::unbounded::<WorkResponse>();
@@ -208,6 +213,7 @@ impl MultiWorkerCassandraClient {
         let shutdown_token = CancellationToken::new();
         Self::new_with_channels(
             config,
+            cache_config,
             num_workers,
             work_tx,
             work_rx,
@@ -327,7 +333,7 @@ impl MultiWorkerCassandraClient {
         response_tx: Sender<WorkResponse>,
         shared_resources: SharedCassandraResources,
         stats: Arc<MultiWorkerStats>,
-        shared_bloom_manager: Arc<BloomManager>,
+        shared_cache_manager: Arc<CacheManager>,
         shutdown_token: tokio_util::sync::CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -360,7 +366,7 @@ impl MultiWorkerCassandraClient {
                 let result = Self::process_batch_sequentially(
                     &shared_resources,
                     &work_item.batch,
-                    &shared_bloom_manager,
+                    &shared_cache_manager,
                     &stats,
                 )
                 .await;
@@ -425,7 +431,7 @@ impl MultiWorkerCassandraClient {
     async fn process_batch_sequentially(
         resources: &SharedCassandraResources,
         batch: &DataPointBatch,
-        bloom_manager: &Arc<BloomManager>,
+        cache_manager: &Arc<CacheManager>,
         stats: &Arc<MultiWorkerStats>,
     ) -> KairosResult<()> {
         if batch.points.is_empty() {
@@ -494,7 +500,7 @@ impl MultiWorkerCassandraClient {
         // Write indexes sequentially with bloom filter deduplication
         let indexes_start = std::time::Instant::now();
         let index_count =
-            Self::write_indexes_sequentially(resources, batch, bloom_manager, stats).await?;
+            Self::write_indexes_sequentially(resources, batch, cache_manager, stats).await?;
         let indexes_duration = indexes_start.elapsed();
 
         stats
@@ -514,11 +520,11 @@ impl MultiWorkerCassandraClient {
         Ok(())
     }
 
-    /// Write indexes sequentially with bloom filter deduplication
+    /// Write indexes sequentially with cache deduplication
     async fn write_indexes_sequentially(
         resources: &SharedCassandraResources,
         batch: &DataPointBatch,
-        bloom_manager: &Arc<BloomManager>,
+        cache_manager: &Arc<CacheManager>,
         stats: &Arc<MultiWorkerStats>,
     ) -> KairosResult<u64> {
         let mut metric_names = HashSet::new();
@@ -577,21 +583,21 @@ impl MultiWorkerCassandraClient {
 
         let mut indexes_written = 0u64;
 
-        // Write metric name indexes (with bloom filter deduplication)
+        // Write metric name indexes (with cache deduplication)
         for metric_name in metric_names {
-            let bloom_key = format!("metric_name:{}", metric_name);
-            if bloom_manager.should_write_index(&bloom_key) {
+            let cache_key = format!("metric_name:{}", metric_name);
+            if cache_manager.should_write_index(&cache_key).await {
                 let entry = StringIndexEntry::metric_name(metric_name);
                 Self::write_string_index_sequentially(resources, &entry, stats).await?;
                 indexes_written += 1;
             }
         }
 
-        // Write row_keys entries (with bloom filter deduplication)
+        // Write row_keys entries (with cache deduplication)
         for (unique_key, data_point) in &row_keys_entries {
-            // Use the unique key for bloom filtering
-            let bloom_key = format!("row_keys:{}", unique_key);
-            if bloom_manager.should_write_index(&bloom_key) {
+            // Use the unique key for cache filtering
+            let cache_key = format!("row_keys:{}", unique_key);
+            if cache_manager.should_write_index(&cache_key).await {
                 let row_key = RowKey::from_data_point(data_point);
                 let metric_name = data_point.metric.as_str();
                 let table_name = "data_points";
@@ -804,12 +810,12 @@ impl CassandraClient for MultiWorkerCassandraClient {
         Ok(active_workers > 0 && !self.work_tx.is_disconnected())
     }
 
-    fn get_stats(&self) -> CassandraStats {
-        self.get_stats_internal(false)
+    async fn get_stats(&self) -> CassandraStats {
+        self.get_stats_internal(false).await
     }
 
-    fn get_detailed_stats(&self) -> CassandraStats {
-        self.get_stats_internal(true)
+    async fn get_detailed_stats(&self) -> CassandraStats {
+        self.get_stats_internal(true).await
     }
 
     async fn ensure_schema(&self) -> KairosResult<()> {
@@ -820,10 +826,11 @@ impl CassandraClient for MultiWorkerCassandraClient {
 }
 
 impl MultiWorkerCassandraClient {
-    fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
-        let bloom_stats = self
-            .shared_bloom_manager
-            .get_stats_with_options(include_ones_count);
+    async fn get_stats_internal(&self, include_ones_count: bool) -> CassandraStats {
+        let cache_stats = self
+            .shared_cache_manager
+            .get_stats()
+            .await;
 
         // Calculate averages
         let datapoint_writes = self.stats.datapoint_writes.load(Ordering::Relaxed);
@@ -867,15 +874,15 @@ impl MultiWorkerCassandraClient {
                 0.0
             },
             connection_errors: self.stats.connection_errors.load(Ordering::Relaxed),
-            bloom_filter_in_overlap_period: bloom_stats.in_overlap_period,
-            bloom_filter_primary_age_seconds: bloom_stats.primary_age_seconds,
-            bloom_filter_expected_items: bloom_stats.expected_items,
-            bloom_filter_false_positive_rate: bloom_stats.false_positive_rate,
-            bloom_filter_primary_memory_bytes: bloom_stats.primary_memory_bytes,
-            bloom_filter_secondary_memory_bytes: bloom_stats.secondary_memory_bytes,
-            bloom_filter_total_memory_bytes: bloom_stats.total_memory_bytes,
-            bloom_filter_primary_ones_count: bloom_stats.primary_ones_count,
-            bloom_filter_secondary_ones_count: bloom_stats.secondary_ones_count,
+            cache_in_overlap_period: cache_stats.in_overlap_period,
+            cache_primary_age_seconds: cache_stats.primary_age_seconds,
+            cache_memory_capacity: cache_stats.memory_capacity,
+            cache_disk_capacity: cache_stats.disk_capacity,
+            cache_primary_memory_usage: cache_stats.primary_memory_usage,
+            cache_secondary_memory_usage: cache_stats.secondary_memory_usage,
+            cache_total_memory_usage: cache_stats.total_memory_usage(),
+            cache_primary_disk_usage: cache_stats.primary_disk_usage,
+            cache_secondary_disk_usage: cache_stats.secondary_disk_usage,
 
             // Detailed operation metrics
             datapoint_writes: self.stats.datapoint_writes.load(Ordering::Relaxed),

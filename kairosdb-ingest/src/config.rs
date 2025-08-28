@@ -35,6 +35,9 @@ pub struct IngestConfig {
 
     /// Health check configuration
     pub health: HealthConfig,
+
+    /// Cache configuration for index deduplication
+    pub cache: CacheConfig,
 }
 
 /// Cassandra connection configuration
@@ -176,6 +179,25 @@ pub struct HealthConfig {
     pub load_balancer_detection_delay_seconds: u64,
 }
 
+/// Cache configuration for index deduplication
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Memory cache capacity in bytes
+    pub memory_capacity: u64,
+
+    /// Disk cache capacity in bytes  
+    pub disk_capacity: u64,
+
+    /// Directory for disk cache storage
+    pub disk_cache_dir: String,
+
+    /// Cache rotation interval in seconds
+    pub rotation_interval_seconds: u64,
+
+    /// Overlap period where both caches are active in seconds
+    pub overlap_period_seconds: u64,
+}
+
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +207,7 @@ impl Default for IngestConfig {
             metrics: MetricsConfig::default(),
             performance: PerformanceConfig::default(),
             health: HealthConfig::default(),
+            cache: CacheConfig::default(),
         }
     }
 }
@@ -259,6 +282,18 @@ impl Default for HealthConfig {
             check_timeout_ms: 5000,
             cassandra_health_query: "SELECT now() FROM system.local".to_string(),
             load_balancer_detection_delay_seconds: 3, // Default 3 seconds for load balancer detection
+        }
+    }
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            memory_capacity: 128 * 1024 * 1024,      // 128MB in memory
+            disk_capacity: 1024 * 1024 * 1024,       // 1GB on disk
+            disk_cache_dir: "cache/index".to_string(),
+            rotation_interval_seconds: 30 * 60,      // 30 minutes
+            overlap_period_seconds: 10 * 60,         // 10 minutes
         }
     }
 }
@@ -365,6 +400,31 @@ impl IngestConfig {
             config.health.health_path = health_path;
         }
 
+        if let Ok(delay) = env::var("KAIROSDB_HEALTH_LOAD_BALANCER_DETECTION_DELAY_SECONDS") {
+            config.health.load_balancer_detection_delay_seconds = delay.parse()?;
+        }
+
+        // Cache configuration
+        if let Ok(memory_capacity) = env::var("KAIROSDB_CACHE_MEMORY_CAPACITY") {
+            config.cache.memory_capacity = memory_capacity.parse()?;
+        }
+
+        if let Ok(disk_capacity) = env::var("KAIROSDB_CACHE_DISK_CAPACITY") {
+            config.cache.disk_capacity = disk_capacity.parse()?;
+        }
+
+        if let Ok(cache_dir) = env::var("KAIROSDB_CACHE_DISK_DIR") {
+            config.cache.disk_cache_dir = cache_dir;
+        }
+
+        if let Ok(rotation_interval) = env::var("KAIROSDB_CACHE_ROTATION_INTERVAL_SECONDS") {
+            config.cache.rotation_interval_seconds = rotation_interval.parse()?;
+        }
+
+        if let Ok(overlap_period) = env::var("KAIROSDB_CACHE_OVERLAP_PERIOD_SECONDS") {
+            config.cache.overlap_period_seconds = overlap_period.parse()?;
+        }
+
         // Validate the loaded configuration
         config.validate()?;
 
@@ -414,6 +474,32 @@ impl IngestConfig {
 
         if self.performance.request_timeout_ms == 0 {
             return Err(anyhow::anyhow!("Request timeout must be greater than 0"));
+        }
+
+        if self.cache.memory_capacity == 0 {
+            return Err(anyhow::anyhow!("Cache memory capacity must be greater than 0"));
+        }
+
+        if self.cache.disk_capacity == 0 {
+            return Err(anyhow::anyhow!("Cache disk capacity must be greater than 0"));
+        }
+
+        if self.cache.disk_cache_dir.is_empty() {
+            return Err(anyhow::anyhow!("Cache disk directory cannot be empty"));
+        }
+
+        if self.cache.rotation_interval_seconds == 0 {
+            return Err(anyhow::anyhow!("Cache rotation interval must be greater than 0"));
+        }
+
+        if self.cache.overlap_period_seconds == 0 {
+            return Err(anyhow::anyhow!("Cache overlap period must be greater than 0"));
+        }
+
+        if self.cache.overlap_period_seconds >= self.cache.rotation_interval_seconds {
+            return Err(anyhow::anyhow!(
+                "Cache overlap period must be less than rotation interval"
+            ));
         }
 
         Ok(())
@@ -467,5 +553,15 @@ impl IngestConfig {
     /// Get the maximum memory usage in bytes
     pub fn max_memory_bytes(&self) -> usize {
         self.performance.max_memory_mb * 1024 * 1024
+    }
+
+    /// Get the cache rotation interval as a Duration
+    pub fn cache_rotation_interval(&self) -> Duration {
+        Duration::from_secs(self.cache.rotation_interval_seconds)
+    }
+
+    /// Get the cache overlap period as a Duration
+    pub fn cache_overlap_period(&self) -> Duration {
+        Duration::from_secs(self.cache.overlap_period_seconds)
     }
 }

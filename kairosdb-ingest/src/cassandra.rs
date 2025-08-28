@@ -15,15 +15,15 @@ pub struct CassandraStats {
     pub total_datapoints_written: u64,
     pub avg_batch_size: f64,
     pub connection_errors: u64,
-    pub bloom_filter_in_overlap_period: bool,
-    pub bloom_filter_primary_age_seconds: u64,
-    pub bloom_filter_expected_items: u64,
-    pub bloom_filter_false_positive_rate: f64,
-    pub bloom_filter_primary_memory_bytes: u64,
-    pub bloom_filter_secondary_memory_bytes: Option<u64>,
-    pub bloom_filter_total_memory_bytes: u64,
-    pub bloom_filter_primary_ones_count: Option<u64>,
-    pub bloom_filter_secondary_ones_count: Option<u64>,
+    pub cache_in_overlap_period: bool,
+    pub cache_primary_age_seconds: u64,
+    pub cache_memory_capacity: u64,
+    pub cache_disk_capacity: u64,
+    pub cache_primary_memory_usage: u64,
+    pub cache_secondary_memory_usage: Option<u64>,
+    pub cache_total_memory_usage: u64,
+    pub cache_primary_disk_usage: u64,
+    pub cache_secondary_disk_usage: Option<u64>,
 
     // Detailed Cassandra operation metrics
     pub datapoint_writes: u64,
@@ -54,10 +54,10 @@ pub trait CassandraClient: Send + Sync {
     async fn health_check(&self) -> KairosResult<bool>;
 
     /// Get client statistics
-    fn get_stats(&self) -> CassandraStats;
+    async fn get_stats(&self) -> CassandraStats;
 
     /// Get detailed client statistics with expensive calculations (for health checks)
-    fn get_detailed_stats(&self) -> CassandraStats;
+    async fn get_detailed_stats(&self) -> CassandraStats;
 
     /// Initialize/verify the KairosDB schema
     async fn ensure_schema(&self) -> KairosResult<()>;

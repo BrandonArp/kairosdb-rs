@@ -197,11 +197,11 @@ impl CassandraClient for MockCassandraClient {
         Ok(true)
     }
 
-    fn get_stats(&self) -> CassandraStats {
-        self.get_detailed_stats() // Mock client doesn't differentiate
+    async fn get_stats(&self) -> CassandraStats {
+        self.get_detailed_stats().await // Mock client doesn't differentiate
     }
 
-    fn get_detailed_stats(&self) -> CassandraStats {
+    async fn get_detailed_stats(&self) -> CassandraStats {
         let total_queries = self.stats.total_queries.load(Ordering::Relaxed);
         let total_datapoints = self.stats.total_datapoints.load(Ordering::Relaxed);
 

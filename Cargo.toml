@@ -82,6 +82,9 @@ url = "2.4"
 # Memory allocator
 jemallocator = "0.5"
 
+# Hybrid cache (in-memory + disk) for index deduplication
+foyer = "0.14"
+
 [profile.release]
 lto = true
 codegen-units = 1

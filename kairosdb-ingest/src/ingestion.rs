@@ -214,6 +214,7 @@ impl IngestionService {
 
             let cassandra_client = MultiWorkerCassandraClient::new_with_channels(
                 config.cassandra.clone(),
+                config.cache.clone(),
                 num_workers,
                 work_tx.clone(),
                 work_rx,
