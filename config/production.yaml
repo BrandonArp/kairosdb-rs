@@ -55,3 +55,22 @@ metrics:
   collection_interval_seconds: 30 # More frequent collection
   enable_memory_metrics: true
   enable_per_metric_rates: true   # Enable for production insights
+
+# OpenTelemetry configuration
+opentelemetry:
+  # OTLP endpoint for sending metrics (leave empty to disable OTLP export)
+  # Example: "http://otel-collector.monitoring:4317"
+  otlp_endpoint: ""
+  
+  # Export interval in seconds
+  export_interval_seconds: 30
+  
+  # Enable Prometheus exporter for scraping compatibility
+  enable_prometheus_exporter: true
+  
+  # Use exponential histograms (better resolution, automatic buckets)
+  use_exponential_histograms: true
+  
+  # Resource attributes
+  service_name: "kairosdb-ingest"
+  deployment_environment: "production"

@@ -18,6 +18,7 @@ pub mod memory_queue;
 pub mod metrics;
 pub mod mock_client;
 pub mod null_queue;
+pub mod otel_metrics;
 pub mod persistent_queue;
 pub mod queue_trait;
 pub mod shutdown;
@@ -34,6 +35,7 @@ pub struct AppState {
     pub ingestion_service: std::sync::Arc<IngestionService>,
     pub config: std::sync::Arc<IngestConfig>,
     pub http_metrics: std::sync::Arc<crate::http_metrics::HttpMetrics>,
+    pub otel_metrics: std::sync::Arc<crate::otel_metrics::OtelMetrics>,
     pub shutdown_manager: std::sync::Arc<ShutdownManager>,
 }
 

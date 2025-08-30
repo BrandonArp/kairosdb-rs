@@ -330,13 +330,80 @@ hist1.merge(&hist2)?;
 ```
 
 ### Monitoring
-Expose Prometheus metrics for all operations. Include counters, histograms for timing, and gauge metrics for system state.
 
-**Key Metrics Available**:
+KairosDB-rs now uses **OpenTelemetry** for comprehensive metrics collection, providing both real-time push capabilities and Prometheus scraping compatibility.
+
+#### OpenTelemetry Metrics Setup
+
+The service supports dual metrics export:
+- **OTLP Export**: Real-time delta metrics pushed to OpenTelemetry collectors
+- **Prometheus Export**: Traditional scraping endpoint for Prometheus compatibility
+
+#### Key Metrics Available:
 - **Queue Metrics**: Current size, enqueue/dequeue rates, processing latency
-- **Disk Usage**: Queue storage consumption (updated after GC sweeps every 30 seconds)
-- **Processing Metrics**: Batch sizes, success/failure rates, throughput
+- **HTTP Metrics**: Request counts, response times, error rates by endpoint
+- **Ingestion Metrics**: Datapoints/second, batch sizes, validation errors
+- **Cassandra Metrics**: Write latencies, retry counts, error rates
+- **Cache Metrics**: Hit/miss ratios, evictions, memory usage
 - **System Metrics**: Memory usage, processing times, error counts
+
+#### Configuration
+
+Environment variables for OpenTelemetry:
+```bash
+# OTLP endpoint for real-time metrics (optional)
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317"
+
+# Export interval for OTLP metrics (default: 10 seconds)
+export OTEL_METRIC_EXPORT_INTERVAL="10"
+
+# Use exponential histograms (default: true)
+export OTEL_USE_EXPONENTIAL_HISTOGRAMS="true"
+
+# Deployment environment tag
+export DEPLOYMENT_ENV="production"
+```
+
+YAML configuration options:
+```yaml
+# OpenTelemetry configuration
+opentelemetry:
+  # OTLP endpoint for sending metrics (leave empty to disable OTLP export)
+  otlp_endpoint: "http://otel-collector:4317"
+  
+  # Export interval in seconds
+  export_interval_seconds: 10
+  
+  # Enable Prometheus exporter for scraping compatibility
+  enable_prometheus_exporter: true
+  
+  # Use exponential histograms (better resolution, automatic buckets)
+  use_exponential_histograms: true
+  
+  # Resource attributes
+  service_name: "kairosdb-ingest"
+  deployment_environment: "production"
+```
+
+#### Metrics Endpoints:
+- `GET /metrics` - Prometheus format metrics (OpenTelemetry exported)
+- `GET /health` - Health check with monitoring details
+
+#### Observability Features:
+- **Delta Temporality**: OTLP export sends delta/incremental values for counters and histograms
+- **Exponential Histograms**: Automatic bucket management with better resolution than fixed buckets
+- **Real-time Metrics**: OTLP export pushes metrics every 10-30 seconds
+- **Prometheus Compatibility**: `/metrics` endpoint works with existing Prometheus scrapers
+- **Rich Metadata**: Service name, version, environment tags included
+- **HTTP Request Tracking**: Automatic instrumentation of all HTTP endpoints
+- **Error Categorization**: 4xx vs 5xx errors, validation vs system errors
+
+#### Delta vs Cumulative Metrics:
+- **Counters** (e.g., requests_total, errors_total): Use **Delta** temporality - send increments only
+- **Histograms** (e.g., request_duration, processing_time): Use **Delta** temporality - send bucket deltas
+- **Gauges** (e.g., active_requests, queue_size): Use **Cumulative** temporality - send absolute values
+
+This means OTLP receivers get only the incremental changes, not cumulative totals, enabling efficient real-time monitoring.
 
 **Disk Usage Tracking**: Queue disk usage metrics are automatically updated after garbage collection sweeps to provide accurate storage consumption data for monitoring and capacity planning.
 

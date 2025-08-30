@@ -12,7 +12,6 @@ use axum::{
 };
 use flate2::read::GzDecoder;
 use kairosdb_core::error::KairosError;
-use prometheus::TextEncoder;
 use serde_json::json;
 use std::{io::Read, time::Instant};
 use tracing::{error, info, trace, warn};
@@ -127,28 +126,49 @@ pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse 
 /// Metrics endpoint (Prometheus format)
 pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     let _timer = state.http_metrics.start_request_timer("metrics");
-    let encoder = TextEncoder::new();
-    let metric_families = prometheus::gather();
+    let start_time = Instant::now();
 
-    match encoder.encode_to_string(&metric_families) {
+    // Use OpenTelemetry's Prometheus exporter
+    match state.otel_metrics.prometheus_metrics() {
         Ok(metrics_string) => {
+            let duration = start_time.elapsed().as_secs_f64();
+            let response_size = metrics_string.len();
+
             let mut headers = HeaderMap::new();
             headers.insert(
                 header::CONTENT_TYPE,
                 header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
             );
             state.http_metrics.record_status_code(StatusCode::OK);
+            state
+                .otel_metrics
+                .record_http_request("metrics", "GET", 200, duration);
+            state
+                .otel_metrics
+                .http_response_size
+                .record(response_size as u64, &[]);
             (StatusCode::OK, headers, metrics_string)
         }
         Err(e) => {
+            let duration = start_time.elapsed().as_secs_f64();
+            let error_message = format!("Failed to encode metrics: {}", e);
+            let response_size = error_message.len();
+
             error!("Failed to encode metrics: {}", e);
             state
                 .http_metrics
                 .record_status_code(StatusCode::INTERNAL_SERVER_ERROR);
+            state
+                .otel_metrics
+                .record_http_request("metrics", "GET", 500, duration);
+            state
+                .otel_metrics
+                .http_response_size
+                .record(response_size as u64, &[]);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 HeaderMap::new(),
-                format!("Failed to encode metrics: {}", e),
+                error_message,
             )
         }
     }
@@ -169,7 +189,16 @@ pub async fn ingest_handler(
 ) -> impl IntoResponse {
     // Start request timing and metrics
     let timer = state.http_metrics.start_request_timer("ingest");
+    let otel_guard = crate::otel_metrics::HttpRequestGuard::new(
+        state.otel_metrics.clone(),
+        "/api/v1/datapoints".to_string(),
+        "POST".to_string(),
+    );
     let request_size = body.len();
+    state
+        .otel_metrics
+        .http_request_size
+        .record(request_size as u64, &[]);
 
     trace!("Received ingestion request, size: {} bytes", request_size);
 
@@ -314,6 +343,20 @@ pub async fn ingest_handler(
             state.http_metrics.record_sizes(request_size, response_size);
             state.http_metrics.record_status_code(StatusCode::OK);
 
+            // Record OpenTelemetry metrics
+            state
+                .otel_metrics
+                .record_datapoints(batch_size as u64, "http");
+            // Convert processing_time from milliseconds to seconds for OpenTelemetry
+            state
+                .otel_metrics
+                .record_batch(batch_size as u64, queue_start.elapsed().as_secs_f64());
+            state
+                .otel_metrics
+                .http_response_size
+                .record(response_size as u64, &[]);
+            otel_guard.finish(200);
+
             (StatusCode::OK, response_json).into_response()
         }
         Err(e) => {
@@ -333,6 +376,15 @@ pub async fn ingest_handler(
                 .len();
             state.http_metrics.record_sizes(request_size, response_size);
             state.http_metrics.record_status_code(status_code);
+
+            // Record OpenTelemetry error metrics
+            state.otel_metrics.errors_counter.add(1, &[]);
+            state
+                .otel_metrics
+                .http_response_size
+                .record(response_size as u64, &[]);
+            otel_guard.finish(status_code.as_u16());
+
             (status_code, Json(error_response)).into_response()
         }
     }

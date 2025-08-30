@@ -61,8 +61,12 @@ url = { workspace = true }
 # Core library
 kairosdb-core = { path = "../kairosdb-core" }
 
-# Metrics collection (Prometheus)
-prometheus = "0.14"
+# OpenTelemetry for metrics
+opentelemetry = { version = "0.27", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["metrics", "grpc-tonic", "http-proto"] }
+opentelemetry-prometheus = "0.27"
+prometheus = "0.13.4"  # Match version used by opentelemetry-prometheus
 
 # Compression support
 flate2 = "1.0"

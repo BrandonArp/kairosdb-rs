@@ -61,6 +61,29 @@ async fn main() -> Result<()> {
     let http_metrics = Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new()?);
     info!("HTTP metrics initialized");
 
+    // Initialize OpenTelemetry metrics
+    let otel_config = kairosdb_ingest::otel_metrics::OtelMetricsConfig {
+        otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
+        export_interval: std::time::Duration::from_secs(
+            std::env::var("OTEL_METRIC_EXPORT_INTERVAL")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse()
+                .unwrap_or(10),
+        ),
+        service_name: "kairosdb-ingest".to_string(),
+        service_version: env!("CARGO_PKG_VERSION").to_string(),
+        resource_attributes: vec![(
+            "deployment.environment".to_string(),
+            std::env::var("DEPLOYMENT_ENV").unwrap_or_else(|_| "development".to_string()),
+        )],
+        enable_prometheus: true,
+        use_exponential_histograms: std::env::var("OTEL_USE_EXPONENTIAL_HISTOGRAMS")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(true), // Default to true for exponential histograms
+    };
+    let otel_metrics = kairosdb_ingest::otel_metrics::OtelMetrics::init(otel_config)?;
+    info!("OpenTelemetry metrics initialized");
+
     // Start background tasks that need coordinated shutdown
     let queue_processor_handle = ingestion_service
         .start_queue_processor(shutdown_manager.clone(), null_queue_work_channel)
@@ -78,6 +101,7 @@ async fn main() -> Result<()> {
         ingestion_service: Arc::new(ingestion_service),
         config: config.clone(),
         http_metrics,
+        otel_metrics: otel_metrics.clone(),
         shutdown_manager: shutdown_manager.clone(),
     };
 
@@ -170,6 +194,12 @@ async fn main() -> Result<()> {
     // The shutdown task runs the entire shutdown sequence which can take up to 2 minutes
     if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(130), shutdown_task).await {
         warn!("Shutdown task didn't complete within 130s: {:?}", e);
+    }
+
+    // Shutdown OpenTelemetry metrics provider
+    info!("Shutting down OpenTelemetry metrics");
+    if let Err(e) = otel_metrics.shutdown() {
+        warn!("Error shutting down OpenTelemetry metrics: {}", e);
     }
 
     info!("Graceful shutdown sequence completed successfully");

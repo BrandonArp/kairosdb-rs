@@ -32,6 +32,10 @@ async fn create_test_app_with_mock() -> axum::Router {
         ingestion_service: Arc::new(ingestion_service),
         config,
         http_metrics: Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new().unwrap()),
+        otel_metrics: kairosdb_ingest::otel_metrics::OtelMetrics::init(
+            kairosdb_ingest::otel_metrics::OtelMetricsConfig::default(),
+        )
+        .unwrap(),
         shutdown_manager,
     };
 
@@ -56,6 +60,10 @@ async fn create_test_app() -> axum::Router {
         ingestion_service: Arc::new(ingestion_service),
         config,
         http_metrics: Arc::new(kairosdb_ingest::http_metrics::HttpMetrics::new().unwrap()),
+        otel_metrics: kairosdb_ingest::otel_metrics::OtelMetrics::init(
+            kairosdb_ingest::otel_metrics::OtelMetricsConfig::default(),
+        )
+        .unwrap(),
         shutdown_manager,
     };
 
